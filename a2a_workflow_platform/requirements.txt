@@ -1,0 +1,9 @@
+Django==5.2.4
+djangorestframework==3.15.0
+drf-nested-routers==0.93.4
+requests==2.31.0
+python-dotenv==1.0.1
+cryptography==42.0.5
+daphne==4.1.0
+channels==4.0.0
+dj-database-url==2.1.0 

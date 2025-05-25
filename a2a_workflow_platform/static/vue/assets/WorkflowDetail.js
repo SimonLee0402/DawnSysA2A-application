@@ -1,0 +1,2 @@
+import{_ as t,a,b as s,l,h as n,j as r}from"./main.js";const c={name:"WorkflowDetail"},i={class:"workflow-detail"};function _(d,e,p,f,m,k){const o=n("el-alert");return r(),a("div",i,[e[0]||(e[0]=s("h1",null,"工作流详情",-1)),l(o,{title:"页面开发中",type:"info",description:"此页面正在开发中，敬请期待。","show-icon":"",closable:!1})])}const w=t(c,[["render",_],["__scopeId","data-v-d025aec3"]]);export{w as default};
+//# sourceMappingURL=WorkflowDetail.js.map

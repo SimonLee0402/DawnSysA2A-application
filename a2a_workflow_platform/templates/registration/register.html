@@ -1,0 +1,112 @@
+{% extends 'base.html' %}
+
+{% block title %}注册 - A2A工作流平台{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0">注册新账号</h4>
+            </div>
+            <div class="card-body">
+                <form method="post">
+                    {% csrf_token %}
+                    
+                    {% if form.errors %}
+                    <div class="alert alert-danger">
+                        <ul class="mb-0">
+                            {% for field in form %}
+                                {% for error in field.errors %}
+                                    <li>{{ field.label }}: {{ error }}</li>
+                                {% endfor %}
+                            {% endfor %}
+                            {% for error in form.non_field_errors %}
+                                <li>{{ error }}</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="id_username" class="form-label">用户名</label>
+                            <input type="text" name="username" id="id_username" class="form-control" required>
+                            <small class="form-text text-muted">必填。150个字符或者更少。包含字母，数字和仅有的@/./+/-/_符号。</small>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="id_email" class="form-label">电子邮件</label>
+                            <input type="email" name="email" id="id_email" class="form-control" required>
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="id_password1" class="form-label">密码</label>
+                            <input type="password" name="password1" id="id_password1" class="form-control" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="id_password2" class="form-label">确认密码</label>
+                            <input type="password" name="password2" id="id_password2" class="form-control" required>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="id_user_type" class="form-label">用户类型</label>
+                        <select name="user_type" id="id_user_type" class="form-select">
+                            <option value="enterprise">企业用户</option>
+                            <option value="streamer">网络主播</option>
+                        </select>
+                    </div>
+                    
+                    <div class="mb-3 enterprise-field">
+                        <label for="id_company_name" class="form-label">公司名称</label>
+                        <input type="text" name="company_name" id="id_company_name" class="form-control">
+                    </div>
+                    
+                    <div class="mb-3 streamer-field d-none">
+                        <label for="id_channel_name" class="form-label">频道名称</label>
+                        <input type="text" name="channel_name" id="id_channel_name" class="form-control">
+                    </div>
+                    
+                    <div class="mb-3 streamer-field d-none">
+                        <label for="id_platform" class="form-label">所属平台</label>
+                        <input type="text" name="platform" id="id_platform" class="form-control">
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-primary">注册</button>
+                    </div>
+                </form>
+                
+                <div class="mt-3 text-center">
+                    <p>已有账号？ <a href="{% url 'login' %}">立即登录</a></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% block extra_js %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const userTypeSelect = document.getElementById('id_user_type');
+        const enterpriseFields = document.querySelectorAll('.enterprise-field');
+        const streamerFields = document.querySelectorAll('.streamer-field');
+        
+        function toggleFields() {
+            if (userTypeSelect.value === 'enterprise') {
+                enterpriseFields.forEach(field => field.classList.remove('d-none'));
+                streamerFields.forEach(field => field.classList.add('d-none'));
+            } else if (userTypeSelect.value === 'streamer') {
+                enterpriseFields.forEach(field => field.classList.add('d-none'));
+                streamerFields.forEach(field => field.classList.remove('d-none'));
+            }
+        }
+        
+        userTypeSelect.addEventListener('change', toggleFields);
+        toggleFields(); // Initial state
+    });
+</script>
+{% endblock %}
+{% endblock %} 

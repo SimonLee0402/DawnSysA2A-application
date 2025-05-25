@@ -1,0 +1,33 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "启动Django后端",
+            "type": "shell",
+            "command": "cd ${workspaceFolder}/a2a_workflow_platform && python manage.py runserver",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "启动Vue前端",
+            "type": "shell",
+            "command": "cd ${workspaceFolder}/a2a_workflow_platform/frontend_src && npm run dev",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "启动完整平台",
+            "dependsOn": [
+                "启动Django后端",
+                "启动Vue前端"
+            ],
+            "problemMatcher": []
+        }
+    ]
+} 

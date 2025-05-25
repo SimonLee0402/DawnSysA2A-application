@@ -1,0 +1,112 @@
+/* 全局样式定义 - A2A平台统一UI风格 */
+
+/* 页面标题样式 */
+.app-page-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 0;
+  line-height: 1.4;
+}
+
+/* 卡片容器样式 */
+.app-card {
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.05);
+  margin-bottom: 20px;
+  background-color: #fff;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.app-card:hover {
+  box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
+}
+
+/* 卡片标题样式 */
+.app-card-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0 0 15px 0;
+}
+
+/* 表格内容区域样式 */
+.app-table-content {
+  width: 100%;
+  overflow-x: auto;
+}
+
+/* 空状态提示样式 */
+.app-empty-state {
+  padding: 30px;
+  text-align: center;
+  color: #909399;
+}
+
+.app-empty-state .el-icon {
+  font-size: 48px;
+  margin-bottom: 15px;
+  color: #c0c4cc;
+}
+
+.app-empty-state-message {
+  font-size: 14px;
+}
+
+/* 操作按钮组 */
+.app-action-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 响应式布局调整 */
+@media (max-width: 768px) {
+  .app-page-title {
+    font-size: 20px;
+  }
+  
+  .app-card {
+    padding: 15px;
+  }
+  
+  .app-action-buttons {
+    flex-direction: column;
+    gap: 5px;
+  }
+  
+  /* 表格在移动设备上的处理 */
+  .app-table-content .el-table {
+    width: 100%;
+    white-space: nowrap;
+  }
+  
+  /* 页面容器默认内边距 */
+  .app-container {
+    padding: 15px;
+  }
+}
+
+/* 高级视觉效果 */
+.app-card.with-hover-effect:hover {
+  transform: translateY(-2px);
+}
+
+/* Authentication Page Styles */
+.auth-page-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  background: linear-gradient(to bottom right, #f0f2f5, #e6e9ed); /* Common gradient */
+  padding: 20px; /* Add some padding for smaller screens */
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px; /* Max width for auth cards */
+  /* .app-card provides base styling like border-radius, box-shadow, padding, border */
+  /* No need to repeat them here if .auth-card is always used with .app-card */
+} 
