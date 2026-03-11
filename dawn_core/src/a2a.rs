@@ -238,10 +238,12 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
 
                 let wasm_bytes = tokio::fs::read(&skill.artifact_path)
                     .await
-                    .map_err(|error| anyhow::anyhow!(
-                        "failed to read skill artifact {}: {error}",
-                        skill.artifact_path
-                    ))?;
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to read skill artifact {}: {error}",
+                            skill.artifact_path
+                        )
+                    })?;
                 match sandbox::execute_skill(&state.engine, &wasm_bytes, &execution_function) {
                     Ok(msg) => {
                         state
@@ -252,7 +254,9 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
                                 None,
                             )
                             .await?;
-                        state.record_task_event(task_id, "skill_executed", &msg).await?;
+                        state
+                            .record_task_event(task_id, "skill_executed", &msg)
+                            .await?;
                         msg
                     }
                     Err(error) => {

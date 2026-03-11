@@ -216,6 +216,51 @@ async fn dashboard() -> Html<&'static str> {
       margin-top: 12px;
       flex-wrap: wrap;
     }
+    .console-form {
+      display: grid;
+      gap: 12px;
+    }
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    input, select, textarea {
+      width: 100%;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font: inherit;
+      padding: 12px 14px;
+    }
+    textarea {
+      min-height: 132px;
+      resize: vertical;
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .result-box {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      color: var(--muted);
+      line-height: 1.6;
+      min-height: 52px;
+    }
     button {
       border: 0;
       border-radius: 999px;
@@ -308,6 +353,44 @@ async fn dashboard() -> Html<&'static str> {
 
         <section class="panel">
           <div class="panel-head">
+            <h2>Node Command Console</h2>
+            <span class="tiny">Dispatch attested file, process, and discovery commands</span>
+          </div>
+          <div class="console-form">
+            <div class="field">
+              <label for="node-command-node">Target Node</label>
+              <select id="node-command-node"></select>
+            </div>
+            <div class="field">
+              <label for="node-command-type">Command Template</label>
+              <select id="node-command-type"></select>
+            </div>
+            <div class="field">
+              <label for="node-command-payload">Payload JSON</label>
+              <textarea id="node-command-payload"></textarea>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="dispatchNodeCommand()">Dispatch Command</button>
+              <button type="button" class="secondary" onclick="applyCommandTemplate(true)">Reset Payload</button>
+              <span class="tiny">`shell_exec` still follows approval and policy gates.</span>
+            </div>
+            <div class="result-box" id="command-status">Select a node and dispatch a command.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Recent Node Commands</h2>
+            <span class="tiny">Latest execution results for the selected node</span>
+          </div>
+          <table>
+            <thead><tr><th>Command</th><th>Status</th><th>Payload / Result</th></tr></thead>
+            <tbody id="command-rows"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
             <h2>Settlements</h2>
             <span class="tiny">Remote agent settlement activity</span>
           </div>
@@ -333,6 +416,16 @@ async fn dashboard() -> Html<&'static str> {
 
   <script>
     const fmt = (value) => value ?? "—";
+    const commandTemplates = {
+      agent_ping: {},
+      list_capabilities: {},
+      system_info: {},
+      process_snapshot: { limit: 20 },
+      list_directory: { path: ".", limit: 20 },
+      read_file_preview: { path: "./README.md", maxBytes: 512 },
+      stat_path: { path: "." },
+      shell_exec: { command: "echo dawn node" }
+    };
     const ellipsis = (value, max = 66) => {
       if (!value) return "—";
       return value.length > max ? `${value.slice(0, max)}…` : value;
@@ -360,6 +453,74 @@ async fn dashboard() -> Html<&'static str> {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`${url} -> ${response.status}`);
       return response.json();
+    }
+    function commandOptionsForNode(node) {
+      const capabilities = Array.isArray(node?.capabilities) ? node.capabilities : [];
+      return Object.keys(commandTemplates).filter((commandType) =>
+        capabilities.length === 0 ? commandType !== "shell_exec" : capabilities.includes(commandType)
+      );
+    }
+    function applyCommandTemplate(force = false) {
+      const commandSelect = document.getElementById("node-command-type");
+      const payloadInput = document.getElementById("node-command-payload");
+      if (!commandSelect || !payloadInput) return;
+      if (!force && payloadInput.dataset.dirty === "true") return;
+      const payload = commandTemplates[commandSelect.value] || {};
+      payloadInput.value = JSON.stringify(payload, null, 2);
+      payloadInput.dataset.dirty = "false";
+    }
+    function syncNodeCommandForm(nodes, selectedNodeId) {
+      const nodeSelect = document.getElementById("node-command-node");
+      const commandSelect = document.getElementById("node-command-type");
+      if (!nodeSelect || !commandSelect) return;
+
+      const nodeOptions = nodes.map((node) =>
+        `<option value="${node.nodeId}">${node.displayName || node.nodeId}</option>`
+      ).join("");
+      nodeSelect.innerHTML = nodeOptions || `<option value="">No nodes</option>`;
+      if (selectedNodeId && nodes.some((node) => node.nodeId === selectedNodeId)) {
+        nodeSelect.value = selectedNodeId;
+      }
+
+      const selectedNode = nodes.find((node) => node.nodeId === nodeSelect.value) || nodes[0];
+      const commandTypes = commandOptionsForNode(selectedNode);
+      const currentCommand = commandSelect.value;
+      commandSelect.innerHTML = commandTypes.map((commandType) =>
+        `<option value="${commandType}">${commandType}</option>`
+      ).join("") || `<option value="">No supported commands</option>`;
+      if (currentCommand && commandTypes.includes(currentCommand)) {
+        commandSelect.value = currentCommand;
+      }
+      applyCommandTemplate(false);
+    }
+    async function dispatchNodeCommand() {
+      const nodeId = document.getElementById("node-command-node")?.value;
+      const commandType = document.getElementById("node-command-type")?.value;
+      const payloadRaw = document.getElementById("node-command-payload")?.value || "{}";
+      if (!nodeId || !commandType) {
+        window.alert("Select a node and command type first.");
+        return;
+      }
+
+      let payload;
+      try {
+        payload = payloadRaw.trim() ? JSON.parse(payloadRaw) : {};
+      } catch (error) {
+        window.alert(`Invalid payload JSON: ${error.message}`);
+        return;
+      }
+
+      try {
+        const response = await postJson(`/api/gateway/control-plane/nodes/${encodeURIComponent(nodeId)}/commands`, {
+          commandType,
+          payload
+        });
+        document.getElementById("command-status").innerHTML =
+          `Queued <code>${response.command.commandType}</code> for <code>${response.command.nodeId}</code> with delivery <strong>${response.delivery}</strong>.`;
+        await refresh(nodeId);
+      } catch (error) {
+        document.getElementById("command-status").textContent = error.message;
+      }
     }
     async function decideApproval(approvalId, kind, decision) {
       try {
@@ -391,7 +552,7 @@ async fn dashboard() -> Html<&'static str> {
         window.alert(error.message);
       }
     }
-    async function refresh() {
+    async function refresh(preferredNodeId) {
       const [tasks, nodes, settlements, cards, ingress, approvals] = await Promise.all([
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
@@ -400,6 +561,14 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/ingress/events?limit=8"),
         fetchJson("/api/gateway/approvals?status=pending")
       ]);
+      const selectedNodeId =
+        preferredNodeId ||
+        document.getElementById("node-command-node")?.value ||
+        nodes[0]?.nodeId ||
+        "";
+      const commands = selectedNodeId
+        ? await fetchJson(`/api/gateway/control-plane/nodes/${encodeURIComponent(selectedNodeId)}/commands`)
+        : [];
 
       document.getElementById("stats").innerHTML = [
         ["Tasks", tasks.length],
@@ -445,6 +614,18 @@ async fn dashboard() -> Html<&'static str> {
           <td>${node.attestationVerified ? badge("trusted") : badge("unverified")}</td>
         </tr>`).join("");
 
+      syncNodeCommandForm(nodes, selectedNodeId);
+
+      document.getElementById("command-rows").innerHTML = commands.slice(0, 8).map((command) => `
+        <tr>
+          <td>
+            <strong>${command.commandType}</strong><br />
+            <code>${command.commandId}</code>
+          </td>
+          <td>${badge(command.status)}</td>
+          <td><code>${ellipsis(JSON.stringify(command.result || command.payload || {}), 96)}</code></td>
+        </tr>`).join("") || `<tr><td colspan="3" class="tiny">No commands for the selected node.</td></tr>`;
+
       document.getElementById("settlement-rows").innerHTML = settlements.slice(0, 8).map((settlement) => `
         <tr>
           <td>${ellipsis(settlement.cardId, 26)}</td>
@@ -459,6 +640,19 @@ async fn dashboard() -> Html<&'static str> {
           <td>${ellipsis((card.chatPlatforms || []).join(", "), 42)}</td>
         </tr>`).join("");
     }
+    document.addEventListener("input", (event) => {
+      if (event.target?.id === "node-command-payload") {
+        event.target.dataset.dirty = "true";
+      }
+    });
+    document.addEventListener("change", (event) => {
+      if (event.target?.id === "node-command-type") {
+        applyCommandTemplate(true);
+      }
+      if (event.target?.id === "node-command-node") {
+        refresh(event.target.value);
+      }
+    });
     refresh();
     setInterval(refresh, 5000);
   </script>

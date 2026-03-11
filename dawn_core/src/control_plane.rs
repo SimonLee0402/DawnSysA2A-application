@@ -139,7 +139,10 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/nodes/:node_id", get(get_node))
         .route("/nodes/:node_id/heartbeat", post(heartbeat))
-        .route("/nodes/:node_id/rollout", get(get_node_rollout).post(dispatch_rollout))
+        .route(
+            "/nodes/:node_id/rollout",
+            get(get_node_rollout).post(dispatch_rollout),
+        )
         .route(
             "/nodes/:node_id/commands",
             get(list_node_commands).post(dispatch_command),
@@ -772,7 +775,10 @@ async fn dispatch_current_rollout_if_needed(
         .await?
         .ok_or_else(|| anyhow::anyhow!("node not found: {node_id}"))?;
     if !node.attestation_verified {
-        anyhow::bail!("node '{}' is not attested; rollout dispatch is blocked", node.node_id);
+        anyhow::bail!(
+            "node '{}' is not attested; rollout dispatch is blocked",
+            node.node_id
+        );
     }
 
     let bundle = build_current_rollout_bundle(state).await?;
@@ -895,7 +901,9 @@ async fn process_rollout_ack(
     Ok(())
 }
 
-async fn build_current_rollout_bundle(state: &Arc<AppState>) -> anyhow::Result<GatewayRolloutBundle> {
+async fn build_current_rollout_bundle(
+    state: &Arc<AppState>,
+) -> anyhow::Result<GatewayRolloutBundle> {
     let policy_distribution = policy::current_distribution(state).await?;
     let skill_distribution = skill_registry::current_distribution(state).await?;
     let policy_document_hash = match &policy_distribution.profile.document_hash {
@@ -946,7 +954,10 @@ async fn resolve_command_approval(
     reason: Option<String>,
 ) -> anyhow::Result<()> {
     let Some(mut approval) = state
-        .get_pending_approval_by_reference(ApprovalRequestKind::NodeCommand, &command_id.to_string())
+        .get_pending_approval_by_reference(
+            ApprovalRequestKind::NodeCommand,
+            &command_id.to_string(),
+        )
         .await?
     else {
         return Ok(());
@@ -1007,8 +1018,8 @@ mod tests {
     use wasmtime::Engine;
 
     use super::{
-        approve_pending_node_command, dispatch_current_rollout_if_needed,
-        dispatch_gateway_command, process_rollout_ack,
+        approve_pending_node_command, dispatch_current_rollout_if_needed, dispatch_gateway_command,
+        process_rollout_ack,
     };
     use crate::{
         app_state::{AppState, ApprovalRequestStatus, NodeAttestationState, NodeRolloutStatus},
@@ -1017,7 +1028,10 @@ mod tests {
 
     fn temp_database_url() -> (String, PathBuf) {
         let mut path = std::env::temp_dir();
-        path.push(format!("dawn-core-control-plane-test-{}.db", Uuid::new_v4()));
+        path.push(format!(
+            "dawn-core-control-plane-test-{}.db",
+            Uuid::new_v4()
+        ));
         (format!("sqlite://{}", path.display()), path)
     }
 
@@ -1122,7 +1136,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(delivery, "awaiting_approval");
-        assert_eq!(command.status, crate::app_state::NodeCommandStatus::PendingApproval);
+        assert_eq!(
+            command.status,
+            crate::app_state::NodeCommandStatus::PendingApproval
+        );
 
         let approvals = state
             .list_approval_requests(Some(ApprovalRequestStatus::Pending))

@@ -939,9 +939,8 @@ impl AppState {
         limit: Option<u32>,
     ) -> anyhow::Result<Vec<ChatIngressEventRecord>> {
         let rows = match limit {
-            Some(limit) => {
-                sqlx::query_as::<_, ChatIngressEventRow>(
-                    r#"
+            Some(limit) => sqlx::query_as::<_, ChatIngressEventRow>(
+                r#"
                     SELECT
                         ingress_id,
                         platform,
@@ -961,15 +960,13 @@ impl AppState {
                     ORDER BY created_at_unix_ms DESC
                     LIMIT ?1
                     "#,
-                )
-                .bind(i64::from(limit))
-                .fetch_all(&self.pool)
-                .await
-                .context("failed to list recent chat ingress events")?
-            }
-            None => {
-                sqlx::query_as::<_, ChatIngressEventRow>(
-                    r#"
+            )
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list recent chat ingress events")?,
+            None => sqlx::query_as::<_, ChatIngressEventRow>(
+                r#"
                     SELECT
                         ingress_id,
                         platform,
@@ -988,11 +985,10 @@ impl AppState {
                     FROM chat_ingress_events
                     ORDER BY created_at_unix_ms DESC
                     "#,
-                )
-                .fetch_all(&self.pool)
-                .await
-                .context("failed to list chat ingress events")?
-            }
+            )
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list chat ingress events")?,
         };
 
         rows.into_iter().map(TryInto::try_into).collect()
@@ -1620,9 +1616,7 @@ impl AppState {
         .bind(issuer_did)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| {
-            format!("failed to fetch skill publisher trust root '{issuer_did}'")
-        })?;
+        .with_context(|| format!("failed to fetch skill publisher trust root '{issuer_did}'"))?;
 
         row.map(TryInto::try_into).transpose()
     }

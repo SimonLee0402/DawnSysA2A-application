@@ -95,7 +95,10 @@ async fn get_catalog(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<MarketplaceCatalog>, (StatusCode, Json<Value>)> {
-    build_catalog(&state, query).await.map(Json).map_err(internal_error)
+    build_catalog(&state, query)
+        .await
+        .map(Json)
+        .map_err(internal_error)
 }
 
 async fn install_skill(
@@ -306,10 +309,10 @@ async fn build_catalog(
         distribution
             .skills
             .into_iter()
-            .filter(|skill| !signed_only || (skill.signature_hex.is_some() && skill.issuer_did.is_some()))
             .filter(|skill| {
-                q.as_ref().is_none_or(|needle| matches_skill(skill, needle))
+                !signed_only || (skill.signature_hex.is_some() && skill.issuer_did.is_some())
             })
+            .filter(|skill| q.as_ref().is_none_or(|needle| matches_skill(skill, needle)))
             .map(|skill| skill_to_marketplace_entry(skill, public_base_url.as_deref()))
             .collect()
     };
@@ -413,18 +416,14 @@ fn matches_agent(card: &PublishedAgentCard, needle: &str) -> bool {
             .payment_roles
             .iter()
             .any(|role| role.to_ascii_lowercase().contains(needle))
-        || card
-            .card
-            .skills
-            .iter()
-            .any(|skill| {
-                skill.id.to_ascii_lowercase().contains(needle)
-                    || skill.name.to_ascii_lowercase().contains(needle)
-                    || skill
-                        .tags
-                        .iter()
-                        .any(|tag| tag.to_ascii_lowercase().contains(needle))
-            })
+        || card.card.skills.iter().any(|skill| {
+            skill.id.to_ascii_lowercase().contains(needle)
+                || skill.name.to_ascii_lowercase().contains(needle)
+                || skill
+                    .tags
+                    .iter()
+                    .any(|tag| tag.to_ascii_lowercase().contains(needle))
+        })
 }
 
 fn public_base_url() -> Option<String> {
@@ -464,7 +463,11 @@ mod tests {
         agent_cards::{AgentAuthentication, AgentCapabilities, AgentCard, PublishAgentCardRequest},
         app_state::AppState,
         sandbox,
-        skill_registry::{RegisterSignedSkillRequest, SignedSkillDocument, SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest, register_signed_skill_inner, upsert_skill_publisher_trust_root_inner},
+        skill_registry::{
+            RegisterSignedSkillRequest, SignedSkillDocument, SignedSkillEnvelope,
+            SkillPublisherTrustRootUpsertRequest, register_signed_skill_inner,
+            upsert_skill_publisher_trust_root_inner,
+        },
     };
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
@@ -511,7 +514,11 @@ mod tests {
             description: Some("Signed marketplace export".to_string()),
             entry_function: "run_skill".to_string(),
             capabilities: vec!["echo".to_string()],
-            artifact_sha256: hex::encode(Sha256::digest(base64::prelude::BASE64_STANDARD.decode(wasm_base64.as_bytes()).unwrap())),
+            artifact_sha256: hex::encode(Sha256::digest(
+                base64::prelude::BASE64_STANDARD
+                    .decode(wasm_base64.as_bytes())
+                    .unwrap(),
+            )),
             issuer_did,
             issued_at_unix_ms: 1_700_000_100_000,
         };

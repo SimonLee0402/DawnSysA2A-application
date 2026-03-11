@@ -3,10 +3,10 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod a2a;
-mod approval_center;
 mod agent_cards;
 mod ap2;
 mod app_state;
+mod approval_center;
 mod chat_ingress;
 mod connectors;
 mod control_center;
@@ -222,8 +222,9 @@ mod tests {
         .await?;
 
         let wasm_base64 = "AGFzbQEAAAABBAFgAAADAgEABw0BCXJ1bl9za2lsbAAACgQBAgAL";
-        let artifact_sha256 =
-            hex::encode(sha2::Sha256::digest(BASE64_STANDARD.decode(wasm_base64.as_bytes())?));
+        let artifact_sha256 = hex::encode(sha2::Sha256::digest(
+            BASE64_STANDARD.decode(wasm_base64.as_bytes())?,
+        ));
         let skill_document = skill_registry::SignedSkillDocument {
             skill_id: "echo-skill".to_string(),
             version: "1.0.0".to_string(),
@@ -537,14 +538,17 @@ mod tests {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing transactionId"))?
             .to_string();
-        let approvals = get_json(&client, &format!("{base_url}/api/gateway/approvals?status=pending"))
-            .await?;
+        let approvals = get_json(
+            &client,
+            &format!("{base_url}/api/gateway/approvals?status=pending"),
+        )
+        .await?;
         let approval = approvals
             .as_array()
             .and_then(|items| {
-                items.iter().find(|item| {
-                    item["kind"] == "payment" && item["referenceId"] == transaction_id
-                })
+                items
+                    .iter()
+                    .find(|item| item["kind"] == "payment" && item["referenceId"] == transaction_id)
             })
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("missing pending payment approval"))?;

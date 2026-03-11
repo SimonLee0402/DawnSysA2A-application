@@ -806,9 +806,7 @@ async fn get_quote_state(
             "quote state is only published for locally issued quotes",
         ));
     }
-    sign_quote_state(&record)
-        .map(Json)
-        .map_err(service_error)
+    sign_quote_state(&record).map(Json).map_err(service_error)
 }
 
 async fn revoke_quote(
@@ -1062,9 +1060,10 @@ pub async fn invoke_remote_agent_card(
         .as_ref()
         .and_then(extract_remote_task_status)
         .or(remote_status);
-        let settlement = match request.settlement {
+    let settlement = match request.settlement {
         Some(settlement) => {
-            let validated_quote = validate_remote_settlement_request(state, &card, &settlement).await?;
+            let validated_quote =
+                validate_remote_settlement_request(state, &card, &settlement).await?;
             if record.status != RemoteInvocationStatus::Completed {
                 anyhow::bail!(
                     "remote settlement requires a completed remote invocation; current status is {:?}",
@@ -1751,7 +1750,11 @@ async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyh
     .bind(&record.previous_quote_id)
     .bind(&record.superseded_by_quote_id)
     .bind(i64::from(record.negotiation_round))
-    .bind(if record.settlement_supported { 1_i64 } else { 0_i64 })
+    .bind(if record.settlement_supported {
+        1_i64
+    } else {
+        0_i64
+    })
     .bind(serde_json::to_string(&record.payment_roles)?)
     .bind(&record.currency)
     .bind(&record.quote_mode)
@@ -1766,7 +1769,11 @@ async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyh
     .bind(&record.issuer_did)
     .bind(&record.signature_hex)
     .bind(record.status.as_db())
-    .bind(record.consumed_by_transaction_id.map(|value| value.to_string()))
+    .bind(
+        record
+            .consumed_by_transaction_id
+            .map(|value| value.to_string()),
+    )
     .bind(&record.revoked_reason)
     .bind(record.created_at_unix_ms as i64)
     .bind(record.updated_at_unix_ms as i64)
@@ -1841,7 +1848,10 @@ async fn get_remote_settlement(
     row.map(row_to_remote_settlement).transpose()
 }
 
-async fn get_quote_record(state: &AppState, quote_id: &str) -> anyhow::Result<Option<QuoteLedgerRecord>> {
+async fn get_quote_record(
+    state: &AppState,
+    quote_id: &str,
+) -> anyhow::Result<Option<QuoteLedgerRecord>> {
     let row = sqlx::query_as::<_, QuoteLedgerRow>(
         r#"
         SELECT
@@ -2064,7 +2074,13 @@ async fn list_remote_settlements(
     transaction_id: Option<Uuid>,
     status: Option<PaymentStatus>,
 ) -> anyhow::Result<Vec<RemoteAgentSettlementRecord>> {
-    let rows = match (card_id, invocation_id, local_task_id, transaction_id, status) {
+    let rows = match (
+        card_id,
+        invocation_id,
+        local_task_id,
+        transaction_id,
+        status,
+    ) {
         (Some(card_id), _, _, _, _) => sqlx::query_as::<_, RemoteAgentSettlementRow>(
             r#"
                 SELECT
@@ -2441,7 +2457,10 @@ async fn revoke_quote_record(
         .ok_or_else(|| anyhow!("quote not found: {quote_id}"))?;
     match record.status {
         QuoteLedgerStatus::Consumed => {
-            anyhow::bail!("quote '{}' has already been consumed by a settlement", quote_id)
+            anyhow::bail!(
+                "quote '{}' has already been consumed by a settlement",
+                quote_id
+            )
         }
         QuoteLedgerStatus::Superseded => {
             anyhow::bail!("quote '{}' has already been superseded", quote_id)
@@ -2600,7 +2619,9 @@ fn row_to_quote_record(row: QuoteLedgerRow) -> anyhow::Result<QuoteLedgerRecord>
         warning: row.warning,
         expires_at_unix_ms: row
             .expires_at_unix_ms
-            .map(|value| u128::try_from(value).context("negative expires_at_unix_ms in agent_quote_ledger"))
+            .map(|value| {
+                u128::try_from(value).context("negative expires_at_unix_ms in agent_quote_ledger")
+            })
             .transpose()?,
         issuer_did: row.issuer_did,
         signature_hex: row.signature_hex,
@@ -2819,10 +2840,14 @@ fn build_settlement_quote(
         || contains_ci(&card.payment_roles, "merchant")
         || contains_ci(&terms.roles, "payee")
         || contains_ci(&terms.roles, "merchant");
-    let quote_mode = terms
-        .quote_mode
-        .clone()
-        .unwrap_or_else(|| if terms.flat_amount.is_some() { "flat" } else { "manual" }.to_string());
+    let quote_mode = terms.quote_mode.clone().unwrap_or_else(|| {
+        if terms.flat_amount.is_some() {
+            "flat"
+        } else {
+            "manual"
+        }
+        .to_string()
+    });
     let quoted_amount = terms.flat_amount.or(requested_amount);
     let warning = if !settlement_supported {
         Some("agent card does not advertise AP2 settlement capability".to_string())
@@ -2995,7 +3020,12 @@ fn decode_quote_verifying_key_from_did(issuer_did: &str) -> anyhow::Result<Verif
     let normalized = issuer_did.trim().to_ascii_lowercase();
     let raw = normalized
         .strip_prefix(QUOTE_ISSUER_DID_PREFIX)
-        .ok_or_else(|| anyhow!("quote issuer DID must start with '{}'", QUOTE_ISSUER_DID_PREFIX))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "quote issuer DID must start with '{}'",
+                QUOTE_ISSUER_DID_PREFIX
+            )
+        })?;
     let public_key_bytes = decode_fixed_hex::<32>(raw, "quote issuer public key")?;
     VerifyingKey::from_bytes(&public_key_bytes).context("invalid quote issuer Ed25519 public key")
 }
@@ -3032,7 +3062,11 @@ fn sign_local_settlement_quote(
         expires_at_unix_ms,
         issuer_did: issuer_did.clone(),
     };
-    let signature_hex = hex::encode(signing_key.sign(&signed_quote_payload(&document)?).to_bytes());
+    let signature_hex = hex::encode(
+        signing_key
+            .sign(&signed_quote_payload(&document)?)
+            .to_bytes(),
+    );
     quote.quote_source = document.quote_source;
     quote.quote_id = Some(document.quote_id);
     quote.previous_quote_id = document.previous_quote_id;
@@ -3064,7 +3098,10 @@ fn verify_signed_quote(
         .expires_at_unix_ms
         .ok_or_else(|| anyhow!("signed quote is missing expiresAtUnixMs"))?;
     if expires_at_unix_ms < unix_timestamp_ms() {
-        anyhow::bail!("signed quote '{}' has expired", quote.quote_id.as_deref().unwrap_or("?"));
+        anyhow::bail!(
+            "signed quote '{}' has expired",
+            quote.quote_id.as_deref().unwrap_or("?")
+        );
     }
 
     let terms = extract_ap2_terms(&card.card);
@@ -3243,8 +3280,9 @@ async fn fetch_remote_quote_state(
     let raw_value = if raw_body.trim().is_empty() {
         Value::Null
     } else {
-        serde_json::from_str::<Value>(&raw_body)
-            .with_context(|| format!("remote quote state endpoint {state_url} returned non-JSON body"))?
+        serde_json::from_str::<Value>(&raw_body).with_context(|| {
+            format!("remote quote state endpoint {state_url} returned non-JSON body")
+        })?
     };
     parse_remote_quote_state(card, quote_id, raw_value).map(Some)
 }
@@ -3267,7 +3305,9 @@ async fn record_quote_offer(
                 anyhow::bail!("quote '{}' has already been consumed", quote_id)
             }
             QuoteLedgerStatus::Revoked => anyhow::bail!("quote '{}' has been revoked", quote_id),
-            QuoteLedgerStatus::Superseded => anyhow::bail!("quote '{}' has been superseded", quote_id),
+            QuoteLedgerStatus::Superseded => {
+                anyhow::bail!("quote '{}' has been superseded", quote_id)
+            }
             QuoteLedgerStatus::Offered => {}
         }
     }
@@ -3275,7 +3315,10 @@ async fn record_quote_offer(
     let previous = match quote.previous_quote_id.as_deref() {
         Some(previous_quote_id) if previous_quote_id != quote_id => {
             let Some(mut previous) = get_quote_record(state, previous_quote_id).await? else {
-                anyhow::bail!("previous quote '{}' was not found in the ledger", previous_quote_id);
+                anyhow::bail!(
+                    "previous quote '{}' was not found in the ledger",
+                    previous_quote_id
+                );
             };
             match previous.status {
                 QuoteLedgerStatus::Consumed => anyhow::bail!(
@@ -3336,8 +3379,13 @@ async fn record_quote_offer(
         consumed_by_transaction_id: existing
             .as_ref()
             .and_then(|record| record.consumed_by_transaction_id),
-        revoked_reason: existing.as_ref().and_then(|record| record.revoked_reason.clone()),
-        created_at_unix_ms: existing.as_ref().map(|record| record.created_at_unix_ms).unwrap_or(now),
+        revoked_reason: existing
+            .as_ref()
+            .and_then(|record| record.revoked_reason.clone()),
+        created_at_unix_ms: existing
+            .as_ref()
+            .map(|record| record.created_at_unix_ms)
+            .unwrap_or(now),
         updated_at_unix_ms: now,
     };
     save_quote_record(state, &record).await?;
@@ -3366,7 +3414,9 @@ async fn consume_quote_record(
     }
     match record.status {
         QuoteLedgerStatus::Offered => {}
-        QuoteLedgerStatus::Consumed => anyhow::bail!("quote '{}' has already been consumed", quote_id),
+        QuoteLedgerStatus::Consumed => {
+            anyhow::bail!("quote '{}' has already been consumed", quote_id)
+        }
         QuoteLedgerStatus::Revoked => anyhow::bail!("quote '{}' has been revoked", quote_id),
         QuoteLedgerStatus::Superseded => anyhow::bail!("quote '{}' has been superseded", quote_id),
     }
@@ -3394,7 +3444,8 @@ async fn sync_remote_quote_state(
             card.card_id
         );
     }
-    let Some(remote_state) = fetch_remote_quote_state(card, quote_id, timeout_seconds).await? else {
+    let Some(remote_state) = fetch_remote_quote_state(card, quote_id, timeout_seconds).await?
+    else {
         return Ok(record);
     };
 
@@ -3404,8 +3455,12 @@ async fn sync_remote_quote_state(
     record.status = remote_state.status;
     record.consumed_by_transaction_id = remote_state.consumed_by_transaction_id;
     record.revoked_reason = remote_state.revoked_reason;
-    record.expires_at_unix_ms = remote_state.expires_at_unix_ms.or(record.expires_at_unix_ms);
-    record.updated_at_unix_ms = remote_state.updated_at_unix_ms.max(record.updated_at_unix_ms);
+    record.expires_at_unix_ms = remote_state
+        .expires_at_unix_ms
+        .or(record.expires_at_unix_ms);
+    record.updated_at_unix_ms = remote_state
+        .updated_at_unix_ms
+        .max(record.updated_at_unix_ms);
     save_quote_record(state, &record).await?;
     Ok(record)
 }
@@ -3534,14 +3589,13 @@ fn enrich_local_card_with_quote_url(
                     .or_insert_with(|| Value::String(quote_issuer_did.clone()));
             }
         } else {
-            root.entry("pricing".to_string())
-                .or_insert_with(|| {
-                    json!({
-                        "quoteUrl": quote_url.clone(),
-                        "quoteStateUrlTemplate": quote_state_url_template.clone(),
-                        "quoteIssuerDid": quote_issuer_did.clone()
-                    })
-                });
+            root.entry("pricing".to_string()).or_insert_with(|| {
+                json!({
+                    "quoteUrl": quote_url.clone(),
+                    "quoteStateUrlTemplate": quote_state_url_template.clone(),
+                    "quoteIssuerDid": quote_issuer_did.clone()
+                })
+            });
         }
     }
     card
@@ -3591,7 +3645,10 @@ async fn fetch_remote_settlement_quote(
         client
             .get(&quote_url)
             .query(&[
-                ("requestedAmount", requested_amount.map(|value| value.to_string())),
+                (
+                    "requestedAmount",
+                    requested_amount.map(|value| value.to_string()),
+                ),
                 ("description", description.map(ToString::to_string)),
                 ("quoteId", quote_id.map(ToString::to_string)),
                 (
@@ -3614,8 +3671,9 @@ async fn fetch_remote_settlement_quote(
             return Ok(fallback);
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed requesting remote settlement quote at {quote_url}"));
+            return Err(error).with_context(|| {
+                format!("failed requesting remote settlement quote at {quote_url}")
+            });
         }
     };
 
@@ -3713,8 +3771,14 @@ fn parse_remote_settlement_quote(
         .get("quotedAmount")
         .and_then(Value::as_f64)
         .or(quote.quoted_amount);
-    quote.min_amount = body.get("minAmount").and_then(Value::as_f64).or(quote.min_amount);
-    quote.max_amount = body.get("maxAmount").and_then(Value::as_f64).or(quote.max_amount);
+    quote.min_amount = body
+        .get("minAmount")
+        .and_then(Value::as_f64)
+        .or(quote.min_amount);
+    quote.max_amount = body
+        .get("maxAmount")
+        .and_then(Value::as_f64)
+        .or(quote.max_amount);
     quote.description_template = body
         .get("descriptionTemplate")
         .and_then(Value::as_str)
@@ -3945,7 +4009,11 @@ fn not_found(message: impl Into<String>) -> (StatusCode, Json<Value>) {
 mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
-    use axum::{Json, Router, extract::Path as AxumPath, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        extract::Path as AxumPath,
+        routing::{get, post},
+    };
     use reqwest::Client;
     use serde_json::json;
     use tokio::time::{Duration, sleep};
@@ -3956,15 +4024,15 @@ mod tests {
         AP2_EXTENSION_URI, AgentAuthentication, AgentCapabilities, AgentCard, AgentExtension,
         AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
         PublishedAgentCard, QuoteLedgerRecord, QuoteLedgerStatus, RemoteInvocationStatus,
-        RemoteSettlementRequest, SearchAgentCardsRequest,
-        apply_counter_offer_to_quote, build_search_haystack, build_settlement_quote, derive_card_id,
-        consume_quote_record, get_quote_record,
+        RemoteSettlementRequest, SearchAgentCardsRequest, apply_counter_offer_to_quote,
+        build_search_haystack, build_settlement_quote, consume_quote_record, derive_card_id,
         enrich_local_card_with_quote_url, extract_ap2_roles, extract_ap2_terms,
         extract_remote_task_id, extract_remote_task_status, fetch_remote_settlement_quote,
-        get_remote_settlement_by_invocation, invoke_remote_agent_card, matches_search,
-        merge_unique_metadata, publish_card_inner, quote_issuer_did_from_signing_key,
-        quote_signing_key, remote_task_create_url, remote_task_detail_url, sign_local_settlement_quote,
-        record_quote_offer, revoke_quote_record, sign_quote_state, validate_remote_settlement_request,
+        get_quote_record, get_remote_settlement_by_invocation, invoke_remote_agent_card,
+        matches_search, merge_unique_metadata, publish_card_inner,
+        quote_issuer_did_from_signing_key, quote_signing_key, record_quote_offer,
+        remote_task_create_url, remote_task_detail_url, revoke_quote_record,
+        sign_local_settlement_quote, sign_quote_state, validate_remote_settlement_request,
         verify_signed_quote,
     };
     use crate::{
@@ -4185,11 +4253,8 @@ mod tests {
 
     #[test]
     fn enriches_locally_hosted_card_with_quote_url() {
-        let card = enrich_local_card_with_quote_url(
-            "travel-agent-1234abcd",
-            true,
-            sample_card().card,
-        );
+        let card =
+            enrich_local_card_with_quote_url("travel-agent-1234abcd", true, sample_card().card);
         let terms = extract_ap2_terms(&card);
         let expected_quote_issuer_did =
             quote_issuer_did_from_signing_key(&quote_signing_key().unwrap());
@@ -4289,20 +4354,14 @@ mod tests {
             .await
             .unwrap();
 
-        let previous = get_quote_record(
-            state.as_ref(),
-            first_quote.quote_id.as_deref().unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let current = get_quote_record(
-            state.as_ref(),
-            counter_quote.quote_id.as_deref().unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let previous = get_quote_record(state.as_ref(), first_quote.quote_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let current = get_quote_record(state.as_ref(), counter_quote.quote_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(previous.status.as_db(), "superseded");
         assert_eq!(
@@ -4448,7 +4507,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(quote.quote_source, "remote");
-        assert_eq!(quote.quote_url.as_deref(), Some(expected_quote_url.as_str()));
+        assert_eq!(
+            quote.quote_url.as_deref(),
+            Some(expected_quote_url.as_str())
+        );
         assert_eq!(quote.quoted_amount, Some(13.2));
         assert_eq!(quote.max_amount, Some(15.0));
 
@@ -4705,15 +4767,19 @@ mod tests {
         .unwrap();
 
         let settlement = response.settlement.expect("settlement should be created");
-        assert_eq!(response.invocation.status, RemoteInvocationStatus::Completed);
+        assert_eq!(
+            response.invocation.status,
+            RemoteInvocationStatus::Completed
+        );
         assert_eq!(settlement.status, PaymentStatus::PendingPhysicalAuth);
         assert_eq!(settlement.local_task_id, Some(task_id));
         assert_eq!(settlement.remote_task_id.as_deref(), Some("remote-123"));
 
-        let stored_settlement = get_remote_settlement_by_invocation(&state, response.invocation.invocation_id)
-            .await
-            .unwrap()
-            .expect("settlement should persist");
+        let stored_settlement =
+            get_remote_settlement_by_invocation(&state, response.invocation.invocation_id)
+                .await
+                .unwrap()
+                .expect("settlement should persist");
         assert_eq!(stored_settlement.transaction_id, settlement.transaction_id);
 
         let payment = state

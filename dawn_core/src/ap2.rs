@@ -414,7 +414,10 @@ async fn resolve_approval_request(
     payload: Option<Value>,
 ) -> anyhow::Result<()> {
     let Some(mut approval) = state
-        .get_pending_approval_by_reference(ApprovalRequestKind::Payment, &transaction_id.to_string())
+        .get_pending_approval_by_reference(
+            ApprovalRequestKind::Payment,
+            &transaction_id.to_string(),
+        )
         .await?
     else {
         return Ok(());

@@ -122,14 +122,15 @@ async fn decide_approval(
                     &state,
                     command_id,
                     &request.actor,
-                    request
-                        .reason
-                        .as_deref()
-                        .unwrap_or("rejected by operator"),
+                    request.reason.as_deref().unwrap_or("rejected by operator"),
                 )
                 .await
                 .map_err(service_error)?,
-                _ => return Err(bad_request(anyhow::anyhow!("decision must be approve or reject"))),
+                _ => {
+                    return Err(bad_request(anyhow::anyhow!(
+                        "decision must be approve or reject"
+                    )));
+                }
             };
             let approval = state
                 .get_approval_request(approval_id)
@@ -165,14 +166,15 @@ async fn decide_approval(
                     &state,
                     transaction_id,
                     &request.actor,
-                    request
-                        .reason
-                        .as_deref()
-                        .unwrap_or("rejected by operator"),
+                    request.reason.as_deref().unwrap_or("rejected by operator"),
                 )
                 .await
                 .map_err(service_error)?,
-                _ => return Err(bad_request(anyhow::anyhow!("decision must be approve or reject"))),
+                _ => {
+                    return Err(bad_request(anyhow::anyhow!(
+                        "decision must be approve or reject"
+                    )));
+                }
             };
             let approval = state
                 .get_approval_request(approval_id)
@@ -203,19 +205,27 @@ async fn load_reference_details(
         ApprovalRequestKind::NodeCommand => {
             let command_id = Uuid::parse_str(&approval.reference_id)
                 .map_err(|_| bad_request(anyhow::anyhow!("invalid node command id")))?;
-            let command = state.get_node_command(command_id).await.map_err(internal_error)?;
+            let command = state
+                .get_node_command(command_id)
+                .await
+                .map_err(internal_error)?;
             Ok((command, None))
         }
         ApprovalRequestKind::Payment => {
             let transaction_id = Uuid::parse_str(&approval.reference_id)
                 .map_err(|_| bad_request(anyhow::anyhow!("invalid payment transaction id")))?;
-            let payment = state.get_payment(transaction_id).await.map_err(internal_error)?;
+            let payment = state
+                .get_payment(transaction_id)
+                .await
+                .map_err(internal_error)?;
             Ok((None, payment))
         }
     }
 }
 
-fn parse_status(raw: Option<&str>) -> Result<Option<ApprovalRequestStatus>, (StatusCode, Json<Value>)> {
+fn parse_status(
+    raw: Option<&str>,
+) -> Result<Option<ApprovalRequestStatus>, (StatusCode, Json<Value>)> {
     match raw {
         None => Ok(None),
         Some("pending") => Ok(Some(ApprovalRequestStatus::Pending)),
@@ -232,7 +242,10 @@ fn not_found(message: &str) -> (StatusCode, Json<Value>) {
 }
 
 fn bad_request(error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": error.to_string() })))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": error.to_string() })),
+    )
 }
 
 fn service_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
@@ -267,4 +280,3 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
         })),
     )
 }
-

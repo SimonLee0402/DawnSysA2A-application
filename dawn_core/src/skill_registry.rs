@@ -434,7 +434,12 @@ pub async fn install_skill_package_from_url(
         .await
         .with_context(|| format!("failed to fetch skill package {}", request.package_url))?
         .error_for_status()
-        .with_context(|| format!("skill package endpoint returned an error {}", request.package_url))?
+        .with_context(|| {
+            format!(
+                "skill package endpoint returned an error {}",
+                request.package_url
+            )
+        })?
         .json::<SkillPackageResponse>()
         .await
         .with_context(|| format!("failed to decode skill package {}", request.package_url))?;
@@ -933,7 +938,8 @@ fn verify_signed_skill_envelope(
     trust_root: &SkillPublisherTrustRootRecord,
 ) -> anyhow::Result<String> {
     validate_skill_publisher_issuer_did(&trust_root.issuer_did, &trust_root.public_key_hex)?;
-    if envelope.document.issuer_did.to_ascii_lowercase() != trust_root.issuer_did.to_ascii_lowercase()
+    if envelope.document.issuer_did.to_ascii_lowercase()
+        != trust_root.issuer_did.to_ascii_lowercase()
     {
         anyhow::bail!(
             "skill publisher '{}' does not match trusted issuer '{}'",
@@ -1034,17 +1040,20 @@ mod tests {
     use wasmtime::Engine;
 
     use super::{
-        RegisterSignedSkillRequest, SignedSkillDocument, SignedSkillEnvelope,
-        SkillPublisherTrustRootUpsertRequest, SKILL_PUBLISHER_ISSUER_DID_PREFIX,
-        register_signed_skill_inner, skill_publisher_issuer_did_from_public_key_hex,
-        upsert_skill_publisher_trust_root_inner, validate_skill_segment,
+        RegisterSignedSkillRequest, SKILL_PUBLISHER_ISSUER_DID_PREFIX, SignedSkillDocument,
+        SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest, register_signed_skill_inner,
+        skill_publisher_issuer_did_from_public_key_hex, upsert_skill_publisher_trust_root_inner,
+        validate_skill_segment,
     };
     use crate::{app_state::AppState, sandbox};
     use uuid::Uuid;
 
     fn temp_database_url() -> (String, PathBuf) {
         let mut path = std::env::temp_dir();
-        path.push(format!("dawn-core-skill-registry-test-{}.db", Uuid::new_v4()));
+        path.push(format!(
+            "dawn-core-skill-registry-test-{}.db",
+            Uuid::new_v4()
+        ));
         (format!("sqlite://{}", path.display()), path)
     }
 
