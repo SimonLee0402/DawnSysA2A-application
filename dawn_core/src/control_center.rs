@@ -309,6 +309,15 @@ async fn dashboard() -> Html<&'static str> {
       color: var(--muted);
       line-height: 1.5;
     }
+    .clickable-card {
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+    }
+    .clickable-card:hover {
+      transform: translateY(-1px);
+      background: linear-gradient(180deg, rgba(255,255,255,0.1), rgba(255,255,255,0.04));
+      border-color: rgba(255,255,255,0.14);
+    }
     .approval-actions {
       display: flex;
       gap: 10px;
@@ -433,6 +442,92 @@ async fn dashboard() -> Html<&'static str> {
     .command-row.active {
       background: rgba(105,214,255,0.1);
     }
+    .interactive-row {
+      cursor: pointer;
+      transition: background 160ms ease, transform 160ms ease;
+    }
+    .interactive-row:hover {
+      background: rgba(255,255,255,0.04);
+    }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 10, 18, 0.45);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 220ms ease;
+      z-index: 20;
+    }
+    .drawer-backdrop.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .detail-drawer {
+      position: fixed;
+      top: 18px;
+      right: 18px;
+      bottom: 18px;
+      width: min(460px, calc(100vw - 24px));
+      padding: 18px;
+      border-radius: 28px;
+      background: linear-gradient(180deg, rgba(15, 27, 42, 0.9), rgba(13, 22, 34, 0.82));
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 38px 120px rgba(0,0,0,0.42);
+      backdrop-filter: blur(30px) saturate(150%);
+      -webkit-backdrop-filter: blur(30px) saturate(150%);
+      transform: translateX(calc(100% + 30px));
+      transition: transform 260ms ease;
+      z-index: 21;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr;
+      gap: 14px;
+      overflow: hidden;
+    }
+    .detail-drawer.open {
+      transform: translateX(0);
+    }
+    .drawer-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .drawer-title {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 24px;
+      letter-spacing: -0.04em;
+    }
+    .drawer-subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-top: 6px;
+    }
+    .icon-button {
+      width: 38px;
+      height: 38px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+      box-shadow: none;
+    }
+    .drawer-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .drawer-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     button {
       border: 0;
       border-radius: 999px;
@@ -464,6 +559,21 @@ async fn dashboard() -> Html<&'static str> {
     @media (max-width: 1080px) {
       .hero, .layout { grid-template-columns: 1fr; }
       .hero-grid, .detail-grid { grid-template-columns: 1fr; }
+      .detail-drawer {
+        top: auto;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        width: auto;
+        max-height: 78vh;
+        transform: translateY(calc(100% + 30px));
+      }
+      .detail-drawer.open {
+        transform: translateY(0);
+      }
+      .drawer-meta {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -616,11 +726,26 @@ async fn dashboard() -> Html<&'static str> {
       </div>
     </section>
   </div>
+  <div class="drawer-backdrop" id="detail-drawer-backdrop" onclick="closeDetailDrawer()"></div>
+  <aside class="detail-drawer" id="detail-drawer">
+    <div class="drawer-head">
+      <div>
+        <div class="eyebrow" id="detail-drawer-eyebrow">Inspector</div>
+        <h2 class="drawer-title" id="detail-drawer-title">Detail Drawer</h2>
+        <div class="drawer-subtitle" id="detail-drawer-subtitle">Select an approval, command, or settlement.</div>
+      </div>
+      <button type="button" class="icon-button" onclick="closeDetailDrawer()">×</button>
+    </div>
+    <div class="drawer-meta" id="detail-drawer-meta"></div>
+    <div class="drawer-actions" id="detail-drawer-actions"></div>
+    <pre class="detail-pre" id="detail-drawer-pre">Nothing selected.</pre>
+  </aside>
 
   <script>
     const fmt = (value) => value ?? "—";
     let selectedCommandId = null;
     let visibleCommandsCache = [];
+    let detailDrawerState = null;
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
@@ -736,6 +861,187 @@ async fn dashboard() -> Html<&'static str> {
         visibleCommandsCache.find((command) => command.commandId === selectedCommandId) || null
       );
     }
+    function closeDetailDrawer() {
+      detailDrawerState = null;
+      document.getElementById("detail-drawer")?.classList.remove("open");
+      document.getElementById("detail-drawer-backdrop")?.classList.remove("open");
+    }
+    function openDetailDrawer(payload) {
+      detailDrawerState = payload;
+      renderDetailDrawer(payload);
+      document.getElementById("detail-drawer")?.classList.add("open");
+      document.getElementById("detail-drawer-backdrop")?.classList.add("open");
+    }
+    function formatJsonBlock(value) {
+      if (value == null) return "null";
+      if (typeof value === "string") return value;
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (_error) {
+        return String(value);
+      }
+    }
+    function renderDrawerMetrics(metrics) {
+      return metrics.map(([label, value]) => `
+        <div class="detail-metric">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+        </div>
+      `).join("");
+    }
+    function renderDrawerActions(actions) {
+      return actions.map((action) => `
+        <button
+          type="button"
+          class="${action.secondary ? "secondary" : ""}"
+          onclick="${action.onclick}"
+        >${escapeHtml(action.label)}</button>
+      `).join("");
+    }
+    function renderDetailDrawer(state) {
+      const eyebrow = document.getElementById("detail-drawer-eyebrow");
+      const title = document.getElementById("detail-drawer-title");
+      const subtitle = document.getElementById("detail-drawer-subtitle");
+      const meta = document.getElementById("detail-drawer-meta");
+      const actions = document.getElementById("detail-drawer-actions");
+      const pre = document.getElementById("detail-drawer-pre");
+      if (!eyebrow || !title || !subtitle || !meta || !actions || !pre) return;
+
+      if (!state) {
+        eyebrow.textContent = "Inspector";
+        title.textContent = "Detail Drawer";
+        subtitle.textContent = "Select an approval, command, or settlement.";
+        meta.innerHTML = "";
+        actions.innerHTML = "";
+        pre.textContent = "Nothing selected.";
+        return;
+      }
+
+      if (state.kind === "approval") {
+        const approval = state.approval;
+        eyebrow.textContent = "Approval";
+        title.textContent = approval.title;
+        subtitle.textContent = `${approval.kind} · ${approval.referenceId}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Status", approval.status],
+          ["Task", approval.taskId || "—"],
+          ["Actor", approval.actor || "—"],
+          ["Updated", approval.updatedAtUnixMs]
+        ]);
+        const actionSet = approval.status === "pending"
+          ? [
+              {
+                label: "Approve",
+                onclick: `decideApproval('${approval.approvalId}', '${approval.kind}', 'approve')`
+              },
+              {
+                label: "Reject",
+                onclick: `decideApproval('${approval.approvalId}', '${approval.kind}', 'reject')`,
+                secondary: true
+              }
+            ]
+          : [
+              {
+                label: "Refresh",
+                onclick: `openApprovalDetail('${approval.approvalId}')`,
+                secondary: true
+              }
+            ];
+        actions.innerHTML = renderDrawerActions(actionSet);
+        pre.textContent = formatJsonBlock({
+          approval,
+          nodeCommand: state.nodeCommand,
+          payment: state.payment
+        });
+        return;
+      }
+
+      if (state.kind === "command") {
+        const command = state.command;
+        eyebrow.textContent = "Node Command";
+        title.textContent = command.commandType;
+        subtitle.textContent = `${command.nodeId} · ${command.commandId}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Status", command.status],
+          ["Node", command.nodeId],
+          ["Updated", command.updatedAtUnixMs],
+          ["Error", command.error || "—"]
+        ]);
+        actions.innerHTML = renderDrawerActions([
+          {
+            label: "Refresh",
+            onclick: `openCommandDetail('${command.commandId}')`,
+            secondary: true
+          }
+        ]);
+        pre.textContent = formatJsonBlock({
+          payload: command.payload,
+          result: command.result,
+          error: command.error
+        });
+        return;
+      }
+
+      if (state.kind === "settlement") {
+        const settlement = state.settlement;
+        eyebrow.textContent = "Settlement";
+        title.textContent = settlement.cardId;
+        subtitle.textContent = `${settlement.amount} · ${settlement.transactionId}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Status", settlement.status],
+          ["Quote", settlement.quoteId || "—"],
+          ["Invocation", settlement.invocationId],
+          ["Updated", settlement.updatedAtUnixMs]
+        ]);
+        actions.innerHTML = renderDrawerActions([
+          {
+            label: "Refresh",
+            onclick: `openSettlementDetail('${settlement.settlementId}')`,
+            secondary: true
+          }
+        ]);
+        pre.textContent = formatJsonBlock(settlement);
+      }
+    }
+    async function openApprovalDetail(approvalId) {
+      try {
+        const detail = await fetchJson(`/api/gateway/approvals/${encodeURIComponent(approvalId)}`);
+        openDetailDrawer({
+          kind: "approval",
+          approval: detail.approval,
+          nodeCommand: detail.nodeCommand,
+          payment: detail.payment
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function openCommandDetail(commandId) {
+      try {
+        const command = await fetchJson(`/api/gateway/control-plane/commands/${encodeURIComponent(commandId)}`);
+        openDetailDrawer({
+          kind: "command",
+          command
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function openSettlementDetail(settlementId) {
+      try {
+        const settlement = await fetchJson(`/api/gateway/agent-cards/settlements/${encodeURIComponent(settlementId)}`);
+        openDetailDrawer({
+          kind: "settlement",
+          settlement
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function showCommand(commandId) {
+      selectCommand(commandId);
+      await openCommandDetail(commandId);
+    }
     function renderCommandDetail(command) {
       const grid = document.getElementById("command-detail-grid");
       const pre = document.getElementById("command-detail-pre");
@@ -824,6 +1130,7 @@ async fn dashboard() -> Html<&'static str> {
           });
         }
         await refresh();
+        await openApprovalDetail(approvalId);
       } catch (error) {
         window.alert(error.message);
       }
@@ -866,13 +1173,13 @@ async fn dashboard() -> Html<&'static str> {
         </article>`).join("") || `<div class="tiny">No inbound events yet.</div>`;
 
       document.getElementById("approval-feed").innerHTML = approvals.map((approval) => `
-        <article class="feed-item">
+        <article class="feed-item clickable-card" onclick="openApprovalDetail('${approval.approvalId}')">
           <strong>${approval.title}</strong>
           <p>${ellipsis(approval.summary, 120)}</p>
           <p><code>${approval.kind}</code> · ${approval.referenceId}</p>
           <div class="approval-actions">
-            <button type="button" onclick="decideApproval('${approval.approvalId}', '${approval.kind}', 'approve')">Approve</button>
-            <button type="button" class="secondary" onclick="decideApproval('${approval.approvalId}', '${approval.kind}', 'reject')">Reject</button>
+            <button type="button" onclick="event.stopPropagation(); decideApproval('${approval.approvalId}', '${approval.kind}', 'approve')">Approve</button>
+            <button type="button" class="secondary" onclick="event.stopPropagation(); decideApproval('${approval.approvalId}', '${approval.kind}', 'reject')">Reject</button>
           </div>
         </article>`).join("") || `<div class="tiny">No pending approvals.</div>`;
 
@@ -898,7 +1205,7 @@ async fn dashboard() -> Html<&'static str> {
         selectedCommandId = visibleCommands[0].commandId;
       }
       document.getElementById("command-rows").innerHTML = visibleCommands.map((command) => `
-        <tr class="command-row ${command.commandId === selectedCommandId ? "active" : ""}" data-command-id="${command.commandId}" onclick="selectCommand('${command.commandId}')">
+        <tr class="command-row ${command.commandId === selectedCommandId ? "active" : ""}" data-command-id="${command.commandId}" onclick="showCommand('${command.commandId}')">
           <td>
             <strong>${command.commandType}</strong><br />
             <code>${command.commandId}</code>
@@ -909,7 +1216,7 @@ async fn dashboard() -> Html<&'static str> {
       renderCommandDetail(visibleCommands.find((command) => command.commandId === selectedCommandId) || visibleCommands[0] || null);
 
       document.getElementById("settlement-rows").innerHTML = settlements.slice(0, 8).map((settlement) => `
-        <tr>
+        <tr class="interactive-row" onclick="openSettlementDetail('${settlement.settlementId}')">
           <td>${ellipsis(settlement.cardId, 26)}</td>
           <td>${badge(settlement.status)}</td>
           <td>${settlement.amount}</td>
