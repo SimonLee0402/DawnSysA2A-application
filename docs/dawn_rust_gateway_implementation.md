@@ -88,11 +88,13 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/agent-cards/{card_id}/quote`
 - `GET /api/gateway/agent-cards/quotes`
 - `GET /api/gateway/agent-cards/quotes/{quote_id}`
+- `GET /api/gateway/agent-cards/quotes/{quote_id}/state`
 - `GET /api/gateway/agent-cards/invocations`
 - `GET /api/gateway/agent-cards/settlements`
 - `POST /api/gateway/agent-cards/publish`
 - `POST /api/gateway/agent-cards/import`
 - `POST /api/gateway/agent-cards/quotes/{quote_id}/revoke`
+- `POST /api/gateway/agent-cards/{card_id}/quotes/{quote_id}/sync`
 - `POST /api/gateway/agent-cards/{card_id}/invoke`
 - `GET /api/gateway/agent-cards/{card_id}`
 - `GET /api/gateway/agent-cards/invocations/{invocation_id}`
@@ -214,11 +216,13 @@ Agent Card endpoints:
 - `GET /api/gateway/agent-cards/{card_id}/quote`
 - `GET /api/gateway/agent-cards/quotes`
 - `GET /api/gateway/agent-cards/quotes/{quote_id}`
+- `GET /api/gateway/agent-cards/quotes/{quote_id}/state`
 - `GET /api/gateway/agent-cards/invocations`
 - `GET /api/gateway/agent-cards/settlements`
 - `POST /api/gateway/agent-cards/publish`
 - `POST /api/gateway/agent-cards/import`
 - `POST /api/gateway/agent-cards/quotes/{quote_id}/revoke`
+- `POST /api/gateway/agent-cards/{card_id}/quotes/{quote_id}/sync`
 - `POST /api/gateway/agent-cards/{card_id}/invoke`
 - `GET /api/gateway/agent-cards/{card_id}`
 - `GET /api/gateway/agent-cards/invocations/{invocation_id}`
@@ -259,6 +263,7 @@ Agent Cards can now also expose AP2 pricing metadata through the AP2 extension p
       "quoteMode": "flat",
       "quoteMethod": "GET",
       "quoteUrl": "https://gateway.example.com/api/gateway/agent-cards/local-travel-agent/quote",
+      "quoteStateUrlTemplate": "https://gateway.example.com/api/gateway/agent-cards/quotes/{quoteId}/state",
       "quoteIssuerDid": "did:dawn:quote:...",
       "flatAmount": 18.5,
       "minAmount": 10.0,
@@ -289,9 +294,12 @@ Every signed or negotiated quote is now persisted in a local replay ledger:
 
 - `GET /api/gateway/agent-cards/quotes` lists ledger entries and supports `cardId`, `status`, `sourceKind`, and `transactionId` filters
 - `GET /api/gateway/agent-cards/quotes/{quote_id}` returns the full quote lifecycle record
+- `GET /api/gateway/agent-cards/quotes/{quote_id}/state` returns a signed quote-state snapshot for locally issued quotes
 - `POST /api/gateway/agent-cards/quotes/{quote_id}/revoke` marks an unconsumed quote as revoked
+- `POST /api/gateway/agent-cards/{card_id}/quotes/{quote_id}/sync` fetches and applies the latest signed quote-state snapshot from the remote issuer
 - when a new quote references `quoteId=<prior-quote-id>`, the prior quote is marked `superseded` and the new quote advances the `negotiationRound`
 - when a remote settlement is created from an accepted quote, the quote is marked `consumed` and linked to the AP2 `transactionId`, which blocks replay
+- when a remote card advertises `quoteStateUrlTemplate`, DawnCore verifies the issuer-signed remote state before authorizing settlement, so revoked, superseded, or already-consumed quotes are rejected before AP2 authorization starts
 
 When a locally hosted card is published through DawnCore, the gateway now auto-populates `pricing.quoteUrl` when the AP2 extension exists but no quote endpoint is declared. That lets another Dawn gateway discover and negotiate against the local quote endpoint without hand-editing the card JSON.
 
@@ -921,6 +929,7 @@ Removed legacy launchers:
   - a second-pass counter-offer supersedes the prior quote and increments `negotiationRound`
   - revoked quotes cannot be consumed into AP2 settlements
   - consumed quotes are linked to `transactionId` and reject replay consumption
+  - remote settlement validation now rejects a signed remote quote when the issuer's signed quote-state endpoint reports that quote as revoked
 - Runtime Wasm registry smoke test:
   - `POST /api/gateway/skills/register` accepted a minimal `echo-skill@1.0.0`
   - `GET /api/gateway/skills/echo-skill` returned the active version and stored artifact hash
@@ -955,6 +964,6 @@ Removed legacy launchers:
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
 - Remote A2A settlement is now persisted and AP2-linked, but it still assumes a local settlement authority; there is not yet a distributed AP2 settlement network or reconciliation flow across gateways.
-- Agent Card quote support now includes a local replay ledger, revocation, consumption tracking, and multi-round negotiation state, but that state is still local to one gateway; there is not yet a cross-gateway quote revocation or quote-sync protocol.
+- Agent Card quote support now includes a local replay ledger plus on-demand cross-gateway quote-state verification, but it is still pull-based; there is not yet a push replication bus, federation-wide revocation feed, or quote-state gossip protocol.
 - Policy and skill rollout now reach attested nodes and the node can independently verify trusted policy and skill publisher signatures, but there is not yet a node-side persisted trust-root store or full artifact-by-artifact Wasm binary verification against downloaded module bytes.
 - Runtime multi-process smoke is still blocked by the current host command policy, but the rollout + attestation + command loop is now covered by an in-process integration test instead of relying only on unit tests.

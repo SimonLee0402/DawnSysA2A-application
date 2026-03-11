@@ -427,11 +427,45 @@ struct AgentPaymentTerms {
     quote_method: Option<String>,
     quote_url: Option<String>,
     quote_path: Option<String>,
+    quote_state_url_template: Option<String>,
     quote_issuer_did: Option<String>,
     flat_amount: Option<f64>,
     min_amount: Option<f64>,
     max_amount: Option<f64>,
     description_template: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct QuoteStateSnapshot {
+    quote_id: String,
+    card_id: String,
+    status: QuoteLedgerStatus,
+    previous_quote_id: Option<String>,
+    superseded_by_quote_id: Option<String>,
+    negotiation_round: u32,
+    consumed_by_transaction_id: Option<Uuid>,
+    revoked_reason: Option<String>,
+    expires_at_unix_ms: Option<u128>,
+    updated_at_unix_ms: u128,
+    issuer_did: String,
+    signature_hex: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignedQuoteStateDocument {
+    quote_id: String,
+    card_id: String,
+    status: QuoteLedgerStatus,
+    previous_quote_id: Option<String>,
+    superseded_by_quote_id: Option<String>,
+    negotiation_round: u32,
+    consumed_by_transaction_id: Option<Uuid>,
+    revoked_reason: Option<String>,
+    expires_at_unix_ms: Option<u128>,
+    updated_at_unix_ms: u128,
+    issuer_did: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +566,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/search", get(search_cards))
         .route("/:card_id/quote", get(get_settlement_quote))
         .route("/quotes", get(list_quotes))
+        .route("/quotes/:quote_id/state", get(get_quote_state))
         .route("/quotes/:quote_id", get(get_quote))
         .route("/quotes/:quote_id/revoke", post(revoke_quote))
         .route("/invocations", get(list_invocations))
@@ -544,6 +579,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/settlements/:settlement_id", get(get_settlement))
         .route("/publish", post(publish_card))
         .route("/import", post(import_card))
+        .route("/:card_id/quotes/:quote_id/sync", post(sync_quote))
         .route("/:card_id", get(get_card))
         .route("/:card_id/invoke", post(invoke_card))
 }
@@ -743,12 +779,44 @@ async fn get_quote(
         .ok_or_else(|| not_found("quote not found"))
 }
 
+async fn get_quote_state(
+    State(state): State<Arc<AppState>>,
+    AxumPath(quote_id): AxumPath<String>,
+) -> Result<Json<QuoteStateSnapshot>, (StatusCode, Json<Value>)> {
+    let record = get_quote_record(&state, &quote_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("quote not found"))?;
+    if record.source_kind != "local" {
+        return Err(not_found(
+            "quote state is only published for locally issued quotes",
+        ));
+    }
+    sign_quote_state(&record)
+        .map(Json)
+        .map_err(service_error)
+}
+
 async fn revoke_quote(
     State(state): State<Arc<AppState>>,
     AxumPath(quote_id): AxumPath<String>,
     Json(request): Json<RevokeQuoteRequest>,
 ) -> Result<Json<QuoteLedgerRecord>, (StatusCode, Json<Value>)> {
     revoke_quote_record(&state, &quote_id, request.reason.as_deref())
+        .await
+        .map(Json)
+        .map_err(service_error)
+}
+
+async fn sync_quote(
+    State(state): State<Arc<AppState>>,
+    AxumPath((card_id, quote_id)): AxumPath<(String, String)>,
+) -> Result<Json<QuoteLedgerRecord>, (StatusCode, Json<Value>)> {
+    let card = find_card_record(&state, &card_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("agent card not found"))?;
+    sync_remote_quote_state(&state, &card, &quote_id, 10)
         .await
         .map(Json)
         .map_err(service_error)
@@ -1164,6 +1232,37 @@ async fn validate_remote_settlement_request(
     })?;
     if quote.quote_id.is_some() {
         record_quote_offer(state, card, &quote, "remote").await?;
+        if let Some(quote_id) = quote.quote_id.as_deref() {
+            let synced = sync_remote_quote_state(state, card, quote_id, 10).await?;
+            match synced.status {
+                QuoteLedgerStatus::Offered => {}
+                QuoteLedgerStatus::Superseded => anyhow::bail!(
+                    "remote quote '{}' has been superseded by '{}'",
+                    quote_id,
+                    synced
+                        .superseded_by_quote_id
+                        .as_deref()
+                        .unwrap_or("another quote")
+                ),
+                QuoteLedgerStatus::Revoked => anyhow::bail!(
+                    "remote quote '{}' has been revoked{}",
+                    quote_id,
+                    synced
+                        .revoked_reason
+                        .as_deref()
+                        .map(|reason| format!(": {reason}"))
+                        .unwrap_or_default()
+                ),
+                QuoteLedgerStatus::Consumed => anyhow::bail!(
+                    "remote quote '{}' has already been consumed{}",
+                    quote_id,
+                    synced
+                        .consumed_by_transaction_id
+                        .map(|value| format!(" by transaction {value}"))
+                        .unwrap_or_default()
+                ),
+            }
+        }
     }
     if !quote.settlement_supported {
         anyhow::bail!(
@@ -2670,6 +2769,11 @@ fn extract_ap2_terms(card: &AgentCard) -> AgentPaymentTerms {
             .and_then(Value::as_str)
             .map(ToString::to_string)
             .filter(|value| !value.trim().is_empty()),
+        quote_state_url_template: pricing
+            .get("quoteStateUrlTemplate")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .filter(|value| !value.trim().is_empty()),
         quote_issuer_did: pricing
             .get("quoteIssuerDid")
             .and_then(Value::as_str)
@@ -2989,6 +3093,144 @@ fn verify_signed_quote(
     Ok(())
 }
 
+fn signed_quote_state_payload(document: &SignedQuoteStateDocument) -> anyhow::Result<Vec<u8>> {
+    serde_json::to_vec(document).context("failed to serialize signed quote state document")
+}
+
+fn sign_quote_state(record: &QuoteLedgerRecord) -> anyhow::Result<QuoteStateSnapshot> {
+    let signing_key = quote_signing_key()?;
+    let issuer_did = quote_issuer_did_from_signing_key(&signing_key);
+    let document = SignedQuoteStateDocument {
+        quote_id: record.quote_id.clone(),
+        card_id: record.card_id.clone(),
+        status: record.status,
+        previous_quote_id: record.previous_quote_id.clone(),
+        superseded_by_quote_id: record.superseded_by_quote_id.clone(),
+        negotiation_round: record.negotiation_round,
+        consumed_by_transaction_id: record.consumed_by_transaction_id,
+        revoked_reason: record.revoked_reason.clone(),
+        expires_at_unix_ms: record.expires_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        issuer_did: issuer_did.clone(),
+    };
+    let signature = signing_key.sign(&signed_quote_state_payload(&document)?);
+    Ok(QuoteStateSnapshot {
+        quote_id: document.quote_id,
+        card_id: document.card_id,
+        status: document.status,
+        previous_quote_id: document.previous_quote_id,
+        superseded_by_quote_id: document.superseded_by_quote_id,
+        negotiation_round: document.negotiation_round,
+        consumed_by_transaction_id: document.consumed_by_transaction_id,
+        revoked_reason: document.revoked_reason,
+        expires_at_unix_ms: document.expires_at_unix_ms,
+        updated_at_unix_ms: document.updated_at_unix_ms,
+        issuer_did,
+        signature_hex: hex::encode(signature.to_bytes()),
+    })
+}
+
+fn verify_signed_quote_state(
+    card: &PublishedAgentCard,
+    state: &QuoteStateSnapshot,
+) -> anyhow::Result<()> {
+    let terms = extract_ap2_terms(&card.card);
+    if let Some(expected_issuer_did) = terms.quote_issuer_did.as_deref() {
+        if state.issuer_did.to_ascii_lowercase() != expected_issuer_did {
+            anyhow::bail!(
+                "quote state issuer '{}' does not match expected issuer '{}'",
+                state.issuer_did,
+                expected_issuer_did
+            );
+        }
+    }
+
+    let verifying_key = decode_quote_verifying_key_from_did(&state.issuer_did)?;
+    validate_quote_issuer_did(&state.issuer_did, &hex::encode(verifying_key.to_bytes()))?;
+    let document = SignedQuoteStateDocument {
+        quote_id: state.quote_id.clone(),
+        card_id: state.card_id.clone(),
+        status: state.status,
+        previous_quote_id: state.previous_quote_id.clone(),
+        superseded_by_quote_id: state.superseded_by_quote_id.clone(),
+        negotiation_round: state.negotiation_round,
+        consumed_by_transaction_id: state.consumed_by_transaction_id,
+        revoked_reason: state.revoked_reason.clone(),
+        expires_at_unix_ms: state.expires_at_unix_ms,
+        updated_at_unix_ms: state.updated_at_unix_ms,
+        issuer_did: state.issuer_did.clone(),
+    };
+    let signature_bytes = decode_fixed_hex::<64>(&state.signature_hex, "quote state signature")?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(&signed_quote_state_payload(&document)?, &signature)
+        .context("quote state signature verification failed")?;
+    Ok(())
+}
+
+fn parse_remote_quote_state(
+    card: &PublishedAgentCard,
+    quote_id: &str,
+    raw_value: Value,
+) -> anyhow::Result<QuoteStateSnapshot> {
+    let body = raw_value.get("state").cloned().unwrap_or(raw_value);
+    let state = serde_json::from_value::<QuoteStateSnapshot>(body)
+        .context("remote quote state response was not a valid QuoteStateSnapshot")?;
+    if state.quote_id != quote_id {
+        anyhow::bail!(
+            "remote quote state quoteId '{}' does not match requested quote '{}'",
+            state.quote_id,
+            quote_id
+        );
+    }
+    if state.card_id != card.card_id {
+        anyhow::bail!(
+            "remote quote state cardId '{}' does not match requested card '{}'",
+            state.card_id,
+            card.card_id
+        );
+    }
+    verify_signed_quote_state(card, &state)?;
+    Ok(state)
+}
+
+async fn fetch_remote_quote_state(
+    card: &PublishedAgentCard,
+    quote_id: &str,
+    timeout_seconds: u64,
+) -> anyhow::Result<Option<QuoteStateSnapshot>> {
+    let terms = extract_ap2_terms(&card.card);
+    let Some(state_url) = resolve_quote_state_url(card, &terms, quote_id) else {
+        return Ok(None);
+    };
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds.max(1)))
+        .build()?;
+    let response = client
+        .get(&state_url)
+        .send()
+        .await
+        .with_context(|| format!("failed requesting remote quote state at {state_url}"))?;
+    let status = response.status();
+    let raw_body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "remote quote state endpoint {} returned status {}: {}",
+            state_url,
+            status,
+            raw_body
+        );
+    }
+    let raw_value = if raw_body.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str::<Value>(&raw_body)
+            .with_context(|| format!("remote quote state endpoint {state_url} returned non-JSON body"))?
+    };
+    parse_remote_quote_state(card, quote_id, raw_value).map(Some)
+}
+
 async fn record_quote_offer(
     state: &AppState,
     card: &PublishedAgentCard,
@@ -3117,6 +3359,39 @@ async fn consume_quote_record(
     Ok(Some(record))
 }
 
+async fn sync_remote_quote_state(
+    state: &AppState,
+    card: &PublishedAgentCard,
+    quote_id: &str,
+    timeout_seconds: u64,
+) -> anyhow::Result<QuoteLedgerRecord> {
+    let mut record = get_quote_record(state, quote_id)
+        .await?
+        .ok_or_else(|| anyhow!("quote '{}' was not found in the ledger", quote_id))?;
+    if record.card_id != card.card_id {
+        anyhow::bail!(
+            "quote '{}' belongs to card '{}' rather than '{}'",
+            quote_id,
+            record.card_id,
+            card.card_id
+        );
+    }
+    let Some(remote_state) = fetch_remote_quote_state(card, quote_id, timeout_seconds).await? else {
+        return Ok(record);
+    };
+
+    record.previous_quote_id = remote_state.previous_quote_id;
+    record.superseded_by_quote_id = remote_state.superseded_by_quote_id;
+    record.negotiation_round = remote_state.negotiation_round;
+    record.status = remote_state.status;
+    record.consumed_by_transaction_id = remote_state.consumed_by_transaction_id;
+    record.revoked_reason = remote_state.revoked_reason;
+    record.expires_at_unix_ms = remote_state.expires_at_unix_ms.or(record.expires_at_unix_ms);
+    record.updated_at_unix_ms = remote_state.updated_at_unix_ms.max(record.updated_at_unix_ms);
+    save_quote_record(state, &record).await?;
+    Ok(record)
+}
+
 fn decode_fixed_hex<const N: usize>(raw: &str, label: &str) -> anyhow::Result<[u8; N]> {
     let normalized = normalize_hex(raw)?;
     let bytes = hex::decode(normalized).with_context(|| format!("{label} must be valid hex"))?;
@@ -3139,6 +3414,19 @@ fn resolve_quote_url(card: &PublishedAgentCard, terms: &AgentPaymentTerms) -> Op
         .quote_path
         .as_deref()
         .and_then(|quote_path| absolutize_against_card(card, quote_path))
+}
+
+fn resolve_quote_state_url(
+    card: &PublishedAgentCard,
+    terms: &AgentPaymentTerms,
+    quote_id: &str,
+) -> Option<String> {
+    let template = terms.quote_state_url_template.as_deref()?.trim();
+    if template.is_empty() {
+        return None;
+    }
+    let expanded = template.replace("{quoteId}", quote_id);
+    absolutize_against_card(card, &expanded)
 }
 
 fn absolutize_against_card(card: &PublishedAgentCard, raw: &str) -> Option<String> {
@@ -3192,6 +3480,11 @@ fn enrich_local_card_with_quote_url(
         authority,
         card_id
     );
+    let quote_state_url_template = format!(
+        "{}://{}/api/gateway/agent-cards/quotes/{{quoteId}}/state",
+        base_url.scheme(),
+        authority
+    );
     let quote_issuer_did = quote_signing_key()
         .ok()
         .map(|signing_key| quote_issuer_did_from_signing_key(&signing_key));
@@ -3214,6 +3507,9 @@ fn enrich_local_card_with_quote_url(
             pricing
                 .entry("quoteUrl".to_string())
                 .or_insert_with(|| Value::String(quote_url.clone()));
+            pricing
+                .entry("quoteStateUrlTemplate".to_string())
+                .or_insert_with(|| Value::String(quote_state_url_template.clone()));
             if let Some(quote_issuer_did) = &quote_issuer_did {
                 pricing
                     .entry("quoteIssuerDid".to_string())
@@ -3224,6 +3520,7 @@ fn enrich_local_card_with_quote_url(
                 .or_insert_with(|| {
                     json!({
                         "quoteUrl": quote_url.clone(),
+                        "quoteStateUrlTemplate": quote_state_url_template.clone(),
                         "quoteIssuerDid": quote_issuer_did.clone()
                     })
                 });
@@ -3630,7 +3927,7 @@ fn not_found(message: impl Into<String>) -> (StatusCode, Json<Value>) {
 mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
-    use axum::{Json, Router, routing::{get, post}};
+    use axum::{Json, Router, extract::Path as AxumPath, routing::{get, post}};
     use reqwest::Client;
     use serde_json::json;
     use tokio::time::{Duration, sleep};
@@ -3640,7 +3937,8 @@ mod tests {
     use super::{
         AP2_EXTENSION_URI, AgentAuthentication, AgentCapabilities, AgentCard, AgentExtension,
         AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
-        PublishedAgentCard, RemoteInvocationStatus, RemoteSettlementRequest, SearchAgentCardsRequest,
+        PublishedAgentCard, QuoteLedgerRecord, QuoteLedgerStatus, RemoteInvocationStatus,
+        RemoteSettlementRequest, SearchAgentCardsRequest,
         apply_counter_offer_to_quote, build_search_haystack, build_settlement_quote, derive_card_id,
         consume_quote_record, get_quote_record,
         enrich_local_card_with_quote_url, extract_ap2_roles, extract_ap2_terms,
@@ -3648,7 +3946,8 @@ mod tests {
         get_remote_settlement_by_invocation, invoke_remote_agent_card, matches_search,
         merge_unique_metadata, publish_card_inner, quote_issuer_did_from_signing_key,
         quote_signing_key, remote_task_create_url, remote_task_detail_url, sign_local_settlement_quote,
-        record_quote_offer, revoke_quote_record, validate_remote_settlement_request, verify_signed_quote,
+        record_quote_offer, revoke_quote_record, sign_quote_state, validate_remote_settlement_request,
+        verify_signed_quote,
     };
     use crate::{
         app_state::{StoredTask, TaskStatus, unix_timestamp_ms},
@@ -3881,6 +4180,10 @@ mod tests {
             Some("https://example.com/api/gateway/agent-cards/travel-agent-1234abcd/quote")
         );
         assert_eq!(
+            terms.quote_state_url_template.as_deref(),
+            Some("https://example.com/api/gateway/agent-cards/quotes/{quoteId}/state")
+        );
+        assert_eq!(
             terms.quote_issuer_did.as_deref(),
             Some(expected_quote_issuer_did.as_str())
         );
@@ -4031,7 +4334,8 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.to_string().contains("revoked"));
+        let message = error.to_string();
+        assert!(message.contains("revoked"), "{}", message);
 
         drop(state);
         let _ = fs::remove_file(path);
@@ -4153,7 +4457,7 @@ mod tests {
             apply_counter_offer_to_quote(
                 build_settlement_quote(&card, Some(12.0), Some("Book train")),
                 Some(13.2),
-                Some("quote-prev"),
+                None,
             ),
         )
         .unwrap();
@@ -4189,6 +4493,107 @@ mod tests {
         assert!(quote.signature_hex.is_some());
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_remote_quote_when_state_sync_reports_revocation() {
+        let (state, path) = test_state().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut card = sample_card();
+        card.card.url = format!("http://{address}/a2a");
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "negotiated",
+                "quoteUrl": format!("http://{address}/quotes/booking"),
+                "quoteStateUrlTemplate": format!("http://{address}/quotes/{{quoteId}}/state"),
+                "quoteIssuerDid": quote_issuer_did_from_signing_key(&quote_signing_key().unwrap())
+            }
+        }));
+        let signed_quote = sign_local_settlement_quote(
+            &card,
+            apply_counter_offer_to_quote(
+                build_settlement_quote(&card, Some(12.0), Some("Book train")),
+                Some(13.2),
+                None,
+            ),
+        )
+        .unwrap();
+        let revoked_state = sign_quote_state(&QuoteLedgerRecord {
+            quote_id: signed_quote.quote_id.clone().unwrap(),
+            card_id: card.card_id.clone(),
+            source_kind: "local".to_string(),
+            quote_url: signed_quote.quote_url.clone(),
+            previous_quote_id: signed_quote.previous_quote_id.clone(),
+            superseded_by_quote_id: None,
+            negotiation_round: 1,
+            settlement_supported: true,
+            payment_roles: signed_quote.payment_roles.clone(),
+            currency: signed_quote.currency.clone(),
+            quote_mode: signed_quote.quote_mode.clone(),
+            requested_amount: signed_quote.requested_amount,
+            quoted_amount: signed_quote.quoted_amount,
+            counter_offer_amount: signed_quote.counter_offer_amount,
+            min_amount: signed_quote.min_amount,
+            max_amount: signed_quote.max_amount,
+            description_template: signed_quote.description_template.clone(),
+            warning: None,
+            expires_at_unix_ms: signed_quote.expires_at_unix_ms,
+            issuer_did: signed_quote.issuer_did.clone(),
+            signature_hex: signed_quote.signature_hex.clone(),
+            status: QuoteLedgerStatus::Revoked,
+            consumed_by_transaction_id: None,
+            revoked_reason: Some("merchant cancelled quote".to_string()),
+            created_at_unix_ms: unix_timestamp_ms(),
+            updated_at_unix_ms: unix_timestamp_ms(),
+        })
+        .unwrap();
+        let expected_quote_id = signed_quote.quote_id.clone();
+        let server_quote = signed_quote.clone();
+
+        let server = tokio::spawn(async move {
+            let quote = server_quote.clone();
+            let state_snapshot = revoked_state.clone();
+            let app = Router::new()
+                .route(
+                    "/quotes/booking",
+                    get(move || {
+                        let quote = quote.clone();
+                        async move { Json(quote) }
+                    }),
+                )
+                .route(
+                    "/quotes/:quote_id/state",
+                    get(move |AxumPath(_quote_id): AxumPath<String>| {
+                        let state_snapshot = state_snapshot.clone();
+                        async move { Json(state_snapshot) }
+                    }),
+                );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let error = validate_remote_settlement_request(
+            state.as_ref(),
+            &card,
+            &RemoteSettlementRequest {
+                mandate_id: Uuid::new_v4(),
+                amount: 13.2,
+                description: "Book train".to_string(),
+                quote_id: expected_quote_id,
+                counter_offer_amount: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("revoked"), "{}", message);
+
+        server.abort();
+        drop(state);
+        let _ = fs::remove_file(path);
     }
 
     #[tokio::test]
