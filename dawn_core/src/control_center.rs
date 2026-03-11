@@ -1,11 +1,69 @@
 use std::sync::Arc;
 
-use axum::{Router, response::Html, routing::get};
+use std::{convert::Infallible, time::Duration};
 
-use crate::app_state::AppState;
+use axum::{
+    Router,
+    extract::State,
+    response::{
+        Html,
+        sse::{Event, KeepAlive, Sse},
+    },
+    routing::get,
+};
+use futures_util::stream;
+
+use crate::app_state::{AppState, ConsoleStreamEvent, unix_timestamp_ms};
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/", get(dashboard))
+    Router::new()
+        .route("/", get(dashboard))
+        .route("/events", get(console_event_stream))
+}
+
+async fn console_event_stream(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let initial = ConsoleStreamEvent {
+        channel: "console".to_string(),
+        entity_id: None,
+        status: Some("connected".to_string()),
+        detail: "live event stream connected".to_string(),
+        created_at_unix_ms: unix_timestamp_ms(),
+    };
+    let stream = stream::unfold((Some(initial), state.subscribe_console_events()), |(pending, mut receiver)| async move {
+        if let Some(event) = pending {
+            let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{\"channel\":\"console\",\"detail\":\"serialization_error\"}".to_string());
+            return Some((Ok(Event::default().event("console_update").data(payload)), (None, receiver)));
+        }
+
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{\"channel\":\"console\",\"detail\":\"serialization_error\"}".to_string());
+                    return Some((Ok(Event::default().event("console_update").data(payload)), (None, receiver)));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let payload = serde_json::to_string(&ConsoleStreamEvent {
+                        channel: "console".to_string(),
+                        entity_id: None,
+                        status: Some("lagged".to_string()),
+                        detail: format!("skipped {skipped} console updates"),
+                        created_at_unix_ms: unix_timestamp_ms(),
+                    })
+                    .unwrap_or_else(|_| "{\"channel\":\"console\",\"detail\":\"lagged\"}".to_string());
+                    return Some((Ok(Event::default().event("console_update").data(payload)), (None, receiver)));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }
 
 async fn dashboard() -> Html<&'static str> {
@@ -674,6 +732,7 @@ async fn dashboard() -> Html<&'static str> {
           <span class="pill">AP2-aware payments</span>
           <span class="pill">Node attestation</span>
           <span class="pill">China connector path</span>
+          <span class="pill" id="console-stream-pill">Console stream · connecting</span>
         </div>
         <div class="signal-cluster">
           <div class="signal">
@@ -1070,6 +1129,9 @@ async fn dashboard() -> Html<&'static str> {
     let visibleCommandsCache = [];
     let detailDrawerState = null;
     let marketplaceCatalogCache = { skills: [], agentCards: [] };
+    let consoleEventSource = null;
+    let consoleRefreshTimer = null;
+    let consoleReconnectTimer = null;
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
@@ -1135,6 +1197,58 @@ async fn dashboard() -> Html<&'static str> {
       if (response.status === 404) return null;
       if (!response.ok) throw new Error(`${url} -> ${response.status}`);
       return response.json();
+    }
+    function setConsoleStreamStatus(label, detail = "") {
+      const pill = document.getElementById("console-stream-pill");
+      if (!pill) return;
+      pill.innerHTML = `Console stream · ${escapeHtml(label)}${detail ? ` · <code>${escapeHtml(detail)}</code>` : ""}`;
+    }
+    function scheduleConsoleRefresh(preferredNodeId) {
+      if (consoleRefreshTimer) return;
+      consoleRefreshTimer = window.setTimeout(async () => {
+        consoleRefreshTimer = null;
+        try {
+          await refresh(preferredNodeId);
+        } catch (error) {
+          setConsoleStreamStatus("refresh error", error.message);
+        }
+      }, 220);
+    }
+    function connectConsoleStream() {
+      if (consoleEventSource) {
+        consoleEventSource.close();
+      }
+      if (consoleReconnectTimer) {
+        window.clearTimeout(consoleReconnectTimer);
+        consoleReconnectTimer = null;
+      }
+      setConsoleStreamStatus("connecting");
+      const source = new EventSource("/console/events");
+      consoleEventSource = source;
+      source.onopen = () => {
+        setConsoleStreamStatus("live");
+      };
+      source.addEventListener("console_update", (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          setConsoleStreamStatus(payload.status || payload.channel || "live", payload.channel);
+          scheduleConsoleRefresh();
+        } catch (_error) {
+          setConsoleStreamStatus("live");
+          scheduleConsoleRefresh();
+        }
+      });
+      source.onerror = () => {
+        setConsoleStreamStatus("reconnecting");
+        source.close();
+        consoleEventSource = null;
+        if (!consoleReconnectTimer) {
+          consoleReconnectTimer = window.setTimeout(() => {
+            consoleReconnectTimer = null;
+            connectConsoleStream();
+          }, 3000);
+        }
+      };
     }
     function commandOptionsForNode(node) {
       const capabilities = Array.isArray(node?.capabilities) ? node.capabilities : [];
@@ -2260,7 +2374,8 @@ async fn dashboard() -> Html<&'static str> {
       }
     });
     refresh();
-    setInterval(refresh, 5000);
+    connectConsoleStream();
+    setInterval(() => refresh().catch((error) => setConsoleStreamStatus("polling", error.message)), 30000);
   </script>
 </body>
 </html>"##,
@@ -2292,5 +2407,8 @@ mod tests {
         assert!(markup.contains("connector-matrix"));
         assert!(markup.contains("detail-drawer-form"));
         assert!(markup.contains("submitDrawerApproval"));
+        assert!(markup.contains("console-stream-pill"));
+        assert!(markup.contains("connectConsoleStream"));
+        assert!(markup.contains("/console/events"));
     }
 }

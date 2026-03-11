@@ -11,7 +11,7 @@ use sqlx::{
     FromRow, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use uuid::Uuid;
 use wasmtime::Engine;
 
@@ -509,10 +509,21 @@ pub struct SkillPublisherTrustRootRecord {
 
 pub type NodeSessionSender = mpsc::UnboundedSender<String>;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleStreamEvent {
+    pub channel: String,
+    pub entity_id: Option<String>,
+    pub status: Option<String>,
+    pub detail: String,
+    pub created_at_unix_ms: u128,
+}
+
 pub struct AppState {
     pub engine: Engine,
     pool: SqlitePool,
     node_sessions: RwLock<HashMap<String, NodeSessionSender>>,
+    console_events: broadcast::Sender<ConsoleStreamEvent>,
 }
 
 impl AppState {
@@ -542,11 +553,13 @@ impl AppState {
 
         migrate(&pool).await?;
         ensure_default_policy_profile(&pool).await?;
+        let (console_events, _) = broadcast::channel(512);
 
         Ok(Arc::new(Self {
             engine,
             pool,
             node_sessions: RwLock::new(HashMap::new()),
+            console_events,
         }))
     }
 
@@ -554,8 +567,34 @@ impl AppState {
         &self.pool
     }
 
+    pub fn subscribe_console_events(&self) -> broadcast::Receiver<ConsoleStreamEvent> {
+        self.console_events.subscribe()
+    }
+
+    pub fn emit_console_event(
+        &self,
+        channel: impl Into<String>,
+        entity_id: Option<String>,
+        status: Option<String>,
+        detail: impl Into<String>,
+    ) {
+        let _ = self.console_events.send(ConsoleStreamEvent {
+            channel: channel.into(),
+            entity_id,
+            status,
+            detail: detail.into(),
+            created_at_unix_ms: unix_timestamp_ms(),
+        });
+    }
+
     pub async fn insert_task(&self, task: StoredTask) -> anyhow::Result<StoredTask> {
         save_task(&self.pool, &task).await?;
+        self.emit_console_event(
+            "task",
+            Some(task.task_id.to_string()),
+            Some(task.status.as_db().to_string()),
+            format!("task '{}' inserted", task.name),
+        );
         Ok(task)
     }
 
@@ -640,8 +679,16 @@ impl AppState {
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-
-        self.get_task(task_id).await
+        let task = self.get_task(task_id).await?;
+        if let Some(task) = &task {
+            self.emit_console_event(
+                "task",
+                Some(task.task_id.to_string()),
+                Some(task.status.as_db().to_string()),
+                task.last_update_reason.clone(),
+            );
+        }
+        Ok(task)
     }
 
     pub async fn record_task_event(
@@ -675,6 +722,12 @@ impl AppState {
         .await
         .context("failed to insert task event")?;
 
+        self.emit_console_event(
+            "task_event",
+            Some(event.task_id.to_string()),
+            Some(event.event_type.clone()),
+            event.detail.clone(),
+        );
         Ok(event)
     }
 
@@ -701,6 +754,12 @@ impl AppState {
 
     pub async fn upsert_payment(&self, payment: PaymentRecord) -> anyhow::Result<PaymentRecord> {
         save_payment(&self.pool, &payment).await?;
+        self.emit_console_event(
+            "payment",
+            Some(payment.transaction_id.to_string()),
+            Some(payment.status.as_db().to_string()),
+            format!("payment {:.2} {}", payment.amount, payment.description),
+        );
         Ok(payment)
     }
 
@@ -760,6 +819,12 @@ impl AppState {
         approval: ApprovalRequestRecord,
     ) -> anyhow::Result<ApprovalRequestRecord> {
         save_approval_request(&self.pool, &approval).await?;
+        self.emit_console_event(
+            "approval",
+            Some(approval.approval_id.to_string()),
+            Some(approval.status.as_db().to_string()),
+            approval.title.clone(),
+        );
         Ok(approval)
     }
 
@@ -898,6 +963,12 @@ impl AppState {
         event: ChatIngressEventRecord,
     ) -> anyhow::Result<ChatIngressEventRecord> {
         save_chat_ingress_event(&self.pool, &event).await?;
+        self.emit_console_event(
+            "ingress",
+            Some(event.ingress_id.to_string()),
+            Some(event.status.as_db().to_string()),
+            format!("{} · {}", event.platform, event.event_type),
+        );
         Ok(event)
     }
 
@@ -1038,6 +1109,12 @@ impl AppState {
         node.updated_at_unix_ms = now;
 
         save_node(&self.pool, &node).await?;
+        self.emit_console_event(
+            "node",
+            Some(node.node_id.clone()),
+            Some(node.status.as_db().to_string()),
+            format!("node '{}' upserted", node.display_name),
+        );
         Ok(node)
     }
 
@@ -1065,6 +1142,12 @@ impl AppState {
         node.updated_at_unix_ms = unix_timestamp_ms();
 
         save_node(&self.pool, &node).await?;
+        self.emit_console_event(
+            "node",
+            Some(node.node_id.clone()),
+            Some(node.status.as_db().to_string()),
+            format!("node '{}' metadata updated", node.display_name),
+        );
         Ok(Some(node))
     }
 
@@ -1097,6 +1180,18 @@ impl AppState {
         node.updated_at_unix_ms = unix_timestamp_ms();
 
         save_node(&self.pool, &node).await?;
+        self.emit_console_event(
+            "attestation",
+            Some(node.node_id.clone()),
+            Some(if node.attestation_verified {
+                "verified".to_string()
+            } else {
+                "unverified".to_string()
+            }),
+            node.attestation_error.clone().unwrap_or_else(|| {
+                format!("node '{}' attestation updated", node.display_name)
+            }),
+        );
         Ok(Some(node))
     }
 
@@ -1116,6 +1211,12 @@ impl AppState {
         node.updated_at_unix_ms = unix_timestamp_ms();
 
         save_node(&self.pool, &node).await?;
+        self.emit_console_event(
+            "node_connection",
+            Some(node.node_id.clone()),
+            Some(node.status.as_db().to_string()),
+            format!("node connection is now {}", if connected { "connected" } else { "disconnected" }),
+        );
         Ok(Some(node))
     }
 
@@ -1235,6 +1336,12 @@ impl AppState {
         trust_root: &NodeTrustRootRecord,
     ) -> anyhow::Result<NodeTrustRootRecord> {
         save_node_trust_root(&self.pool, trust_root).await?;
+        self.emit_console_event(
+            "node_trust_root",
+            Some(trust_root.issuer_did.clone()),
+            Some("saved".to_string()),
+            trust_root.label.clone(),
+        );
         Ok(trust_root.clone())
     }
 
@@ -1270,6 +1377,12 @@ impl AppState {
         command: NodeCommandRecord,
     ) -> anyhow::Result<NodeCommandRecord> {
         save_node_command(&self.pool, &command).await?;
+        self.emit_console_event(
+            "node_command",
+            Some(command.command_id.to_string()),
+            Some(command.status.as_db().to_string()),
+            format!("{} on {}", command.command_type, command.node_id),
+        );
         Ok(command)
     }
 
@@ -1308,6 +1421,12 @@ impl AppState {
         rollout: &NodeRolloutRecord,
     ) -> anyhow::Result<NodeRolloutRecord> {
         save_node_rollout(&self.pool, rollout).await?;
+        self.emit_console_event(
+            "rollout",
+            Some(rollout.node_id.clone()),
+            Some(rollout.status.as_db().to_string()),
+            format!("bundle {}", rollout.bundle_hash),
+        );
         Ok(rollout.clone())
     }
 
@@ -1441,6 +1560,12 @@ impl AppState {
         command.updated_at_unix_ms = unix_timestamp_ms();
 
         save_node_command(&self.pool, &command).await?;
+        self.emit_console_event(
+            "node_command",
+            Some(command.command_id.to_string()),
+            Some(command.status.as_db().to_string()),
+            command.error.clone().unwrap_or_else(|| command.command_type.clone()),
+        );
         Ok(Some(command))
     }
 
@@ -1449,6 +1574,12 @@ impl AppState {
         run: OrchestrationRunRecord,
     ) -> anyhow::Result<OrchestrationRunRecord> {
         save_orchestration_run(&self.pool, &run).await?;
+        self.emit_console_event(
+            "orchestration",
+            Some(run.task_id.to_string()),
+            Some(run.status.as_db().to_string()),
+            format!("step {}", run.next_step_index),
+        );
         Ok(run)
     }
 
@@ -1512,6 +1643,12 @@ impl AppState {
         profile: &PolicyProfileRecord,
     ) -> anyhow::Result<PolicyProfileRecord> {
         save_policy_profile(&self.pool, profile).await?;
+        self.emit_console_event(
+            "policy",
+            Some(profile.policy_id.to_string()),
+            Some(format!("v{}", profile.version)),
+            "policy profile updated",
+        );
         Ok(profile.clone())
     }
 
@@ -1568,6 +1705,12 @@ impl AppState {
         trust_root: &PolicyTrustRootRecord,
     ) -> anyhow::Result<PolicyTrustRootRecord> {
         save_policy_trust_root(&self.pool, trust_root).await?;
+        self.emit_console_event(
+            "policy_trust_root",
+            Some(trust_root.issuer_did.clone()),
+            Some("saved".to_string()),
+            trust_root.label.clone(),
+        );
         Ok(trust_root.clone())
     }
 
@@ -1626,6 +1769,12 @@ impl AppState {
         trust_root: &SkillPublisherTrustRootRecord,
     ) -> anyhow::Result<SkillPublisherTrustRootRecord> {
         save_skill_publisher_trust_root(&self.pool, trust_root).await?;
+        self.emit_console_event(
+            "skill_trust_root",
+            Some(trust_root.issuer_did.clone()),
+            Some("saved".to_string()),
+            trust_root.label.clone(),
+        );
         Ok(trust_root.clone())
     }
 
@@ -3414,4 +3563,74 @@ pub fn unix_timestamp_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use uuid::Uuid;
+
+    use super::{AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, StoredTask, TaskStatus, unix_timestamp_ms};
+    use crate::sandbox;
+
+    fn temp_database_url() -> (String, PathBuf) {
+        let mut path = std::env::temp_dir();
+        path.push(format!("dawn-core-app-state-{}.db", Uuid::new_v4()));
+        (format!("sqlite://{}", path.display()), path)
+    }
+
+    #[tokio::test]
+    async fn emits_console_events_for_task_and_approval_updates() {
+        let (database_url, db_path) = temp_database_url();
+        let engine = sandbox::init_engine().unwrap();
+        let state = AppState::new_with_database_url(engine, &database_url)
+            .await
+            .unwrap();
+        let mut receiver = state.subscribe_console_events();
+        let now = unix_timestamp_ms();
+        let task_id = Uuid::new_v4();
+
+        state
+            .insert_task(StoredTask {
+                task_id,
+                parent_task_id: None,
+                name: "console event task".to_string(),
+                instruction: "echo".to_string(),
+                status: TaskStatus::Accepted,
+                linked_payment_id: None,
+                last_update_reason: "created".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+
+        state
+            .upsert_approval_request(ApprovalRequestRecord {
+                approval_id: Uuid::new_v4(),
+                kind: ApprovalRequestKind::NodeCommand,
+                title: "Approve command".to_string(),
+                summary: "Pending command approval".to_string(),
+                task_id: Some(task_id),
+                reference_id: Uuid::new_v4().to_string(),
+                status: ApprovalRequestStatus::Pending,
+                actor: None,
+                decision_reason: None,
+                decision_payload: None,
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+
+        let first = receiver.recv().await.unwrap();
+        let second = receiver.recv().await.unwrap();
+        assert!(matches!(first.channel.as_str(), "task" | "approval"));
+        assert!(matches!(second.channel.as_str(), "task" | "approval"));
+        assert_ne!(first.channel, second.channel);
+
+        drop(state);
+        let _ = fs::remove_file(db_path);
+    }
 }
