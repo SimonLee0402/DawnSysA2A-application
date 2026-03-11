@@ -18,19 +18,24 @@ async fn dashboard() -> Html<&'static str> {
   <title>Dawn Control Center</title>
   <style>
     :root {
-      --bg: #0e141b;
-      --panel: rgba(19, 28, 37, 0.92);
-      --panel-strong: rgba(28, 40, 51, 0.98);
-      --border: rgba(132, 175, 199, 0.18);
-      --text: #f2f5f7;
-      --muted: #9fb5c2;
-      --accent: #e8b949;
-      --accent-2: #53b3cb;
+      --bg: #08111a;
+      --panel: rgba(18, 29, 44, 0.58);
+      --panel-strong: rgba(20, 34, 52, 0.76);
+      --panel-soft: rgba(255, 255, 255, 0.05);
+      --border: rgba(162, 208, 233, 0.2);
+      --border-strong: rgba(233, 247, 255, 0.22);
+      --text: #eef6fb;
+      --muted: #9bb5c7;
+      --accent: #ffd77b;
+      --accent-2: #69d6ff;
+      --accent-3: #8ff7ca;
       --danger: #ff8266;
       --success: #64d2a3;
-      --shadow: 0 28px 80px rgba(0, 0, 0, 0.38);
-      --radius: 22px;
-      --font: "Segoe UI Variable", "Segoe UI", "Noto Sans", sans-serif;
+      --shadow: 0 32px 120px rgba(2, 10, 19, 0.45);
+      --shadow-soft: 0 18px 55px rgba(2, 10, 19, 0.25);
+      --radius: 24px;
+      --font: "Aptos", "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif;
+      --font-display: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
     }
     * { box-sizing: border-box; }
     body {
@@ -39,59 +44,115 @@ async fn dashboard() -> Html<&'static str> {
       font-family: var(--font);
       color: var(--text);
       background:
-        radial-gradient(circle at top left, rgba(83, 179, 203, 0.22), transparent 36%),
-        radial-gradient(circle at top right, rgba(232, 185, 73, 0.2), transparent 34%),
-        linear-gradient(160deg, #071018 0%, #0c1620 45%, #111a23 100%);
+        radial-gradient(circle at 12% 18%, rgba(105, 214, 255, 0.32), transparent 24%),
+        radial-gradient(circle at 84% 12%, rgba(255, 215, 123, 0.24), transparent 22%),
+        radial-gradient(circle at 78% 78%, rgba(143, 247, 202, 0.16), transparent 28%),
+        linear-gradient(150deg, #06111a 0%, #09141f 24%, #0c1724 58%, #0a121b 100%);
+      overflow-x: hidden;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: auto;
+      width: 38vw;
+      height: 38vw;
+      border-radius: 50%;
+      filter: blur(36px);
+      opacity: 0.38;
+      pointer-events: none;
+      z-index: 0;
+      animation: drift 18s ease-in-out infinite;
+    }
+    body::before {
+      top: -8vw;
+      left: -10vw;
+      background: radial-gradient(circle, rgba(102, 205, 255, 0.48), transparent 62%);
+    }
+    body::after {
+      right: -10vw;
+      bottom: -14vw;
+      background: radial-gradient(circle, rgba(255, 215, 123, 0.28), transparent 58%);
+      animation-delay: -7s;
     }
     .shell {
       max-width: 1480px;
       margin: 0 auto;
-      padding: 28px;
+      padding: 30px;
+      position: relative;
+      z-index: 1;
+    }
+    .shell::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 110px 110px;
+      mask-image: radial-gradient(circle at center, black 42%, transparent 82%);
+      pointer-events: none;
+      opacity: 0.45;
     }
     .hero {
       display: grid;
       grid-template-columns: 1.2fr 0.8fr;
       gap: 18px;
-      margin-bottom: 18px;
+      margin-bottom: 22px;
     }
     .hero-card, .panel {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      backdrop-filter: blur(16px);
-    }
-    .hero-card {
-      padding: 26px;
+      backdrop-filter: blur(28px) saturate(145%);
+      -webkit-backdrop-filter: blur(28px) saturate(145%);
       position: relative;
       overflow: hidden;
     }
-    .hero-card::after {
+    .hero-card::before,
+    .panel::before {
       content: "";
       position: absolute;
-      inset: auto -20% -36% 36%;
-      height: 220px;
-      background: radial-gradient(circle, rgba(83, 179, 203, 0.18), transparent 60%);
+      inset: 1px 1px auto 1px;
+      height: 38%;
+      border-radius: calc(var(--radius) - 1px);
+      background: linear-gradient(180deg, rgba(255,255,255,0.16), rgba(255,255,255,0.02) 58%, transparent 100%);
       pointer-events: none;
+    }
+    .hero-card::after,
+    .panel::after {
+      content: "";
+      position: absolute;
+      inset: auto -16% -26% 44%;
+      height: 180px;
+      background: radial-gradient(circle, rgba(105, 214, 255, 0.16), transparent 68%);
+      pointer-events: none;
+    }
+    .hero-card {
+      padding: 28px;
+      min-height: 230px;
     }
     .eyebrow {
       letter-spacing: 0.18em;
       text-transform: uppercase;
       font-size: 11px;
-      color: var(--accent);
-      margin-bottom: 10px;
+      color: var(--accent-2);
+      margin-bottom: 12px;
     }
     h1 {
       margin: 0 0 10px 0;
-      font-size: clamp(32px, 4vw, 52px);
-      line-height: 0.94;
-      max-width: 10ch;
+      font-family: var(--font-display);
+      font-size: clamp(36px, 4.6vw, 60px);
+      line-height: 0.9;
+      max-width: 11ch;
+      letter-spacing: -0.05em;
     }
     .subcopy {
       color: var(--muted);
       max-width: 64ch;
-      line-height: 1.6;
-      margin-bottom: 18px;
+      line-height: 1.7;
+      margin-bottom: 20px;
     }
     .hero-meta {
       display: flex;
@@ -104,30 +165,36 @@ async fn dashboard() -> Html<&'static str> {
       gap: 8px;
       padding: 10px 14px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      color: var(--muted);
+      background: linear-gradient(180deg, rgba(255,255,255,0.1), rgba(255,255,255,0.04));
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #d4e6f1;
       font-size: 13px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
     }
     .stats {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
-      padding: 20px;
+      padding: 22px;
+      align-content: end;
     }
     .stat {
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02));
+      border: 1px solid rgba(255,255,255,0.12);
       border-radius: 18px;
       padding: 18px;
+      box-shadow: var(--shadow-soft);
     }
     .stat-label {
       color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 10px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
     }
     .stat-value {
-      font-size: 34px;
+      font-family: var(--font-display);
+      font-size: 36px;
       font-weight: 700;
       letter-spacing: -0.03em;
     }
@@ -152,12 +219,43 @@ async fn dashboard() -> Html<&'static str> {
     }
     .panel h2 {
       margin: 0;
-      font-size: 18px;
+      font-family: var(--font-display);
+      font-size: 19px;
       letter-spacing: -0.03em;
     }
     .tiny {
       color: var(--muted);
       font-size: 12px;
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 0.9fr;
+      gap: 18px;
+    }
+    .signal-cluster {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 22px;
+    }
+    .signal {
+      padding: 12px 14px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .signal span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+    }
+    .signal strong {
+      font-family: var(--font-display);
+      font-size: 18px;
+      letter-spacing: -0.03em;
     }
     table {
       width: 100%;
@@ -198,8 +296,9 @@ async fn dashboard() -> Html<&'static str> {
     .feed-item {
       padding: 14px;
       border-radius: 16px;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      background: linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
     }
     .feed-item strong {
       display: block;
@@ -232,12 +331,13 @@ async fn dashboard() -> Html<&'static str> {
     }
     input, select, textarea {
       width: 100%;
-      border-radius: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(255, 255, 255, 0.04);
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.07);
       color: var(--text);
       font: inherit;
       padding: 12px 14px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
     }
     textarea {
       min-height: 132px;
@@ -252,14 +352,86 @@ async fn dashboard() -> Html<&'static str> {
       align-items: center;
       flex-wrap: wrap;
     }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .chip {
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    }
     .result-box {
       padding: 14px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255, 255, 255, 0.08);
       color: var(--muted);
       line-height: 1.6;
       min-height: 52px;
+    }
+    .detail-card {
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .detail-metric {
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .detail-metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 6px;
+    }
+    .detail-metric strong {
+      font-size: 14px;
+      color: var(--text);
+      word-break: break-word;
+    }
+    .detail-pre {
+      margin: 0;
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(4, 10, 18, 0.54);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: #d8eef7;
+      overflow: auto;
+      max-height: 360px;
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .command-row {
+      cursor: pointer;
+      transition: background 160ms ease, transform 160ms ease;
+    }
+    .command-row:hover {
+      background: rgba(255,255,255,0.04);
+    }
+    .command-row.active {
+      background: rgba(105,214,255,0.1);
     }
     button {
       border: 0;
@@ -271,20 +443,27 @@ async fn dashboard() -> Html<&'static str> {
       letter-spacing: 0.04em;
       cursor: pointer;
       color: #081018;
-      background: var(--accent);
+      background: linear-gradient(180deg, #ffe39e, #ffcf67);
+      box-shadow: 0 10px 24px rgba(255, 207, 103, 0.22);
     }
     button.secondary {
       color: var(--text);
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: none;
     }
     code {
       font-family: ui-monospace, "Cascadia Code", monospace;
-      color: #f8d67c;
+      color: #ffe39e;
       font-size: 12px;
+    }
+    @keyframes drift {
+      0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+      50% { transform: translate3d(4vw, 2vw, 0) scale(1.08); }
     }
     @media (max-width: 1080px) {
       .hero, .layout { grid-template-columns: 1fr; }
+      .hero-grid, .detail-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -295,7 +474,7 @@ async fn dashboard() -> Html<&'static str> {
         <div class="eyebrow">Dawn Gateway</div>
         <h1>Control Center</h1>
         <div class="subcopy">
-          Operational view across inbound chat traffic, A2A tasks, node trust state, AP2 settlements, and agent-card activity.
+          Liquid-glass operations deck for inbound chat, A2A execution, node trust, AP2 settlement, and agent-to-agent commerce.
         </div>
         <div class="hero-meta">
           <span class="pill">A2A-native routing</span>
@@ -303,8 +482,23 @@ async fn dashboard() -> Html<&'static str> {
           <span class="pill">Node attestation</span>
           <span class="pill">China connector path</span>
         </div>
+        <div class="signal-cluster">
+          <div class="signal">
+            <span>Ops Mode</span>
+            <strong>Attested Runtime</strong>
+          </div>
+          <div class="signal">
+            <span>Control Plane</span>
+            <strong>Live Dispatch</strong>
+          </div>
+          <div class="signal">
+            <span>Design Tone</span>
+            <strong>Liquid Glass</strong>
+          </div>
+        </div>
       </div>
       <div class="hero-card">
+        <div class="eyebrow">Gateway Pulse</div>
         <div class="stats" id="stats"></div>
       </div>
     </section>
@@ -365,6 +559,7 @@ async fn dashboard() -> Html<&'static str> {
               <label for="node-command-type">Command Template</label>
               <select id="node-command-type"></select>
             </div>
+            <div class="chip-row" id="command-template-chips"></div>
             <div class="field">
               <label for="node-command-payload">Payload JSON</label>
               <textarea id="node-command-payload"></textarea>
@@ -387,6 +582,14 @@ async fn dashboard() -> Html<&'static str> {
             <thead><tr><th>Command</th><th>Status</th><th>Payload / Result</th></tr></thead>
             <tbody id="command-rows"></tbody>
           </table>
+          <div class="detail-card" style="margin-top:14px;">
+            <div class="panel-head" style="margin-bottom:12px;">
+              <h2>Command Detail</h2>
+              <span class="tiny" id="command-detail-hint">Select a command row to inspect the full result.</span>
+            </div>
+            <div class="detail-grid" id="command-detail-grid"></div>
+            <pre class="detail-pre" id="command-detail-pre">No command selected.</pre>
+          </div>
         </section>
 
         <section class="panel">
@@ -416,6 +619,8 @@ async fn dashboard() -> Html<&'static str> {
 
   <script>
     const fmt = (value) => value ?? "—";
+    let selectedCommandId = null;
+    let visibleCommandsCache = [];
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
@@ -426,10 +631,24 @@ async fn dashboard() -> Html<&'static str> {
       stat_path: { path: "." },
       shell_exec: { command: "echo dawn node" }
     };
+    const commandTemplateDescriptions = {
+      agent_ping: "Fast liveness probe",
+      list_capabilities: "Attested capability list",
+      system_info: "OS, host, and runtime profile",
+      process_snapshot: "Bounded process inventory",
+      list_directory: "Directory listing with metadata",
+      read_file_preview: "Safe bounded file preview",
+      stat_path: "Filesystem metadata",
+      shell_exec: "Policy-gated shell execution"
+    };
     const ellipsis = (value, max = 66) => {
       if (!value) return "—";
       return value.length > max ? `${value.slice(0, max)}…` : value;
     };
+    const escapeHtml = (value) => String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
     const badge = (value) => {
       const normalized = String(value || "").toLowerCase();
       const tone = /complete|authorized|connected|acknowledged|task_created/.test(normalized)
@@ -469,6 +688,21 @@ async fn dashboard() -> Html<&'static str> {
       payloadInput.value = JSON.stringify(payload, null, 2);
       payloadInput.dataset.dirty = "false";
     }
+    function renderCommandTemplateChips(commandTypes) {
+      const container = document.getElementById("command-template-chips");
+      if (!container) return;
+      container.innerHTML = commandTypes.map((commandType) => `
+        <button type="button" class="chip" onclick="selectCommandTemplate('${commandType}')">
+          ${commandType}<br /><span class="tiny">${commandTemplateDescriptions[commandType] || "Node command"}</span>
+        </button>
+      `).join("");
+    }
+    function selectCommandTemplate(commandType) {
+      const commandSelect = document.getElementById("node-command-type");
+      if (!commandSelect) return;
+      commandSelect.value = commandType;
+      applyCommandTemplate(true);
+    }
     function syncNodeCommandForm(nodes, selectedNodeId) {
       const nodeSelect = document.getElementById("node-command-node");
       const commandSelect = document.getElementById("node-command-type");
@@ -491,7 +725,48 @@ async fn dashboard() -> Html<&'static str> {
       if (currentCommand && commandTypes.includes(currentCommand)) {
         commandSelect.value = currentCommand;
       }
+      renderCommandTemplateChips(commandTypes);
       applyCommandTemplate(false);
+    }
+    function selectCommand(commandId) {
+      selectedCommandId = commandId;
+      const rows = document.querySelectorAll(".command-row");
+      rows.forEach((row) => row.classList.toggle("active", row.dataset.commandId === commandId));
+      renderCommandDetail(
+        visibleCommandsCache.find((command) => command.commandId === selectedCommandId) || null
+      );
+    }
+    function renderCommandDetail(command) {
+      const grid = document.getElementById("command-detail-grid");
+      const pre = document.getElementById("command-detail-pre");
+      const hint = document.getElementById("command-detail-hint");
+      if (!grid || !pre || !hint) return;
+
+      if (!command) {
+        hint.textContent = "Select a command row to inspect the full result.";
+        grid.innerHTML = "";
+        pre.textContent = "No command selected.";
+        return;
+      }
+
+      hint.textContent = `${command.commandType} · ${command.commandId}`;
+      const detailMetrics = [
+        ["Node", command.nodeId],
+        ["Status", command.status],
+        ["Updated", command.updatedAtUnixMs],
+        ["Error", command.error || "—"]
+      ];
+      grid.innerHTML = detailMetrics.map(([label, value]) => `
+        <div class="detail-metric">
+          <span>${label}</span>
+          <strong>${escapeHtml(value)}</strong>
+        </div>
+      `).join("");
+      pre.textContent = JSON.stringify({
+        payload: command.payload,
+        result: command.result,
+        error: command.error
+      }, null, 2);
     }
     async function dispatchNodeCommand() {
       const nodeId = document.getElementById("node-command-node")?.value;
@@ -515,6 +790,7 @@ async fn dashboard() -> Html<&'static str> {
           commandType,
           payload
         });
+        selectedCommandId = response.command.commandId;
         document.getElementById("command-status").innerHTML =
           `Queued <code>${response.command.commandType}</code> for <code>${response.command.nodeId}</code> with delivery <strong>${response.delivery}</strong>.`;
         await refresh(nodeId);
@@ -616,8 +892,13 @@ async fn dashboard() -> Html<&'static str> {
 
       syncNodeCommandForm(nodes, selectedNodeId);
 
-      document.getElementById("command-rows").innerHTML = commands.slice(0, 8).map((command) => `
-        <tr>
+      const visibleCommands = commands.slice(0, 8);
+      visibleCommandsCache = visibleCommands;
+      if (!selectedCommandId && visibleCommands.length) {
+        selectedCommandId = visibleCommands[0].commandId;
+      }
+      document.getElementById("command-rows").innerHTML = visibleCommands.map((command) => `
+        <tr class="command-row ${command.commandId === selectedCommandId ? "active" : ""}" data-command-id="${command.commandId}" onclick="selectCommand('${command.commandId}')">
           <td>
             <strong>${command.commandType}</strong><br />
             <code>${command.commandId}</code>
@@ -625,6 +906,7 @@ async fn dashboard() -> Html<&'static str> {
           <td>${badge(command.status)}</td>
           <td><code>${ellipsis(JSON.stringify(command.result || command.payload || {}), 96)}</code></td>
         </tr>`).join("") || `<tr><td colspan="3" class="tiny">No commands for the selected node.</td></tr>`;
+      renderCommandDetail(visibleCommands.find((command) => command.commandId === selectedCommandId) || visibleCommands[0] || null);
 
       document.getElementById("settlement-rows").innerHTML = settlements.slice(0, 8).map((settlement) => `
         <tr>
