@@ -547,6 +547,8 @@ async fn execute_step(
                 mandate_id: value.mandate_id,
                 amount: value.amount,
                 description: resolve_template_string(&value.description, context),
+                quote_id: None,
+                counter_offer_amount: None,
             });
             let result = agent_cards::invoke_remote_agent_card(
                 state,

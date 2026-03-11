@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,6 +22,8 @@ use crate::{
 };
 
 const AP2_EXTENSION_URI: &str = "https://github.com/google-agentic-commerce/ap2/tree/v0.1";
+const QUOTE_ISSUER_DID_PREFIX: &str = "did:dawn:quote:";
+const DEFAULT_QUOTE_TTL_SECONDS: u64 = 300;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -199,6 +202,8 @@ pub struct RemoteSettlementRequest {
     pub mandate_id: Uuid,
     pub amount: f64,
     pub description: String,
+    pub quote_id: Option<String>,
+    pub counter_offer_amount: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -302,6 +307,8 @@ struct SettlementQuoteQuery {
     remote: Option<bool>,
     timeout_seconds: Option<u64>,
     allow_metadata_fallback: Option<bool>,
+    quote_id: Option<String>,
+    counter_offer_amount: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -358,12 +365,41 @@ pub struct AgentSettlementQuote {
     pub quote_mode: String,
     pub quote_source: String,
     pub quote_url: Option<String>,
+    pub quote_id: Option<String>,
+    pub previous_quote_id: Option<String>,
+    pub counter_offer_amount: Option<f64>,
     pub requested_amount: Option<f64>,
     pub quoted_amount: Option<f64>,
     pub min_amount: Option<f64>,
     pub max_amount: Option<f64>,
     pub description_template: Option<String>,
     pub warning: Option<String>,
+    pub expires_at_unix_ms: Option<u128>,
+    pub issuer_did: Option<String>,
+    pub signature_hex: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignedSettlementQuoteDocument {
+    card_id: String,
+    settlement_supported: bool,
+    payment_roles: Vec<String>,
+    currency: Option<String>,
+    quote_mode: String,
+    quote_source: String,
+    quote_url: Option<String>,
+    quote_id: String,
+    previous_quote_id: Option<String>,
+    counter_offer_amount: Option<f64>,
+    requested_amount: Option<f64>,
+    quoted_amount: Option<f64>,
+    min_amount: Option<f64>,
+    max_amount: Option<f64>,
+    description_template: Option<String>,
+    warning: Option<String>,
+    expires_at_unix_ms: u128,
+    issuer_did: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -374,6 +410,7 @@ struct AgentPaymentTerms {
     quote_method: Option<String>,
     quote_url: Option<String>,
     quote_path: Option<String>,
+    quote_issuer_did: Option<String>,
     flat_amount: Option<f64>,
     min_amount: Option<f64>,
     max_amount: Option<f64>,
@@ -466,18 +503,34 @@ async fn get_settlement_quote(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| not_found("agent card not found"))?;
-    let quote = if query.remote.unwrap_or(false) {
+    let base_quote = if query.remote.unwrap_or(false) {
         fetch_remote_settlement_quote(
             &card,
             query.requested_amount,
             query.description.as_deref(),
             query.timeout_seconds.unwrap_or(10),
             query.allow_metadata_fallback.unwrap_or(true),
+            query.quote_id.as_deref(),
+            query.counter_offer_amount,
         )
         .await
         .map_err(service_error)?
     } else {
         build_settlement_quote(&card, query.requested_amount, query.description.as_deref())
+    };
+    let quote = if query.remote.unwrap_or(false) {
+        base_quote
+    } else {
+        apply_counter_offer_to_quote(
+            base_quote,
+            query.counter_offer_amount,
+            query.quote_id.as_deref(),
+        )
+    };
+    let quote = if card.locally_hosted && !query.remote.unwrap_or(false) {
+        sign_local_settlement_quote(&card, quote).map_err(service_error)?
+    } else {
+        quote
     };
     Ok(Json(quote))
 }
@@ -925,6 +978,8 @@ async fn validate_remote_settlement_request(
         Some(&settlement.description),
         10,
         true,
+        settlement.quote_id.as_deref(),
+        settlement.counter_offer_amount,
     )
     .await
     .with_context(|| {
@@ -968,6 +1023,18 @@ async fn validate_remote_settlement_request(
     {
         anyhow::bail!(
             "remote settlement amount {:.2} must match the agent-card flat quote {:.2}",
+            settlement.amount,
+            quote.quoted_amount.unwrap_or(settlement.amount)
+        );
+    }
+    if matches!(quote.quote_mode.as_str(), "negotiated" | "counter_offer")
+        && quote
+            .quoted_amount
+            .map(|quoted| (quoted - settlement.amount).abs() > f64::EPSILON)
+            .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "remote settlement amount {:.2} does not match negotiated quote {:.2}; supply the accepted counter-offer amount",
             settlement.amount,
             quote.quoted_amount.unwrap_or(settlement.amount)
         );
@@ -2002,6 +2069,11 @@ fn extract_ap2_terms(card: &AgentCard) -> AgentPaymentTerms {
             .and_then(Value::as_str)
             .map(ToString::to_string)
             .filter(|value| !value.trim().is_empty()),
+        quote_issuer_did: pricing
+            .get("quoteIssuerDid")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty()),
         flat_amount: pricing.get("flatAmount").and_then(Value::as_f64),
         min_amount: pricing.get("minAmount").and_then(Value::as_f64),
         max_amount: pricing.get("maxAmount").and_then(Value::as_f64),
@@ -2079,6 +2151,9 @@ fn build_settlement_quote(
         quote_mode,
         quote_source: "metadata".to_string(),
         quote_url,
+        quote_id: None,
+        previous_quote_id: None,
+        counter_offer_amount: None,
         requested_amount,
         quoted_amount,
         min_amount: terms.min_amount,
@@ -2087,7 +2162,244 @@ fn build_settlement_quote(
             .map(ToString::to_string)
             .or(terms.description_template),
         warning,
+        expires_at_unix_ms: None,
+        issuer_did: None,
+        signature_hex: None,
     }
+}
+
+fn apply_counter_offer_to_quote(
+    mut quote: AgentSettlementQuote,
+    counter_offer_amount: Option<f64>,
+    previous_quote_id: Option<&str>,
+) -> AgentSettlementQuote {
+    let original_quote_mode = quote.quote_mode.clone();
+    quote.previous_quote_id = previous_quote_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let Some(counter_offer_amount) = counter_offer_amount else {
+        return quote;
+    };
+
+    quote.counter_offer_amount = Some(counter_offer_amount);
+    if counter_offer_amount <= 0.0 {
+        quote.quote_mode = "counter_offer".to_string();
+        quote.warning = Some("counter-offer amount must be positive".to_string());
+        return quote;
+    }
+    if let Some(min_amount) = quote.min_amount {
+        if counter_offer_amount < min_amount {
+            quote.warning = Some(format!(
+                "counter-offer amount {:.2} is below minAmount {:.2}",
+                counter_offer_amount, min_amount
+            ));
+            return quote;
+        }
+    }
+    if let Some(max_amount) = quote.max_amount {
+        if counter_offer_amount > max_amount {
+            quote.quote_mode = "counter_offer".to_string();
+            quote.warning = Some(format!(
+                "counter-offer amount {:.2} exceeds maxAmount {:.2}",
+                counter_offer_amount, max_amount
+            ));
+            return quote;
+        }
+    }
+
+    if matches!(original_quote_mode.as_str(), "flat" | "fixed") {
+        quote.quote_mode = "counter_offer".to_string();
+        if let Some(quoted_amount) = quote.quoted_amount {
+            if (quoted_amount - counter_offer_amount).abs() > f64::EPSILON {
+                quote.warning = Some(format!(
+                    "counter-offer amount {:.2} was not accepted; current quote remains {:.2}",
+                    counter_offer_amount, quoted_amount
+                ));
+            }
+        }
+        return quote;
+    }
+
+    quote.quote_mode = "counter_offer".to_string();
+    quote.quoted_amount = Some(counter_offer_amount);
+    quote.warning = None;
+    quote
+}
+
+fn default_quote_ttl_seconds() -> u64 {
+    std::env::var("DAWN_QUOTE_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_QUOTE_TTL_SECONDS)
+}
+
+fn quote_signing_key() -> anyhow::Result<SigningKey> {
+    let bytes = match std::env::var("DAWN_QUOTE_SIGNING_SEED_HEX") {
+        Ok(value) => decode_fixed_hex::<32>(&value, "quote signing seed")?,
+        Err(_) => [41_u8; 32],
+    };
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn quote_issuer_did_from_public_key_hex(public_key_hex: &str) -> anyhow::Result<String> {
+    let bytes = decode_fixed_hex::<32>(public_key_hex, "quote public key")?;
+    Ok(format!("{QUOTE_ISSUER_DID_PREFIX}{}", hex::encode(bytes)))
+}
+
+fn quote_issuer_did_from_signing_key(signing_key: &SigningKey) -> String {
+    format!(
+        "{QUOTE_ISSUER_DID_PREFIX}{}",
+        hex::encode(signing_key.verifying_key().to_bytes())
+    )
+}
+
+fn validate_quote_issuer_did(issuer_did: &str, public_key_hex: &str) -> anyhow::Result<()> {
+    let expected = quote_issuer_did_from_public_key_hex(public_key_hex)?;
+    let normalized = issuer_did.to_ascii_lowercase();
+    if normalized != expected {
+        anyhow::bail!(
+            "quote issuer DID '{}' does not match public key; expected '{}'",
+            issuer_did,
+            expected
+        );
+    }
+    Ok(())
+}
+
+fn decode_quote_verifying_key_from_did(issuer_did: &str) -> anyhow::Result<VerifyingKey> {
+    let normalized = issuer_did.trim().to_ascii_lowercase();
+    let raw = normalized
+        .strip_prefix(QUOTE_ISSUER_DID_PREFIX)
+        .ok_or_else(|| anyhow!("quote issuer DID must start with '{}'", QUOTE_ISSUER_DID_PREFIX))?;
+    let public_key_bytes = decode_fixed_hex::<32>(raw, "quote issuer public key")?;
+    VerifyingKey::from_bytes(&public_key_bytes).context("invalid quote issuer Ed25519 public key")
+}
+
+fn signed_quote_payload(document: &SignedSettlementQuoteDocument) -> anyhow::Result<Vec<u8>> {
+    serde_json::to_vec(document).context("failed to serialize settlement quote document")
+}
+
+fn sign_local_settlement_quote(
+    card: &PublishedAgentCard,
+    mut quote: AgentSettlementQuote,
+) -> anyhow::Result<AgentSettlementQuote> {
+    let signing_key = quote_signing_key()?;
+    let issuer_did = quote_issuer_did_from_signing_key(&signing_key);
+    let expires_at_unix_ms =
+        unix_timestamp_ms() + u128::from(default_quote_ttl_seconds()).saturating_mul(1000);
+    let document = SignedSettlementQuoteDocument {
+        card_id: card.card_id.clone(),
+        settlement_supported: quote.settlement_supported,
+        payment_roles: quote.payment_roles.clone(),
+        currency: quote.currency.clone(),
+        quote_mode: quote.quote_mode.clone(),
+        quote_source: "local_signed".to_string(),
+        quote_url: quote.quote_url.clone(),
+        quote_id: Uuid::new_v4().to_string(),
+        previous_quote_id: quote.previous_quote_id.clone(),
+        counter_offer_amount: quote.counter_offer_amount,
+        requested_amount: quote.requested_amount,
+        quoted_amount: quote.quoted_amount,
+        min_amount: quote.min_amount,
+        max_amount: quote.max_amount,
+        description_template: quote.description_template.clone(),
+        warning: quote.warning.clone(),
+        expires_at_unix_ms,
+        issuer_did: issuer_did.clone(),
+    };
+    let signature_hex = hex::encode(signing_key.sign(&signed_quote_payload(&document)?).to_bytes());
+    quote.quote_source = document.quote_source;
+    quote.quote_id = Some(document.quote_id);
+    quote.previous_quote_id = document.previous_quote_id;
+    quote.counter_offer_amount = document.counter_offer_amount;
+    quote.expires_at_unix_ms = Some(document.expires_at_unix_ms);
+    quote.issuer_did = Some(issuer_did);
+    quote.signature_hex = Some(signature_hex);
+    Ok(quote)
+}
+
+fn verify_signed_quote(
+    card: &PublishedAgentCard,
+    quote: &AgentSettlementQuote,
+) -> anyhow::Result<()> {
+    if quote.card_id != card.card_id {
+        anyhow::bail!(
+            "signed quote cardId '{}' does not match requested card '{}'",
+            quote.card_id,
+            card.card_id
+        );
+    }
+    let Some(issuer_did) = quote.issuer_did.as_deref() else {
+        anyhow::bail!("signed quote is missing issuerDid");
+    };
+    let Some(signature_hex) = quote.signature_hex.as_deref() else {
+        anyhow::bail!("signed quote is missing signatureHex");
+    };
+    let expires_at_unix_ms = quote
+        .expires_at_unix_ms
+        .ok_or_else(|| anyhow!("signed quote is missing expiresAtUnixMs"))?;
+    if expires_at_unix_ms < unix_timestamp_ms() {
+        anyhow::bail!("signed quote '{}' has expired", quote.quote_id.as_deref().unwrap_or("?"));
+    }
+
+    let terms = extract_ap2_terms(&card.card);
+    if let Some(expected_issuer_did) = terms.quote_issuer_did.as_deref() {
+        if issuer_did.to_ascii_lowercase() != expected_issuer_did {
+            anyhow::bail!(
+                "quote issuer '{}' does not match expected issuer '{}'",
+                issuer_did,
+                expected_issuer_did
+            );
+        }
+    }
+
+    let verifying_key = decode_quote_verifying_key_from_did(issuer_did)?;
+    validate_quote_issuer_did(issuer_did, &hex::encode(verifying_key.to_bytes()))?;
+    let document = SignedSettlementQuoteDocument {
+        card_id: quote.card_id.clone(),
+        settlement_supported: quote.settlement_supported,
+        payment_roles: quote.payment_roles.clone(),
+        currency: quote.currency.clone(),
+        quote_mode: quote.quote_mode.clone(),
+        quote_source: quote.quote_source.clone(),
+        quote_url: quote.quote_url.clone(),
+        quote_id: quote
+            .quote_id
+            .clone()
+            .ok_or_else(|| anyhow!("signed quote is missing quoteId"))?,
+        previous_quote_id: quote.previous_quote_id.clone(),
+        counter_offer_amount: quote.counter_offer_amount,
+        requested_amount: quote.requested_amount,
+        quoted_amount: quote.quoted_amount,
+        min_amount: quote.min_amount,
+        max_amount: quote.max_amount,
+        description_template: quote.description_template.clone(),
+        warning: quote.warning.clone(),
+        expires_at_unix_ms,
+        issuer_did: issuer_did.to_string(),
+    };
+    let signature_bytes = decode_fixed_hex::<64>(signature_hex, "quote signature")?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(&signed_quote_payload(&document)?, &signature)
+        .context("quote signature verification failed")?;
+    Ok(())
+}
+
+fn decode_fixed_hex<const N: usize>(raw: &str, label: &str) -> anyhow::Result<[u8; N]> {
+    let normalized = normalize_hex(raw)?;
+    let bytes = hex::decode(normalized).with_context(|| format!("{label} must be valid hex"))?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("{label} must be {} bytes long", N))
+}
+
+fn normalize_hex(raw: &str) -> anyhow::Result<String> {
+    Ok(hex::encode(
+        hex::decode(raw.trim()).context("value must be valid hex")?,
+    ))
 }
 
 fn resolve_quote_url(card: &PublishedAgentCard, terms: &AgentPaymentTerms) -> Option<String> {
@@ -2151,6 +2463,9 @@ fn enrich_local_card_with_quote_url(
         authority,
         card_id
     );
+    let quote_issuer_did = quote_signing_key()
+        .ok()
+        .map(|signing_key| quote_issuer_did_from_signing_key(&signing_key));
 
     for extension in &mut card.capabilities.extensions {
         if extension.uri != AP2_EXTENSION_URI {
@@ -2170,9 +2485,19 @@ fn enrich_local_card_with_quote_url(
             pricing
                 .entry("quoteUrl".to_string())
                 .or_insert_with(|| Value::String(quote_url.clone()));
+            if let Some(quote_issuer_did) = &quote_issuer_did {
+                pricing
+                    .entry("quoteIssuerDid".to_string())
+                    .or_insert_with(|| Value::String(quote_issuer_did.clone()));
+            }
         } else {
             root.entry("pricing".to_string())
-                .or_insert_with(|| json!({ "quoteUrl": quote_url.clone() }));
+                .or_insert_with(|| {
+                    json!({
+                        "quoteUrl": quote_url.clone(),
+                        "quoteIssuerDid": quote_issuer_did.clone()
+                    })
+                });
         }
     }
     card
@@ -2184,6 +2509,8 @@ async fn fetch_remote_settlement_quote(
     description: Option<&str>,
     timeout_seconds: u64,
     allow_metadata_fallback: bool,
+    quote_id: Option<&str>,
+    counter_offer_amount: Option<f64>,
 ) -> anyhow::Result<AgentSettlementQuote> {
     let metadata_quote = build_settlement_quote(card, requested_amount, description);
     let terms = extract_ap2_terms(&card.card);
@@ -2211,6 +2538,8 @@ async fn fetch_remote_settlement_quote(
                 "cardId": card.card_id,
                 "requestedAmount": requested_amount,
                 "description": description,
+                "quoteId": quote_id,
+                "counterOfferAmount": counter_offer_amount,
             }))
             .send()
             .await
@@ -2220,6 +2549,11 @@ async fn fetch_remote_settlement_quote(
             .query(&[
                 ("requestedAmount", requested_amount.map(|value| value.to_string())),
                 ("description", description.map(ToString::to_string)),
+                ("quoteId", quote_id.map(ToString::to_string)),
+                (
+                    "counterOfferAmount",
+                    counter_offer_amount.map(|value| value.to_string()),
+                ),
             ])
             .send()
             .await
@@ -2276,9 +2610,16 @@ fn parse_remote_settlement_quote(
     metadata_quote: AgentSettlementQuote,
 ) -> anyhow::Result<AgentSettlementQuote> {
     if let Ok(mut quote) = serde_json::from_value::<AgentSettlementQuote>(raw_value.clone()) {
+        if quote.signature_hex.is_some() || quote.issuer_did.is_some() {
+            verify_signed_quote(card, &quote)?;
+        }
         quote.card_id = card.card_id.clone();
-        quote.quote_source = "remote".to_string();
-        quote.quote_url = Some(quote_url.to_string());
+        if quote.quote_url.is_none() {
+            quote.quote_url = Some(quote_url.to_string());
+        }
+        if quote.signature_hex.is_none() && quote.issuer_did.is_none() {
+            quote.quote_source = "remote".to_string();
+        }
         return Ok(quote);
     }
 
@@ -2315,6 +2656,11 @@ fn parse_remote_settlement_quote(
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .unwrap_or(quote.quote_mode);
+    quote.quote_source = body
+        .get("quoteSource")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "remote".to_string());
     quote.requested_amount = body
         .get("requestedAmount")
         .and_then(Value::as_f64)
@@ -2331,15 +2677,46 @@ fn parse_remote_settlement_quote(
         .map(ToString::to_string)
         .filter(|value| !value.trim().is_empty())
         .or(quote.description_template);
+    quote.quote_id = body
+        .get("quoteId")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or(quote.quote_id);
+    quote.previous_quote_id = body
+        .get("previousQuoteId")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or(quote.previous_quote_id);
+    quote.counter_offer_amount = body
+        .get("counterOfferAmount")
+        .and_then(Value::as_f64)
+        .or(quote.counter_offer_amount);
+    quote.expires_at_unix_ms = body
+        .get("expiresAtUnixMs")
+        .and_then(Value::as_u64)
+        .map(u128::from)
+        .or(quote.expires_at_unix_ms);
+    quote.issuer_did = body
+        .get("issuerDid")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or(quote.issuer_did);
+    quote.signature_hex = body
+        .get("signatureHex")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or(quote.signature_hex);
     quote.warning = body
         .get("warning")
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .filter(|value| !value.trim().is_empty())
         .or(quote.warning);
-    quote.quote_source = "remote".to_string();
     quote.quote_url = Some(quote_url.to_string());
     quote.card_id = card.card_id.clone();
+    if quote.signature_hex.is_some() || quote.issuer_did.is_some() {
+        verify_signed_quote(card, &quote)?;
+    }
     Ok(quote)
 }
 
@@ -2528,12 +2905,13 @@ mod tests {
         AP2_EXTENSION_URI, AgentAuthentication, AgentCapabilities, AgentCard, AgentExtension,
         AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
         PublishedAgentCard, RemoteInvocationStatus, RemoteSettlementRequest, SearchAgentCardsRequest,
-        build_search_haystack, build_settlement_quote, derive_card_id,
+        apply_counter_offer_to_quote, build_search_haystack, build_settlement_quote, derive_card_id,
         enrich_local_card_with_quote_url, extract_ap2_roles, extract_ap2_terms,
         extract_remote_task_id, extract_remote_task_status, fetch_remote_settlement_quote,
         get_remote_settlement_by_invocation, invoke_remote_agent_card, matches_search,
-        merge_unique_metadata, publish_card_inner, remote_task_create_url, remote_task_detail_url,
-        validate_remote_settlement_request,
+        merge_unique_metadata, publish_card_inner, quote_issuer_did_from_signing_key,
+        quote_signing_key, remote_task_create_url, remote_task_detail_url, sign_local_settlement_quote,
+        validate_remote_settlement_request, verify_signed_quote,
     };
     use crate::{
         app_state::{StoredTask, TaskStatus, unix_timestamp_ms},
@@ -2735,6 +3113,23 @@ mod tests {
     }
 
     #[test]
+    fn signs_locally_hosted_quotes_with_expiry_and_signature() {
+        let mut card = sample_card();
+        card.locally_hosted = true;
+        card.card = enrich_local_card_with_quote_url(&card.card_id, true, card.card.clone());
+        let quote = sign_local_settlement_quote(
+            &card,
+            build_settlement_quote(&card, Some(18.5), Some("Settle travel booking")),
+        )
+        .unwrap();
+        assert!(quote.quote_id.is_some());
+        assert!(quote.expires_at_unix_ms.is_some());
+        assert!(quote.signature_hex.is_some());
+        assert!(quote.issuer_did.is_some());
+        verify_signed_quote(&card, &quote).unwrap();
+    }
+
+    #[test]
     fn enriches_locally_hosted_card_with_quote_url() {
         let card = enrich_local_card_with_quote_url(
             "travel-agent-1234abcd",
@@ -2742,10 +3137,40 @@ mod tests {
             sample_card().card,
         );
         let terms = extract_ap2_terms(&card);
+        let expected_quote_issuer_did =
+            quote_issuer_did_from_signing_key(&quote_signing_key().unwrap());
         assert_eq!(
             terms.quote_url.as_deref(),
             Some("https://example.com/api/gateway/agent-cards/travel-agent-1234abcd/quote")
         );
+        assert_eq!(
+            terms.quote_issuer_did.as_deref(),
+            Some(expected_quote_issuer_did.as_str())
+        );
+    }
+
+    #[test]
+    fn accepts_counter_offer_for_manual_quotes() {
+        let mut card = sample_card();
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "manual",
+                "minAmount": 10.0,
+                "maxAmount": 20.0
+            }
+        }));
+        let quote = apply_counter_offer_to_quote(
+            build_settlement_quote(&card, Some(12.0), Some("Settle travel booking")),
+            Some(13.0),
+            Some("quote-prev"),
+        );
+        assert_eq!(quote.quote_mode, "counter_offer");
+        assert_eq!(quote.counter_offer_amount, Some(13.0));
+        assert_eq!(quote.quoted_amount, Some(13.0));
+        assert_eq!(quote.previous_quote_id.as_deref(), Some("quote-prev"));
+        assert!(quote.warning.is_none());
     }
 
     #[tokio::test]
@@ -2757,6 +3182,8 @@ mod tests {
                 mandate_id: Uuid::new_v4(),
                 amount: 25.0,
                 description: "too much".to_string(),
+                quote_id: None,
+                counter_offer_amount: None,
             },
         )
         .await
@@ -2801,14 +3228,79 @@ mod tests {
         }));
 
         let expected_quote_url = format!("http://{address}/quotes/booking");
-        let quote =
-            fetch_remote_settlement_quote(&card, Some(12.0), Some("Book train"), 5, false)
-                .await
-                .unwrap();
+        let quote = fetch_remote_settlement_quote(
+            &card,
+            Some(12.0),
+            Some("Book train"),
+            5,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(quote.quote_source, "remote");
         assert_eq!(quote.quote_url.as_deref(), Some(expected_quote_url.as_str()));
         assert_eq!(quote.quoted_amount, Some(13.2));
         assert_eq!(quote.max_amount, Some(15.0));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetches_and_verifies_signed_remote_quote() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut card = sample_card();
+        card.card.url = format!("http://{address}/a2a");
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "negotiated",
+                "quoteUrl": format!("http://{address}/quotes/booking"),
+                "quoteIssuerDid": quote_issuer_did_from_signing_key(&quote_signing_key().unwrap())
+            }
+        }));
+        let signed_quote = sign_local_settlement_quote(
+            &card,
+            apply_counter_offer_to_quote(
+                build_settlement_quote(&card, Some(12.0), Some("Book train")),
+                Some(13.2),
+                Some("quote-prev"),
+            ),
+        )
+        .unwrap();
+        let expected_quote = signed_quote.clone();
+
+        let server = tokio::spawn(async move {
+            let quote = signed_quote.clone();
+            let app = Router::new().route(
+                "/quotes/booking",
+                get(move || {
+                    let quote = quote.clone();
+                    async move { Json(quote) }
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let quote = fetch_remote_settlement_quote(
+            &card,
+            Some(12.0),
+            Some("Book train"),
+            5,
+            false,
+            Some("quote-prev"),
+            Some(13.2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(quote.quote_id, expected_quote.quote_id);
+        assert_eq!(quote.counter_offer_amount, Some(13.2));
+        assert_eq!(quote.quoted_amount, Some(13.2));
+        assert!(quote.signature_hex.is_some());
 
         server.abort();
     }
@@ -2894,6 +3386,8 @@ mod tests {
                     mandate_id: Uuid::new_v4(),
                     amount: 18.5,
                     description: "Settle remote booking".to_string(),
+                    quote_id: None,
+                    counter_offer_amount: None,
                 }),
             },
             Some(task_id),

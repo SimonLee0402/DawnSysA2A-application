@@ -252,6 +252,7 @@ Agent Cards can now also expose AP2 pricing metadata through the AP2 extension p
       "quoteMode": "flat",
       "quoteMethod": "GET",
       "quoteUrl": "https://gateway.example.com/api/gateway/agent-cards/local-travel-agent/quote",
+      "quoteIssuerDid": "did:dawn:quote:...",
       "flatAmount": 18.5,
       "minAmount": 10.0,
       "maxAmount": 20.0,
@@ -267,12 +268,19 @@ Agent Cards can now also expose AP2 pricing metadata through the AP2 extension p
 - the normalized payment roles
 - pricing metadata such as `currency`, `quoteMode`, `flatAmount`, `minAmount`, and `maxAmount`
 - a warning when the requested amount differs from the flat quote or falls outside the advertised range
+- for locally hosted cards, a signed quote object with `quoteId`, `expiresAtUnixMs`, `issuerDid`, and `signatureHex`
 
 If the card advertises `pricing.quoteUrl` or `pricing.quotePath`, `GET /api/gateway/agent-cards/{card_id}/quote?requestedAmount=12.0&remote=true` now performs a live remote quote fetch. DawnCore accepts either the native `AgentSettlementQuote` JSON shape or a looser `{ "quote": { ... } }` envelope.
 
+The quote endpoint also supports `quoteId` and `counterOfferAmount` so a client can negotiate a second-pass quote:
+
+- `GET /api/gateway/agent-cards/{card_id}/quote?requestedAmount=12.0&counterOfferAmount=13.2&quoteId=<prior-quote-id>`
+- for `manual` / `negotiated` pricing, DawnCore can accept the counter-offer and mint a new signed quote
+- for `flat` / `fixed` pricing, DawnCore keeps the original quote and returns a warning that the counter-offer was not accepted
+
 When a locally hosted card is published through DawnCore, the gateway now auto-populates `pricing.quoteUrl` when the AP2 extension exists but no quote endpoint is declared. That lets another Dawn gateway discover and negotiate against the local quote endpoint without hand-editing the card JSON.
 
-When a settlement request is actually submitted, DawnCore now validates the amount against the negotiated quote first, and only falls back to metadata pricing if the remote quote endpoint is unavailable and fallback is allowed.
+When a settlement request is actually submitted, DawnCore now validates the amount against the negotiated quote first, verifies signed remote quotes when `issuerDid/signatureHex` are present, enforces `expiresAtUnixMs`, and only falls back to metadata pricing if the remote quote endpoint is unavailable and fallback is allowed.
 
 Publish request shape:
 
@@ -890,7 +898,10 @@ Removed legacy launchers:
   - AP2 extension pricing metadata now parses `currency`, `quoteMode`, `flatAmount`, `minAmount`, and `maxAmount`
   - quote generation warns when a requested amount differs from an advertised flat quote
   - locally hosted cards now auto-advertise a concrete `quoteUrl`
+  - locally hosted quote responses are now signed and carry `quoteId`, `expiresAtUnixMs`, `issuerDid`, and `signatureHex`
+  - counter-offers are accepted for `manual` quotes and rejected for `flat` quotes
   - DawnCore can fetch a live remote quote from the declared quote endpoint before settlement validation
+  - DawnCore verifies a signed remote quote before using it for settlement validation
   - settlement creation is rejected when the requested amount exceeds the agent-card `maxAmount`
 - Runtime Wasm registry smoke test:
   - `POST /api/gateway/skills/register` accepted a minimal `echo-skill@1.0.0`
@@ -926,6 +937,6 @@ Removed legacy launchers:
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
 - Remote A2A settlement is now persisted and AP2-linked, but it still assumes a local settlement authority; there is not yet a distributed AP2 settlement network or reconciliation flow across gateways.
-- Agent Card quote support now includes a live remote quote round-trip, but there is still no signed quote envelope, counter-offer loop, or quote-expiration / quote-id replay protection between agents.
+- Agent Card quote support now includes signed quote objects, `quoteId`, expiration, and a basic counter-offer loop, but there is still no quote replay ledger, quote revocation channel, or multi-round negotiation state persisted across gateways.
 - Policy and skill rollout now reach attested nodes and the node can independently verify trusted policy and skill publisher signatures, but there is not yet a node-side persisted trust-root store or full artifact-by-artifact Wasm binary verification against downloaded module bytes.
 - Runtime multi-process smoke is still blocked by the current host command policy, but the rollout + attestation + command loop is now covered by an in-process integration test instead of relying only on unit tests.
