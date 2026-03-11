@@ -121,6 +121,126 @@ pub struct PaymentRecord {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ApprovalRequestKind {
+    NodeCommand,
+    Payment,
+}
+
+impl ApprovalRequestKind {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::NodeCommand => "node_command",
+            Self::Payment => "payment",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "node_command" => Ok(Self::NodeCommand),
+            "payment" => Ok(Self::Payment),
+            _ => Err(anyhow!("unknown approval request kind '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRequestStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl ApprovalRequestStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            _ => Err(anyhow!("unknown approval request status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestRecord {
+    pub approval_id: Uuid,
+    pub kind: ApprovalRequestKind,
+    pub title: String,
+    pub summary: String,
+    pub task_id: Option<Uuid>,
+    pub reference_id: String,
+    pub status: ApprovalRequestStatus,
+    pub actor: Option<String>,
+    pub decision_reason: Option<String>,
+    pub decision_payload: Option<Value>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatIngressStatus {
+    Received,
+    TaskCreated,
+    Replied,
+    Ignored,
+    Failed,
+}
+
+impl ChatIngressStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::TaskCreated => "task_created",
+            Self::Replied => "replied",
+            Self::Ignored => "ignored",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "received" => Ok(Self::Received),
+            "task_created" => Ok(Self::TaskCreated),
+            "replied" => Ok(Self::Replied),
+            "ignored" => Ok(Self::Ignored),
+            "failed" => Ok(Self::Failed),
+            _ => Err(anyhow!("unknown chat ingress status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatIngressEventRecord {
+    pub ingress_id: Uuid,
+    pub platform: String,
+    pub event_type: String,
+    pub chat_id: Option<String>,
+    pub sender_id: Option<String>,
+    pub sender_display: Option<String>,
+    pub text: String,
+    pub raw_payload: Value,
+    pub linked_task_id: Option<Uuid>,
+    pub reply_text: Option<String>,
+    pub status: ChatIngressStatus,
+    pub error: Option<String>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum NodeSessionStatus {
     Registered,
     Connected,
@@ -185,6 +305,7 @@ pub struct NodeAttestationState {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeCommandStatus {
+    PendingApproval,
     Queued,
     Dispatched,
     Succeeded,
@@ -194,6 +315,7 @@ pub enum NodeCommandStatus {
 impl NodeCommandStatus {
     fn as_db(self) -> &'static str {
         match self {
+            Self::PendingApproval => "pending_approval",
             Self::Queued => "queued",
             Self::Dispatched => "dispatched",
             Self::Succeeded => "succeeded",
@@ -203,6 +325,7 @@ impl NodeCommandStatus {
 
     fn from_db(raw: &str) -> anyhow::Result<Self> {
         match raw {
+            "pending_approval" => Ok(Self::PendingApproval),
             "queued" => Ok(Self::Queued),
             "dispatched" => Ok(Self::Dispatched),
             "succeeded" => Ok(Self::Succeeded),
@@ -630,6 +753,249 @@ impl AppState {
         .context("failed to fetch payment")?;
 
         row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn upsert_approval_request(
+        &self,
+        approval: ApprovalRequestRecord,
+    ) -> anyhow::Result<ApprovalRequestRecord> {
+        save_approval_request(&self.pool, &approval).await?;
+        Ok(approval)
+    }
+
+    pub async fn list_approval_requests(
+        &self,
+        status: Option<ApprovalRequestStatus>,
+    ) -> anyhow::Result<Vec<ApprovalRequestRecord>> {
+        let rows = if let Some(status) = status {
+            sqlx::query_as::<_, ApprovalRequestRow>(
+                r#"
+                SELECT
+                    approval_id,
+                    kind,
+                    title,
+                    summary,
+                    task_id,
+                    reference_id,
+                    status,
+                    actor,
+                    decision_reason,
+                    decision_payload,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM approval_requests
+                WHERE status = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+            )
+            .bind(status.as_db())
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list approval requests by status")?
+        } else {
+            sqlx::query_as::<_, ApprovalRequestRow>(
+                r#"
+                SELECT
+                    approval_id,
+                    kind,
+                    title,
+                    summary,
+                    task_id,
+                    reference_id,
+                    status,
+                    actor,
+                    decision_reason,
+                    decision_payload,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM approval_requests
+                ORDER BY created_at_unix_ms DESC
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list approval requests")?
+        };
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn get_approval_request(
+        &self,
+        approval_id: Uuid,
+    ) -> anyhow::Result<Option<ApprovalRequestRecord>> {
+        let row = sqlx::query_as::<_, ApprovalRequestRow>(
+            r#"
+            SELECT
+                approval_id,
+                kind,
+                title,
+                summary,
+                task_id,
+                reference_id,
+                status,
+                actor,
+                decision_reason,
+                decision_payload,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM approval_requests
+            WHERE approval_id = ?1
+            "#,
+        )
+        .bind(approval_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch approval request")?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_pending_approval_by_reference(
+        &self,
+        kind: ApprovalRequestKind,
+        reference_id: &str,
+    ) -> anyhow::Result<Option<ApprovalRequestRecord>> {
+        let row = sqlx::query_as::<_, ApprovalRequestRow>(
+            r#"
+            SELECT
+                approval_id,
+                kind,
+                title,
+                summary,
+                task_id,
+                reference_id,
+                status,
+                actor,
+                decision_reason,
+                decision_payload,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM approval_requests
+            WHERE kind = ?1 AND reference_id = ?2 AND status = ?3
+            ORDER BY created_at_unix_ms DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(kind.as_db())
+        .bind(reference_id)
+        .bind(ApprovalRequestStatus::Pending.as_db())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to fetch pending approval request for {}:{}",
+                kind.as_db(),
+                reference_id
+            )
+        })?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn upsert_chat_ingress_event(
+        &self,
+        event: ChatIngressEventRecord,
+    ) -> anyhow::Result<ChatIngressEventRecord> {
+        save_chat_ingress_event(&self.pool, &event).await?;
+        Ok(event)
+    }
+
+    pub async fn get_chat_ingress_event(
+        &self,
+        ingress_id: Uuid,
+    ) -> anyhow::Result<Option<ChatIngressEventRecord>> {
+        let row = sqlx::query_as::<_, ChatIngressEventRow>(
+            r#"
+            SELECT
+                ingress_id,
+                platform,
+                event_type,
+                chat_id,
+                sender_id,
+                sender_display,
+                text,
+                raw_payload,
+                linked_task_id,
+                reply_text,
+                status,
+                error,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM chat_ingress_events
+            WHERE ingress_id = ?1
+            "#,
+        )
+        .bind(ingress_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch chat ingress event")?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_chat_ingress_events(
+        &self,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<ChatIngressEventRecord>> {
+        let rows = match limit {
+            Some(limit) => {
+                sqlx::query_as::<_, ChatIngressEventRow>(
+                    r#"
+                    SELECT
+                        ingress_id,
+                        platform,
+                        event_type,
+                        chat_id,
+                        sender_id,
+                        sender_display,
+                        text,
+                        raw_payload,
+                        linked_task_id,
+                        reply_text,
+                        status,
+                        error,
+                        created_at_unix_ms,
+                        updated_at_unix_ms
+                    FROM chat_ingress_events
+                    ORDER BY created_at_unix_ms DESC
+                    LIMIT ?1
+                    "#,
+                )
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to list recent chat ingress events")?
+            }
+            None => {
+                sqlx::query_as::<_, ChatIngressEventRow>(
+                    r#"
+                    SELECT
+                        ingress_id,
+                        platform,
+                        event_type,
+                        chat_id,
+                        sender_id,
+                        sender_display,
+                        text,
+                        raw_payload,
+                        linked_task_id,
+                        reply_text,
+                        status,
+                        error,
+                        created_at_unix_ms,
+                        updated_at_unix_ms
+                    FROM chat_ingress_events
+                    ORDER BY created_at_unix_ms DESC
+                    "#,
+                )
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to list chat ingress events")?
+            }
+        };
+
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     pub async fn upsert_node(
@@ -1422,6 +1788,87 @@ impl TryFrom<PaymentRow> for PaymentRecord {
 }
 
 #[derive(FromRow)]
+struct ApprovalRequestRow {
+    approval_id: String,
+    kind: String,
+    title: String,
+    summary: String,
+    task_id: Option<String>,
+    reference_id: String,
+    status: String,
+    actor: Option<String>,
+    decision_reason: Option<String>,
+    decision_payload: Option<String>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<ApprovalRequestRow> for ApprovalRequestRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: ApprovalRequestRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            approval_id: parse_uuid(&row.approval_id, "approval_id")?,
+            kind: ApprovalRequestKind::from_db(&row.kind)?,
+            title: row.title,
+            summary: row.summary,
+            task_id: parse_uuid_opt(row.task_id, "task_id")?,
+            reference_id: row.reference_id,
+            status: ApprovalRequestStatus::from_db(&row.status)?,
+            actor: row.actor,
+            decision_reason: row.decision_reason,
+            decision_payload: row
+                .decision_payload
+                .map(|value| parse_json_field(&value, "decision_payload"))
+                .transpose()?,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct ChatIngressEventRow {
+    ingress_id: String,
+    platform: String,
+    event_type: String,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+    text: String,
+    raw_payload: String,
+    linked_task_id: Option<String>,
+    reply_text: Option<String>,
+    status: String,
+    error: Option<String>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<ChatIngressEventRow> for ChatIngressEventRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: ChatIngressEventRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            ingress_id: parse_uuid(&row.ingress_id, "ingress_id")?,
+            platform: row.platform,
+            event_type: row.event_type,
+            chat_id: row.chat_id,
+            sender_id: row.sender_id,
+            sender_display: row.sender_display,
+            text: row.text,
+            raw_payload: parse_json_field(&row.raw_payload, "raw_payload")?,
+            linked_task_id: parse_uuid_opt(row.linked_task_id, "linked_task_id")?,
+            reply_text: row.reply_text,
+            status: ChatIngressStatus::from_db(&row.status)?,
+            error: row.error,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct NodeRow {
     node_id: String,
     display_name: String,
@@ -1770,6 +2217,60 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_payments_task_id
         ON payments(task_id)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS approval_requests (
+            approval_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            task_id TEXT,
+            reference_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            actor TEXT,
+            decision_reason TEXT,
+            decision_payload TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_status
+        ON approval_requests(status, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_reference
+        ON approval_requests(kind, reference_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_ingress_events (
+            ingress_id TEXT PRIMARY KEY,
+            platform TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            chat_id TEXT,
+            sender_id TEXT,
+            sender_display TEXT,
+            text TEXT NOT NULL,
+            raw_payload TEXT NOT NULL,
+            linked_task_id TEXT,
+            reply_text TEXT,
+            status TEXT NOT NULL,
+            error TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_platform
+        ON chat_ingress_events(platform, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_status
+        ON chat_ingress_events(status, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_linked_task_id
+        ON chat_ingress_events(linked_task_id, created_at_unix_ms DESC)
         "#,
         r#"
         CREATE TABLE IF NOT EXISTS nodes (
@@ -2267,6 +2768,124 @@ async fn save_payment(pool: &SqlitePool, payment: &PaymentRecord) -> anyhow::Res
     .execute(pool)
     .await
     .context("failed to save payment")?;
+
+    Ok(())
+}
+
+async fn save_approval_request(
+    pool: &SqlitePool,
+    approval: &ApprovalRequestRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO approval_requests (
+            approval_id,
+            kind,
+            title,
+            summary,
+            task_id,
+            reference_id,
+            status,
+            actor,
+            decision_reason,
+            decision_payload,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(approval_id) DO UPDATE SET
+            kind = excluded.kind,
+            title = excluded.title,
+            summary = excluded.summary,
+            task_id = excluded.task_id,
+            reference_id = excluded.reference_id,
+            status = excluded.status,
+            actor = excluded.actor,
+            decision_reason = excluded.decision_reason,
+            decision_payload = excluded.decision_payload,
+            created_at_unix_ms = excluded.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(approval.approval_id.to_string())
+    .bind(approval.kind.as_db())
+    .bind(&approval.title)
+    .bind(&approval.summary)
+    .bind(approval.task_id.map(|value| value.to_string()))
+    .bind(&approval.reference_id)
+    .bind(approval.status.as_db())
+    .bind(&approval.actor)
+    .bind(&approval.decision_reason)
+    .bind(
+        approval
+            .decision_payload
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(u128_to_i64(approval.created_at_unix_ms)?)
+    .bind(u128_to_i64(approval.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save approval request")?;
+
+    Ok(())
+}
+
+async fn save_chat_ingress_event(
+    pool: &SqlitePool,
+    event: &ChatIngressEventRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chat_ingress_events (
+            ingress_id,
+            platform,
+            event_type,
+            chat_id,
+            sender_id,
+            sender_display,
+            text,
+            raw_payload,
+            linked_task_id,
+            reply_text,
+            status,
+            error,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ON CONFLICT(ingress_id) DO UPDATE SET
+            platform = excluded.platform,
+            event_type = excluded.event_type,
+            chat_id = excluded.chat_id,
+            sender_id = excluded.sender_id,
+            sender_display = excluded.sender_display,
+            text = excluded.text,
+            raw_payload = excluded.raw_payload,
+            linked_task_id = excluded.linked_task_id,
+            reply_text = excluded.reply_text,
+            status = excluded.status,
+            error = excluded.error,
+            created_at_unix_ms = chat_ingress_events.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(event.ingress_id.to_string())
+    .bind(&event.platform)
+    .bind(&event.event_type)
+    .bind(&event.chat_id)
+    .bind(&event.sender_id)
+    .bind(&event.sender_display)
+    .bind(&event.text)
+    .bind(serde_json::to_string(&event.raw_payload).context("failed to serialize ingress payload")?)
+    .bind(event.linked_task_id.map(|value| value.to_string()))
+    .bind(&event.reply_text)
+    .bind(event.status.as_db())
+    .bind(&event.error)
+    .bind(u128_to_i64(event.created_at_unix_ms)?)
+    .bind(u128_to_i64(event.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save chat ingress event")?;
 
     Ok(())
 }

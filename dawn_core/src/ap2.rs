@@ -14,7 +14,10 @@ use uuid::Uuid;
 
 use crate::{
     a2a,
-    app_state::{AppState, PaymentRecord, PaymentStatus, TaskStatus, unix_timestamp_ms},
+    app_state::{
+        AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, PaymentRecord,
+        PaymentStatus, TaskStatus, unix_timestamp_ms,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -133,6 +136,30 @@ pub async fn request_payment_authorization(
         updated_at_unix_ms: unix_timestamp_ms(),
     };
     state.upsert_payment(payment).await?;
+    let now = unix_timestamp_ms();
+    state
+        .upsert_approval_request(ApprovalRequestRecord {
+            approval_id: Uuid::new_v4(),
+            kind: ApprovalRequestKind::Payment,
+            title: "AP2 payment authorization".to_string(),
+            summary: format!(
+                "Authorize payment {:.2} for {}",
+                req.amount, req.description
+            ),
+            task_id: req.task_id,
+            reference_id: transaction_id.to_string(),
+            status: ApprovalRequestStatus::Pending,
+            actor: None,
+            decision_reason: None,
+            decision_payload: Some(json!({
+                "mandateId": req.mandate_id,
+                "amount": req.amount,
+                "description": req.description,
+            })),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        })
+        .await?;
     if let Some(task_id) = req.task_id {
         state
             .update_task(
@@ -155,6 +182,72 @@ pub async fn request_payment_authorization(
         status: PaymentStatus::PendingPhysicalAuth,
         transaction_id,
         verification_message: "hardware approval required".to_string(),
+    })
+}
+
+pub async fn submit_signed_payment_authorization(
+    state: &Arc<AppState>,
+    req: PaymentRequest,
+) -> anyhow::Result<PaymentResponse> {
+    process_signed_payment_authorization(state, req).await
+}
+
+pub async fn reject_payment_authorization(
+    state: &Arc<AppState>,
+    transaction_id: Uuid,
+    actor: &str,
+    reason: &str,
+) -> anyhow::Result<PaymentResponse> {
+    let mut payment = state
+        .get_payment(transaction_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown transactionId"))?;
+
+    if payment.status != PaymentStatus::PendingPhysicalAuth {
+        return Ok(PaymentResponse {
+            status: payment.status,
+            transaction_id,
+            verification_message: payment.verification_message,
+        });
+    }
+
+    payment.status = PaymentStatus::Rejected;
+    payment.verification_message = format!("payment rejected by {actor}: {reason}");
+    payment.updated_at_unix_ms = unix_timestamp_ms();
+    let payment = state.upsert_payment(payment).await?;
+    resolve_approval_request(
+        state,
+        transaction_id,
+        ApprovalRequestStatus::Rejected,
+        Some(actor.to_string()),
+        Some(reason.to_string()),
+        None,
+    )
+    .await?;
+
+    if let Some(task_id) = payment.task_id {
+        state
+            .update_task(
+                task_id,
+                TaskStatus::Failed,
+                "AP2 authorization was rejected by an operator",
+                Some(transaction_id),
+            )
+            .await?;
+        state
+            .record_task_event(
+                task_id,
+                "payment_rejected",
+                format!("payment transaction {transaction_id} was rejected by operator {actor}"),
+            )
+            .await?;
+    }
+    crate::agent_cards::sync_remote_settlement_from_payment(state, &payment).await?;
+
+    Ok(PaymentResponse {
+        status: payment.status,
+        transaction_id,
+        verification_message: payment.verification_message,
     })
 }
 
@@ -253,6 +346,22 @@ async fn process_signed_payment_authorization(
 
     let status = payment.status;
     let payment = state.upsert_payment(payment).await?;
+    resolve_approval_request(
+        state,
+        transaction_id,
+        if status == PaymentStatus::Authorized {
+            ApprovalRequestStatus::Approved
+        } else {
+            ApprovalRequestStatus::Rejected
+        },
+        payment.mcu_public_did.clone(),
+        Some(verification_message.clone()),
+        Some(json!({
+            "verificationMessage": verification_message,
+            "status": status,
+        })),
+    )
+    .await?;
     crate::agent_cards::sync_remote_settlement_from_payment(state, &payment).await?;
     if status == PaymentStatus::Authorized {
         if let Some(task_id) = resume_task_id {
@@ -293,6 +402,29 @@ fn verify_signature(public_did: &str, signature_hex: &str, payload: &str) -> any
     let signature = Signature::from_bytes(&signature);
 
     verifying_key.verify(payload.as_bytes(), &signature)?;
+    Ok(())
+}
+
+async fn resolve_approval_request(
+    state: &Arc<AppState>,
+    transaction_id: Uuid,
+    status: ApprovalRequestStatus,
+    actor: Option<String>,
+    reason: Option<String>,
+    payload: Option<Value>,
+) -> anyhow::Result<()> {
+    let Some(mut approval) = state
+        .get_pending_approval_by_reference(ApprovalRequestKind::Payment, &transaction_id.to_string())
+        .await?
+    else {
+        return Ok(());
+    };
+    approval.status = status;
+    approval.actor = actor;
+    approval.decision_reason = reason;
+    approval.decision_payload = payload;
+    approval.updated_at_unix_ms = unix_timestamp_ms();
+    state.upsert_approval_request(approval).await?;
     Ok(())
 }
 

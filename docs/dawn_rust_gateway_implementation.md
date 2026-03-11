@@ -8,6 +8,7 @@ The Rust backend now has four active slices:
 - `AP2` payment authorization with a two-step hardware signature flow.
 - `Gateway` control-plane scaffolding for nodes, model connectors, and chat connectors.
 - `Agent Card` publishing, discovery, remote invocation, and local `.well-known` exposure.
+- `Chat ingress + Approval Center + Control Center` for inbound routing and operator action loops.
 
 The project direction is now Rust-only for runtime startup. The legacy Django/Vue launch scripts should be treated as obsolete.
 
@@ -21,8 +22,14 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
   - Accepts new tasks and tracks sandbox-binding state.
 - `dawn_core/src/ap2.rs`
   - Creates pending payment transactions and verifies MCU signatures before authorizing them.
+- `dawn_core/src/chat_ingress.rs`
+  - Accepts inbound Telegram and Feishu webhook traffic, persists ingress events, and routes text into A2A tasks.
+- `dawn_core/src/control_center.rs`
+  - Serves the operator-facing dashboard at `/console`.
 - `dawn_core/src/gateway.rs`
   - Exposes the high-level gateway status and nests the control-plane and connector routers.
+- `dawn_core/src/approval_center.rs`
+  - Exposes a unified approval queue for pending node-command approvals and AP2 payment approvals.
 - `dawn_core/src/control_plane.rs`
   - Handles node registration, heartbeats, queued commands, live WebSocket sessions, rollout bundles, and command results.
 - `dawn_core/src/connectors.rs`
@@ -58,6 +65,9 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/policy/audit`
 - `GET /api/gateway/policy/trust-roots`
 - `POST /api/gateway/policy/trust-roots`
+- `GET /api/gateway/approvals`
+- `GET /api/gateway/approvals/{approval_id}`
+- `POST /api/gateway/approvals/{approval_id}/decision`
 - `GET /api/gateway/control-plane/nodes`
 - `POST /api/gateway/control-plane/nodes/register`
 - `GET /api/gateway/control-plane/nodes/trust-roots`
@@ -82,6 +92,11 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/chat/wecom/send`
 - `POST /api/gateway/connectors/chat/wechat-official-account/send`
 - `POST /api/gateway/connectors/chat/qq/send`
+- `GET /api/gateway/ingress/status`
+- `GET /api/gateway/ingress/events`
+- `POST /api/gateway/ingress/telegram/webhook/{secret}`
+- `POST /api/gateway/ingress/feishu/events`
+- `GET /console`
 - `GET /api/gateway/agent-cards/status`
 - `GET /api/gateway/agent-cards/`
 - `GET /api/gateway/agent-cards/search`
@@ -167,6 +182,43 @@ This allows one step to feed the next, for example:
 - a node command returns machine state
 - a model connector summarizes it
 - a chat connector delivers the summary to a channel
+
+## Chat Ingress And Control Center
+
+The gateway now has a first inbound chat layer plus a lightweight operator console.
+
+Ingress endpoints:
+
+- `GET /api/gateway/ingress/status`
+- `GET /api/gateway/ingress/events?limit=20`
+- `POST /api/gateway/ingress/telegram/webhook/{secret}`
+- `POST /api/gateway/ingress/feishu/events`
+
+Behavior:
+
+- Telegram ingress validates `DAWN_TELEGRAM_WEBHOOK_SECRET` when configured.
+- Feishu ingress supports the standard challenge response plus text-message delivery events.
+- inbound text is persisted in `chat_ingress_events` and then routed into the existing A2A task pipeline.
+- `/orchestrate ...`, `/wasm ...`, and `/task ...` are normalized into their corresponding A2A instruction formats before task creation.
+- successful ingress records link back to the created task, so the console can pivot from chat traffic to orchestration state.
+
+Control Center:
+
+- `GET /console` serves a live dashboard for inbound chat, tasks, nodes, settlements, and agent cards.
+- the dashboard now includes an `Approval Center` feed for pending node-command and AP2 approvals.
+- the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
+
+Approval Center:
+
+- `GET /api/gateway/approvals?status=pending`
+- `GET /api/gateway/approvals/{approval_id}`
+- `POST /api/gateway/approvals/{approval_id}/decision`
+- `node_command` approvals are created when a node command is dispatched with `payload.approvalRequired = true` or when the command type is `shell_exec`.
+- `payment` approvals are created automatically when AP2 enters `pending_physical_auth`.
+- approving a node-command request releases the command into the existing control-plane queue.
+- rejecting a node-command request marks the command as `failed`.
+- approving a payment approval requires the same MCU DID + signature payload that `POST /api/ap2/authorize` already accepts.
+- rejecting a payment approval marks the payment and any linked settlement as `rejected`.
 
 An orchestration graph can also pause on payment approval:
 
@@ -904,6 +956,13 @@ Removed legacy launchers:
   - `POST /api/gateway/connectors/chat/wechat-official-account/send`
   - `POST /api/gateway/connectors/chat/qq/send`
   - both returned `mode = dry_run` with the expected missing-credential reason and echoed target identifiers
+- Runtime inbound chat ingress tests:
+  - Telegram webhook ingress persists a `chat_ingress_events` row and creates a linked A2A task
+  - Feishu event ingress supports the challenge round-trip without creating a task
+- Approval Center tests:
+  - approval-required node commands now persist a pending approval request before dispatch
+  - approving the request releases the node command back into the queued control-plane path
+  - `POST /api/gateway/approvals/{approval_id}/decision` can reject a pending AP2 transaction and updates both the approval record and payment state
 - Runtime Agent Card smoke test:
   - `POST /api/gateway/agent-cards/publish` published a locally hosted `local-travel-agent`
   - `GET /.well-known/agent-card.json` returned the active local card
@@ -962,6 +1021,7 @@ Removed legacy launchers:
 - Agent Card discovery and invocation now work for Dawn-compatible task endpoints, but the compatibility layer is still pragmatic rather than a fully heterogeneous A2A adapter matrix.
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
+- Inbound chat ingress now exists, but it is still early-stage: only Telegram and Feishu are wired for inbound routing, there is not yet a full inbound reply orchestration layer, and the approval UX is currently gateway-console driven rather than native inside each chat platform.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
 - Remote A2A settlement is now persisted and AP2-linked, but it still assumes a local settlement authority; there is not yet a distributed AP2 settlement network or reconciliation flow across gateways.
 - Agent Card quote support now includes a local replay ledger plus on-demand cross-gateway quote-state verification, but it is still pull-based; there is not yet a push replication bus, federation-wide revocation feed, or quote-state gossip protocol.

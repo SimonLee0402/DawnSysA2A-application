@@ -5,7 +5,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracing::error;
 
-use crate::{agent_cards, app_state::AppState, connectors, control_plane, policy, skill_registry};
+use crate::{
+    agent_cards, app_state::AppState, approval_center, chat_ingress, connectors, control_plane,
+    policy, skill_registry,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,8 +42,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "/policy/trust-roots",
             get(list_policy_trust_roots).post(upsert_policy_trust_root),
         )
+        .nest("/approvals", approval_center::router())
         .nest("/control-plane", control_plane::router())
         .nest("/connectors", connectors::router())
+        .nest("/ingress", chat_ingress::router())
         .nest("/agent-cards", agent_cards::router())
         .nest("/skills", skill_registry::router())
 }

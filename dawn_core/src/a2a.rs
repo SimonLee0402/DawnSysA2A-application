@@ -156,6 +156,13 @@ async fn create_task(
     State(state): State<Arc<AppState>>,
     Json(task): Json<Task>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<Value>)> {
+    submit_task(state, task)
+        .await
+        .map(Json)
+        .map_err(service_error)
+}
+
+pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<TaskResponse> {
     info!("Creating new A2A task: {}", task.name);
     let task_id = task.task_id.unwrap_or_else(Uuid::new_v4);
     let stored_task = StoredTask {
@@ -169,21 +176,17 @@ async fn create_task(
         created_at_unix_ms: unix_timestamp_ms(),
         updated_at_unix_ms: unix_timestamp_ms(),
     };
-    let stored_task = state
-        .insert_task(stored_task)
-        .await
-        .map_err(internal_error)?;
+    let stored_task = state.insert_task(stored_task).await?;
     state
         .record_task_event(
             task_id,
             "task_accepted",
             "gateway accepted the task for orchestration",
         )
-        .await
-        .map_err(internal_error)?;
+        .await?;
 
-    let orchestration_plan = parse_orchestration_plan(&task.instruction).map_err(bad_request)?;
-    let wasm_binding = parse_wasm_instruction(&task.instruction).map_err(bad_request)?;
+    let orchestration_plan = parse_orchestration_plan(&task.instruction)?;
+    let wasm_binding = parse_wasm_instruction(&task.instruction)?;
 
     let sandbox_status = if let Some(plan) = orchestration_plan {
         state
@@ -193,26 +196,21 @@ async fn create_task(
                 "task queued for orchestration execution",
                 None,
             )
-            .await
-            .map_err(internal_error)?;
+            .await?;
         state
             .record_task_event(
                 task_id,
                 "orchestration_queued",
                 format!("gateway queued {} orchestration steps", plan.steps.len()),
             )
-            .await
-            .map_err(internal_error)?;
-        initialize_orchestration_run(&state, task_id, &plan)
-            .await
-            .map_err(internal_error)?;
+            .await?;
+        initialize_orchestration_run(&state, task_id, &plan).await?;
         spawn_orchestration_resume(state.clone(), task_id);
 
         "task accepted; orchestration execution was queued".to_string()
     } else if let Some(binding) = wasm_binding {
         match skill_registry::find_skill(&state, &binding.skill_id, binding.version.as_deref())
-            .await
-            .map_err(internal_error)?
+            .await?
         {
             Some(skill) => {
                 let execution_function = binding
@@ -226,8 +224,7 @@ async fn create_task(
                         format!("executing bound wasm skill {}", skill.skill_id),
                         None,
                     )
-                    .await
-                    .map_err(internal_error)?;
+                    .await?;
                 state
                     .record_task_event(
                         task_id,
@@ -237,17 +234,14 @@ async fn create_task(
                             skill.skill_id, skill.version, execution_function
                         ),
                     )
-                    .await
-                    .map_err(internal_error)?;
+                    .await?;
 
                 let wasm_bytes = tokio::fs::read(&skill.artifact_path)
                     .await
-                    .map_err(|error| {
-                        internal_error(anyhow::anyhow!(
-                            "failed to read skill artifact {}: {error}",
-                            skill.artifact_path
-                        ))
-                    })?;
+                    .map_err(|error| anyhow::anyhow!(
+                        "failed to read skill artifact {}: {error}",
+                        skill.artifact_path
+                    ))?;
                 match sandbox::execute_skill(&state.engine, &wasm_bytes, &execution_function) {
                     Ok(msg) => {
                         state
@@ -257,12 +251,8 @@ async fn create_task(
                                 format!("wasm skill {} completed", skill.skill_id),
                                 None,
                             )
-                            .await
-                            .map_err(internal_error)?;
-                        state
-                            .record_task_event(task_id, "skill_executed", &msg)
-                            .await
-                            .map_err(internal_error)?;
+                            .await?;
+                        state.record_task_event(task_id, "skill_executed", &msg).await?;
                         msg
                     }
                     Err(error) => {
@@ -276,12 +266,10 @@ async fn create_task(
                                 "bound wasm skill execution failed",
                                 None,
                             )
-                            .await
-                            .map_err(internal_error)?;
+                            .await?;
                         state
                             .record_task_event(task_id, "skill_execution_failed", &detail)
-                            .await
-                            .map_err(internal_error)?;
+                            .await?;
                         detail
                     }
                 }
@@ -298,12 +286,10 @@ async fn create_task(
                         "task is waiting for a registered skill artifact binding",
                         None,
                     )
-                    .await
-                    .map_err(internal_error)?;
+                    .await?;
                 state
                     .record_task_event(task_id, "awaiting_skill_binding", &detail)
-                    .await
-                    .map_err(internal_error)?;
+                    .await?;
                 detail
             }
         }
@@ -317,25 +303,19 @@ async fn create_task(
                 "task is waiting for a skill artifact binding",
                 None,
             )
-            .await
-            .map_err(internal_error)?;
+            .await?;
         state
             .record_task_event(task_id, "awaiting_skill_binding", &detail)
-            .await
-            .map_err(internal_error)?;
+            .await?;
         detail
     };
 
-    let task = state
-        .get_task(task_id)
-        .await
-        .map_err(internal_error)?
-        .unwrap_or(stored_task);
+    let task = state.get_task(task_id).await?.unwrap_or(stored_task);
 
-    Ok(Json(TaskResponse {
+    Ok(TaskResponse {
         task,
         sandbox_status,
-    }))
+    })
 }
 
 fn parse_wasm_instruction(instruction: &str) -> anyhow::Result<Option<WasmInstructionBinding>> {
@@ -661,7 +641,9 @@ async fn wait_for_node_command(
             .await?
             .ok_or_else(|| anyhow::anyhow!("node command disappeared: {command_id}"))?;
         match command.status {
-            NodeCommandStatus::Queued | NodeCommandStatus::Dispatched => {
+            NodeCommandStatus::PendingApproval
+            | NodeCommandStatus::Queued
+            | NodeCommandStatus::Dispatched => {
                 if std::time::Instant::now() >= deadline {
                     anyhow::bail!("timed out waiting for node command {command_id}");
                 }
@@ -850,6 +832,18 @@ fn bad_request(error: anyhow::Error) -> (StatusCode, Json<Value>) {
             "error": error.to_string()
         })),
     )
+}
+
+fn service_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    let message = error.to_string();
+    if message.contains("requires")
+        || message.contains("cannot be empty")
+        || message.contains("invalid")
+        || message.contains("unsupported")
+    {
+        return bad_request(error);
+    }
+    internal_error(error)
 }
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {

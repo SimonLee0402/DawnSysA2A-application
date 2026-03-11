@@ -3,10 +3,13 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod a2a;
+mod approval_center;
 mod agent_cards;
 mod ap2;
 mod app_state;
+mod chat_ingress;
 mod connectors;
+mod control_center;
 mod control_plane;
 mod gateway;
 mod node_attestation;
@@ -48,6 +51,7 @@ async fn health_check() -> &'static str {
 pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .nest("/console", control_center::router())
         .route(
             "/.well-known/agent-card.json",
             get(agent_cards::well_known_agent_card_json),
@@ -499,6 +503,69 @@ mod tests {
         )
         .await?;
         assert_eq!(payment_record["status"], "authorized");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_process_approval_center_rejects_pending_payment() -> anyhow::Result<()> {
+        let (base_url, handle, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+
+        let mandate_id = Uuid::new_v4();
+        let authorize_response = post_json(
+            &client,
+            &format!("{base_url}/api/ap2/authorize"),
+            json!({
+                "mandateId": mandate_id,
+                "amount": 7.25,
+                "description": "Reject via approval center"
+            }),
+        )
+        .await?;
+        assert_eq!(authorize_response["status"], "pending_physical_auth");
+
+        let transaction_id = authorize_response["transactionId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing transactionId"))?
+            .to_string();
+        let approvals = get_json(&client, &format!("{base_url}/api/gateway/approvals?status=pending"))
+            .await?;
+        let approval = approvals
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item["kind"] == "payment" && item["referenceId"] == transaction_id
+                })
+            })
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing pending payment approval"))?;
+        let approval_id = approval["approvalId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing approvalId"))?;
+
+        let decision = post_json(
+            &client,
+            &format!("{base_url}/api/gateway/approvals/{approval_id}/decision"),
+            json!({
+                "actor": "smoke-test",
+                "decision": "reject",
+                "reason": "operator denied the payment"
+            }),
+        )
+        .await?;
+
+        assert_eq!(decision["approval"]["status"], "rejected");
+        assert_eq!(decision["paymentResponse"]["status"], "rejected");
+
+        let payment_record = get_json(
+            &client,
+            &format!("{base_url}/api/ap2/transactions/{transaction_id}"),
+        )
+        .await?;
+        assert_eq!(payment_record["status"], "rejected");
 
         handle.abort();
         fs::remove_file(db_path).ok();

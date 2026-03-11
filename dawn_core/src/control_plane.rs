@@ -19,8 +19,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::app_state::{
-    AppState, NodeCommandRecord, NodeCommandStatus, NodeRecord, NodeRolloutRecord,
-    NodeRolloutStatus, NodeSessionStatus, unix_timestamp_ms,
+    AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, NodeCommandRecord,
+    NodeCommandStatus, NodeRecord, NodeRolloutRecord, NodeRolloutStatus, NodeSessionStatus,
+    unix_timestamp_ms,
 };
 use crate::{node_attestation, policy, skill_registry};
 
@@ -158,20 +159,54 @@ pub async fn dispatch_gateway_command(
         .get_node(node_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("node not found: {node_id}"))?;
+    let policy_profile = policy::current_profile(state).await?;
+    policy::evaluate_node_command(&policy_profile, &command_type).ensure_allowed()?;
     node_attestation::authorize_node_command(&node, &command_type)?;
+    let approval_required = requires_command_approval(&command_type, &payload);
 
     let command = NodeCommandRecord {
         command_id: Uuid::new_v4(),
         node_id: node_id.to_string(),
         command_type,
         payload,
-        status: NodeCommandStatus::Queued,
+        status: if approval_required {
+            NodeCommandStatus::PendingApproval
+        } else {
+            NodeCommandStatus::Queued
+        },
         result: None,
         error: None,
         created_at_unix_ms: unix_timestamp_ms(),
         updated_at_unix_ms: unix_timestamp_ms(),
     };
     let command = state.insert_node_command(command).await?;
+    if approval_required {
+        let now = unix_timestamp_ms();
+        state
+            .upsert_approval_request(ApprovalRequestRecord {
+                approval_id: Uuid::new_v4(),
+                kind: ApprovalRequestKind::NodeCommand,
+                title: format!("Approve node command {}", command.command_type),
+                summary: format!(
+                    "Node {} requested {} with payload {}",
+                    command.node_id, command.command_type, command.payload
+                ),
+                task_id: None,
+                reference_id: command.command_id.to_string(),
+                status: ApprovalRequestStatus::Pending,
+                actor: None,
+                decision_reason: None,
+                decision_payload: Some(json!({
+                    "nodeId": command.node_id,
+                    "commandType": command.command_type,
+                    "payload": command.payload,
+                })),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await?;
+        return Ok((command, "awaiting_approval"));
+    }
     let delivery = if enqueue_command_for_dispatch(state, &command).await {
         "dispatched"
     } else {
@@ -182,6 +217,74 @@ pub async fn dispatch_gateway_command(
         .await?
         .unwrap_or(command);
     Ok((command, delivery))
+}
+
+pub async fn approve_pending_node_command(
+    state: &Arc<AppState>,
+    command_id: Uuid,
+    actor: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<NodeCommandRecord> {
+    let mut command = state
+        .get_node_command(command_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("node command not found"))?;
+    if command.status != NodeCommandStatus::PendingApproval {
+        anyhow::bail!(
+            "node command {} is not pending approval",
+            command.command_id
+        );
+    }
+
+    let resolved_reason = reason.unwrap_or("approved by operator");
+    command.status = NodeCommandStatus::Queued;
+    command.error = None;
+    command.updated_at_unix_ms = unix_timestamp_ms();
+    let command = state.insert_node_command(command).await?;
+    resolve_command_approval(
+        state,
+        command.command_id,
+        ApprovalRequestStatus::Approved,
+        Some(actor.to_string()),
+        Some(resolved_reason.to_string()),
+    )
+    .await?;
+    let _delivery = if enqueue_command_for_dispatch(state, &command).await {
+        "dispatched"
+    } else {
+        "queued"
+    };
+    let command = state
+        .get_node_command(command.command_id)
+        .await?
+        .unwrap_or(command);
+    Ok(command)
+}
+
+pub async fn reject_pending_node_command(
+    state: &Arc<AppState>,
+    command_id: Uuid,
+    actor: &str,
+    reason: &str,
+) -> anyhow::Result<NodeCommandRecord> {
+    let command = state
+        .update_node_command(
+            command_id,
+            NodeCommandStatus::Failed,
+            None,
+            Some(format!("rejected by {actor}: {reason}")),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("node command not found"))?;
+    resolve_command_approval(
+        state,
+        command_id,
+        ApprovalRequestStatus::Rejected,
+        Some(actor.to_string()),
+        Some(reason.to_string()),
+    )
+    .await?;
+    Ok(command)
 }
 
 async fn list_nodes(
@@ -827,6 +930,35 @@ fn default_payload() -> Value {
     json!({})
 }
 
+fn requires_command_approval(command_type: &str, payload: &Value) -> bool {
+    command_type == "shell_exec"
+        || payload
+            .get("approvalRequired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+async fn resolve_command_approval(
+    state: &Arc<AppState>,
+    command_id: Uuid,
+    status: ApprovalRequestStatus,
+    actor: Option<String>,
+    reason: Option<String>,
+) -> anyhow::Result<()> {
+    let Some(mut approval) = state
+        .get_pending_approval_by_reference(ApprovalRequestKind::NodeCommand, &command_id.to_string())
+        .await?
+    else {
+        return Ok(());
+    };
+    approval.status = status;
+    approval.actor = actor;
+    approval.decision_reason = reason;
+    approval.updated_at_unix_ms = unix_timestamp_ms();
+    state.upsert_approval_request(approval).await?;
+    Ok(())
+}
+
 async fn apply_node_attestation(
     state: &Arc<AppState>,
     node_id: &str,
@@ -870,12 +1002,16 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
+    use serde_json::json;
     use uuid::Uuid;
     use wasmtime::Engine;
 
-    use super::{dispatch_current_rollout_if_needed, process_rollout_ack};
+    use super::{
+        approve_pending_node_command, dispatch_current_rollout_if_needed,
+        dispatch_gateway_command, process_rollout_ack,
+    };
     use crate::{
-        app_state::{AppState, NodeAttestationState, NodeRolloutStatus},
+        app_state::{AppState, ApprovalRequestStatus, NodeAttestationState, NodeRolloutStatus},
         sandbox,
     };
 
@@ -966,6 +1102,51 @@ mod tests {
         let rollout = state.get_node_rollout("node-beta").await.unwrap().unwrap();
         assert_eq!(rollout.status, NodeRolloutStatus::Acknowledged);
         assert!(rollout.last_ack_at_unix_ms.is_some());
+
+        drop(state);
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn queues_approval_required_node_command_until_operator_allows_it() {
+        let (state, db_path) = test_state().await.unwrap();
+        attested_node(&state, "node-gamma").await;
+
+        let (command, delivery) = dispatch_gateway_command(
+            &state,
+            "node-gamma",
+            "agent_ping",
+            json!({ "approvalRequired": true }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(delivery, "awaiting_approval");
+        assert_eq!(command.status, crate::app_state::NodeCommandStatus::PendingApproval);
+
+        let approvals = state
+            .list_approval_requests(Some(ApprovalRequestStatus::Pending))
+            .await
+            .unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].reference_id, command.command_id.to_string());
+
+        let approved = approve_pending_node_command(
+            &state,
+            command.command_id,
+            "test-operator",
+            Some("allow agent ping"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(approved.status, crate::app_state::NodeCommandStatus::Queued);
+        let approval = state
+            .get_approval_request(approvals[0].approval_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.status, ApprovalRequestStatus::Approved);
 
         drop(state);
         fs::remove_file(db_path).ok();
