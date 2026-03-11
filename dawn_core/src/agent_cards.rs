@@ -217,6 +217,7 @@ pub struct RemoteAgentSettlementRecord {
     pub remote_task_id: Option<String>,
     pub transaction_id: Uuid,
     pub mandate_id: Uuid,
+    pub quote_id: Option<String>,
     pub amount: f64,
     pub description: String,
     pub status: PaymentStatus,
@@ -235,6 +236,7 @@ struct RemoteAgentSettlementRow {
     remote_task_id: Option<String>,
     transaction_id: String,
     mandate_id: String,
+    quote_id: Option<String>,
     amount: f64,
     description: String,
     status: String,
@@ -328,6 +330,21 @@ struct SettlementListQuery {
     status: Option<PaymentStatus>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuoteListQuery {
+    card_id: Option<String>,
+    status: Option<QuoteLedgerStatus>,
+    source_kind: Option<String>,
+    transaction_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RevokeQuoteRequest {
+    reason: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentCardPublishResponse {
@@ -417,12 +434,106 @@ struct AgentPaymentTerms {
     description_template: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum QuoteLedgerStatus {
+    Offered,
+    Superseded,
+    Revoked,
+    Consumed,
+}
+
+impl QuoteLedgerStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Offered => "offered",
+            Self::Superseded => "superseded",
+            Self::Revoked => "revoked",
+            Self::Consumed => "consumed",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "offered" => Ok(Self::Offered),
+            "superseded" => Ok(Self::Superseded),
+            "revoked" => Ok(Self::Revoked),
+            "consumed" => Ok(Self::Consumed),
+            _ => Err(anyhow!("unknown quote ledger status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct QuoteLedgerRecord {
+    quote_id: String,
+    card_id: String,
+    source_kind: String,
+    quote_url: Option<String>,
+    previous_quote_id: Option<String>,
+    superseded_by_quote_id: Option<String>,
+    negotiation_round: u32,
+    settlement_supported: bool,
+    payment_roles: Vec<String>,
+    currency: Option<String>,
+    quote_mode: String,
+    requested_amount: Option<f64>,
+    quoted_amount: Option<f64>,
+    counter_offer_amount: Option<f64>,
+    min_amount: Option<f64>,
+    max_amount: Option<f64>,
+    description_template: Option<String>,
+    warning: Option<String>,
+    expires_at_unix_ms: Option<u128>,
+    issuer_did: Option<String>,
+    signature_hex: Option<String>,
+    status: QuoteLedgerStatus,
+    consumed_by_transaction_id: Option<Uuid>,
+    revoked_reason: Option<String>,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, FromRow)]
+struct QuoteLedgerRow {
+    quote_id: String,
+    card_id: String,
+    source_kind: String,
+    quote_url: Option<String>,
+    previous_quote_id: Option<String>,
+    superseded_by_quote_id: Option<String>,
+    negotiation_round: i64,
+    settlement_supported: i64,
+    payment_roles: String,
+    currency: Option<String>,
+    quote_mode: String,
+    requested_amount: Option<f64>,
+    quoted_amount: Option<f64>,
+    counter_offer_amount: Option<f64>,
+    min_amount: Option<f64>,
+    max_amount: Option<f64>,
+    description_template: Option<String>,
+    warning: Option<String>,
+    expires_at_unix_ms: Option<i64>,
+    issuer_did: Option<String>,
+    signature_hex: Option<String>,
+    status: String,
+    consumed_by_transaction_id: Option<String>,
+    revoked_reason: Option<String>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
         .route("/", get(list_cards))
         .route("/search", get(search_cards))
         .route("/:card_id/quote", get(get_settlement_quote))
+        .route("/quotes", get(list_quotes))
+        .route("/quotes/:quote_id", get(get_quote))
+        .route("/quotes/:quote_id/revoke", post(revoke_quote))
         .route("/invocations", get(list_invocations))
         .route("/settlements", get(list_settlements))
         .route("/invocations/:invocation_id", get(get_invocation))
@@ -532,6 +643,18 @@ async fn get_settlement_quote(
     } else {
         quote
     };
+    if quote.quote_id.is_some() {
+        let source_kind = if card.locally_hosted && !query.remote.unwrap_or(false) {
+            "local"
+        } else if query.remote.unwrap_or(false) {
+            "remote"
+        } else {
+            "metadata"
+        };
+        record_quote_offer(&state, &card, &quote, source_kind)
+            .await
+            .map_err(service_error)?;
+    }
     Ok(Json(quote))
 }
 
@@ -591,6 +714,44 @@ async fn list_settlements(
     .await
     .map(Json)
     .map_err(internal_error)
+}
+
+async fn list_quotes(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<QuoteListQuery>,
+) -> Result<Json<Vec<QuoteLedgerRecord>>, (StatusCode, Json<Value>)> {
+    list_quote_records(
+        &state,
+        query.card_id.as_deref(),
+        query.status,
+        query.source_kind.as_deref(),
+        query.transaction_id,
+    )
+    .await
+    .map(Json)
+    .map_err(internal_error)
+}
+
+async fn get_quote(
+    State(state): State<Arc<AppState>>,
+    AxumPath(quote_id): AxumPath<String>,
+) -> Result<Json<QuoteLedgerRecord>, (StatusCode, Json<Value>)> {
+    get_quote_record(&state, &quote_id)
+        .await
+        .map_err(internal_error)?
+        .map(Json)
+        .ok_or_else(|| not_found("quote not found"))
+}
+
+async fn revoke_quote(
+    State(state): State<Arc<AppState>>,
+    AxumPath(quote_id): AxumPath<String>,
+    Json(request): Json<RevokeQuoteRequest>,
+) -> Result<Json<QuoteLedgerRecord>, (StatusCode, Json<Value>)> {
+    revoke_quote_record(&state, &quote_id, request.reason.as_deref())
+        .await
+        .map(Json)
+        .map_err(service_error)
 }
 
 async fn get_settlement(
@@ -821,7 +982,7 @@ pub async fn invoke_remote_agent_card(
         .or(remote_status);
         let settlement = match request.settlement {
         Some(settlement) => {
-            validate_remote_settlement_request(&card, &settlement).await?;
+            let validated_quote = validate_remote_settlement_request(state, &card, &settlement).await?;
             if record.status != RemoteInvocationStatus::Completed {
                 anyhow::bail!(
                     "remote settlement requires a completed remote invocation; current status is {:?}",
@@ -834,6 +995,7 @@ pub async fn invoke_remote_agent_card(
                     &card,
                     &record,
                     settlement,
+                    Some(&validated_quote),
                     local_task_id,
                 )
                 .await?,
@@ -931,6 +1093,7 @@ async fn create_remote_settlement(
     card: &PublishedAgentCard,
     invocation: &RemoteAgentInvocationRecord,
     settlement: RemoteSettlementRequest,
+    validated_quote: Option<&AgentSettlementQuote>,
     local_task_id: Option<Uuid>,
 ) -> anyhow::Result<RemoteAgentSettlementRecord> {
     let payment_response = ap2::request_payment_authorization(
@@ -957,6 +1120,9 @@ async fn create_remote_settlement(
         remote_task_id: invocation.remote_task_id.clone(),
         transaction_id: payment_response.transaction_id,
         mandate_id: settlement.mandate_id,
+        quote_id: validated_quote
+            .and_then(|quote| quote.quote_id.clone())
+            .or(settlement.quote_id.clone()),
         amount: settlement.amount,
         description: settlement.description,
         status: payment_response.status,
@@ -965,10 +1131,18 @@ async fn create_remote_settlement(
         updated_at_unix_ms: now,
     };
     save_remote_settlement(state, &record).await?;
+    consume_quote_record(
+        state,
+        &card.card_id,
+        record.quote_id.as_deref(),
+        payment_response.transaction_id,
+    )
+    .await?;
     Ok(record)
 }
 
 async fn validate_remote_settlement_request(
+    state: &AppState,
     card: &PublishedAgentCard,
     settlement: &RemoteSettlementRequest,
 ) -> anyhow::Result<AgentSettlementQuote> {
@@ -988,6 +1162,9 @@ async fn validate_remote_settlement_request(
             card.card_id
         )
     })?;
+    if quote.quote_id.is_some() {
+        record_quote_offer(state, card, &quote, "remote").await?;
+    }
     if !quote.settlement_supported {
         anyhow::bail!(
             "agent card '{}' does not advertise AP2 payee or merchant settlement capability",
@@ -1341,13 +1518,14 @@ async fn save_remote_settlement(
             remote_task_id,
             transaction_id,
             mandate_id,
+            quote_id,
             amount,
             description,
             status,
             verification_message,
             created_at_unix_ms,
             updated_at_unix_ms
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ON CONFLICT(settlement_id) DO UPDATE SET
             invocation_id = excluded.invocation_id,
             card_id = excluded.card_id,
@@ -1356,6 +1534,7 @@ async fn save_remote_settlement(
             remote_task_id = excluded.remote_task_id,
             transaction_id = excluded.transaction_id,
             mandate_id = excluded.mandate_id,
+            quote_id = excluded.quote_id,
             amount = excluded.amount,
             description = excluded.description,
             status = excluded.status,
@@ -1372,6 +1551,7 @@ async fn save_remote_settlement(
     .bind(&record.remote_task_id)
     .bind(record.transaction_id.to_string())
     .bind(record.mandate_id.to_string())
+    .bind(&record.quote_id)
     .bind(record.amount)
     .bind(&record.description)
     .bind(record.status.as_db())
@@ -1381,6 +1561,101 @@ async fn save_remote_settlement(
     .execute(state.pool())
     .await
     .with_context(|| format!("failed to save remote settlement {}", record.settlement_id))?;
+
+    Ok(())
+}
+
+async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agent_quote_ledger (
+            quote_id,
+            card_id,
+            source_kind,
+            quote_url,
+            previous_quote_id,
+            superseded_by_quote_id,
+            negotiation_round,
+            settlement_supported,
+            payment_roles,
+            currency,
+            quote_mode,
+            requested_amount,
+            quoted_amount,
+            counter_offer_amount,
+            min_amount,
+            max_amount,
+            description_template,
+            warning,
+            expires_at_unix_ms,
+            issuer_did,
+            signature_hex,
+            status,
+            consumed_by_transaction_id,
+            revoked_reason,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+        )
+        ON CONFLICT(quote_id) DO UPDATE SET
+            card_id = excluded.card_id,
+            source_kind = excluded.source_kind,
+            quote_url = excluded.quote_url,
+            previous_quote_id = excluded.previous_quote_id,
+            superseded_by_quote_id = excluded.superseded_by_quote_id,
+            negotiation_round = excluded.negotiation_round,
+            settlement_supported = excluded.settlement_supported,
+            payment_roles = excluded.payment_roles,
+            currency = excluded.currency,
+            quote_mode = excluded.quote_mode,
+            requested_amount = excluded.requested_amount,
+            quoted_amount = excluded.quoted_amount,
+            counter_offer_amount = excluded.counter_offer_amount,
+            min_amount = excluded.min_amount,
+            max_amount = excluded.max_amount,
+            description_template = excluded.description_template,
+            warning = excluded.warning,
+            expires_at_unix_ms = excluded.expires_at_unix_ms,
+            issuer_did = excluded.issuer_did,
+            signature_hex = excluded.signature_hex,
+            status = excluded.status,
+            consumed_by_transaction_id = excluded.consumed_by_transaction_id,
+            revoked_reason = excluded.revoked_reason,
+            created_at_unix_ms = agent_quote_ledger.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(&record.quote_id)
+    .bind(&record.card_id)
+    .bind(&record.source_kind)
+    .bind(&record.quote_url)
+    .bind(&record.previous_quote_id)
+    .bind(&record.superseded_by_quote_id)
+    .bind(i64::from(record.negotiation_round))
+    .bind(if record.settlement_supported { 1_i64 } else { 0_i64 })
+    .bind(serde_json::to_string(&record.payment_roles)?)
+    .bind(&record.currency)
+    .bind(&record.quote_mode)
+    .bind(record.requested_amount)
+    .bind(record.quoted_amount)
+    .bind(record.counter_offer_amount)
+    .bind(record.min_amount)
+    .bind(record.max_amount)
+    .bind(&record.description_template)
+    .bind(&record.warning)
+    .bind(record.expires_at_unix_ms.map(|value| value as i64))
+    .bind(&record.issuer_did)
+    .bind(&record.signature_hex)
+    .bind(record.status.as_db())
+    .bind(record.consumed_by_transaction_id.map(|value| value.to_string()))
+    .bind(&record.revoked_reason)
+    .bind(record.created_at_unix_ms as i64)
+    .bind(record.updated_at_unix_ms as i64)
+    .execute(state.pool())
+    .await
+    .with_context(|| format!("failed to save quote ledger record {}", record.quote_id))?;
 
     Ok(())
 }
@@ -1430,6 +1705,7 @@ async fn get_remote_settlement(
             remote_task_id,
             transaction_id,
             mandate_id,
+            quote_id,
             amount,
             description,
             status,
@@ -1448,6 +1724,48 @@ async fn get_remote_settlement(
     row.map(row_to_remote_settlement).transpose()
 }
 
+async fn get_quote_record(state: &AppState, quote_id: &str) -> anyhow::Result<Option<QuoteLedgerRecord>> {
+    let row = sqlx::query_as::<_, QuoteLedgerRow>(
+        r#"
+        SELECT
+            quote_id,
+            card_id,
+            source_kind,
+            quote_url,
+            previous_quote_id,
+            superseded_by_quote_id,
+            negotiation_round,
+            settlement_supported,
+            payment_roles,
+            currency,
+            quote_mode,
+            requested_amount,
+            quoted_amount,
+            counter_offer_amount,
+            min_amount,
+            max_amount,
+            description_template,
+            warning,
+            expires_at_unix_ms,
+            issuer_did,
+            signature_hex,
+            status,
+            consumed_by_transaction_id,
+            revoked_reason,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_quote_ledger
+        WHERE quote_id = ?1
+        "#,
+    )
+    .bind(quote_id)
+    .fetch_optional(state.pool())
+    .await
+    .with_context(|| format!("failed to fetch quote ledger record {quote_id}"))?;
+
+    row.map(row_to_quote_record).transpose()
+}
+
 async fn get_remote_settlement_by_invocation(
     state: &AppState,
     invocation_id: Uuid,
@@ -1463,6 +1781,7 @@ async fn get_remote_settlement_by_invocation(
             remote_task_id,
             transaction_id,
             mandate_id,
+            quote_id,
             amount,
             description,
             status,
@@ -1498,6 +1817,7 @@ async fn get_remote_settlement_by_transaction(
             remote_task_id,
             transaction_id,
             mandate_id,
+            quote_id,
             amount,
             description,
             status,
@@ -1639,6 +1959,7 @@ async fn list_remote_settlements(
                     remote_task_id,
                     transaction_id,
                     mandate_id,
+                    quote_id,
                     amount,
                     description,
                     status,
@@ -1665,6 +1986,7 @@ async fn list_remote_settlements(
                     remote_task_id,
                     transaction_id,
                     mandate_id,
+                    quote_id,
                     amount,
                     description,
                     status,
@@ -1691,6 +2013,7 @@ async fn list_remote_settlements(
                     remote_task_id,
                     transaction_id,
                     mandate_id,
+                    quote_id,
                     amount,
                     description,
                     status,
@@ -1717,6 +2040,7 @@ async fn list_remote_settlements(
                     remote_task_id,
                     transaction_id,
                     mandate_id,
+                    quote_id,
                     amount,
                     description,
                     status,
@@ -1743,6 +2067,7 @@ async fn list_remote_settlements(
                     remote_task_id,
                     transaction_id,
                     mandate_id,
+                    quote_id,
                     amount,
                     description,
                     status,
@@ -1769,6 +2094,7 @@ async fn list_remote_settlements(
                     remote_task_id,
                     transaction_id,
                     mandate_id,
+                    quote_id,
                     amount,
                     description,
                     status,
@@ -1785,6 +2111,236 @@ async fn list_remote_settlements(
     };
 
     rows.into_iter().map(row_to_remote_settlement).collect()
+}
+
+async fn list_quote_records(
+    state: &AppState,
+    card_id: Option<&str>,
+    status: Option<QuoteLedgerStatus>,
+    source_kind: Option<&str>,
+    transaction_id: Option<Uuid>,
+) -> anyhow::Result<Vec<QuoteLedgerRecord>> {
+    let rows = match (card_id, status, source_kind, transaction_id) {
+        (Some(card_id), _, _, _) => sqlx::query_as::<_, QuoteLedgerRow>(
+            r#"
+                SELECT
+                    quote_id,
+                    card_id,
+                    source_kind,
+                    quote_url,
+                    previous_quote_id,
+                    superseded_by_quote_id,
+                    negotiation_round,
+                    settlement_supported,
+                    payment_roles,
+                    currency,
+                    quote_mode,
+                    requested_amount,
+                    quoted_amount,
+                    counter_offer_amount,
+                    min_amount,
+                    max_amount,
+                    description_template,
+                    warning,
+                    expires_at_unix_ms,
+                    issuer_did,
+                    signature_hex,
+                    status,
+                    consumed_by_transaction_id,
+                    revoked_reason,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_quote_ledger
+                WHERE card_id = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(card_id)
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list quote ledger by card_id")?,
+        (_, Some(status), _, _) => sqlx::query_as::<_, QuoteLedgerRow>(
+            r#"
+                SELECT
+                    quote_id,
+                    card_id,
+                    source_kind,
+                    quote_url,
+                    previous_quote_id,
+                    superseded_by_quote_id,
+                    negotiation_round,
+                    settlement_supported,
+                    payment_roles,
+                    currency,
+                    quote_mode,
+                    requested_amount,
+                    quoted_amount,
+                    counter_offer_amount,
+                    min_amount,
+                    max_amount,
+                    description_template,
+                    warning,
+                    expires_at_unix_ms,
+                    issuer_did,
+                    signature_hex,
+                    status,
+                    consumed_by_transaction_id,
+                    revoked_reason,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_quote_ledger
+                WHERE status = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(status.as_db())
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list quote ledger by status")?,
+        (_, _, Some(source_kind), _) => sqlx::query_as::<_, QuoteLedgerRow>(
+            r#"
+                SELECT
+                    quote_id,
+                    card_id,
+                    source_kind,
+                    quote_url,
+                    previous_quote_id,
+                    superseded_by_quote_id,
+                    negotiation_round,
+                    settlement_supported,
+                    payment_roles,
+                    currency,
+                    quote_mode,
+                    requested_amount,
+                    quoted_amount,
+                    counter_offer_amount,
+                    min_amount,
+                    max_amount,
+                    description_template,
+                    warning,
+                    expires_at_unix_ms,
+                    issuer_did,
+                    signature_hex,
+                    status,
+                    consumed_by_transaction_id,
+                    revoked_reason,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_quote_ledger
+                WHERE source_kind = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(source_kind)
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list quote ledger by source_kind")?,
+        (_, _, _, Some(transaction_id)) => sqlx::query_as::<_, QuoteLedgerRow>(
+            r#"
+                SELECT
+                    quote_id,
+                    card_id,
+                    source_kind,
+                    quote_url,
+                    previous_quote_id,
+                    superseded_by_quote_id,
+                    negotiation_round,
+                    settlement_supported,
+                    payment_roles,
+                    currency,
+                    quote_mode,
+                    requested_amount,
+                    quoted_amount,
+                    counter_offer_amount,
+                    min_amount,
+                    max_amount,
+                    description_template,
+                    warning,
+                    expires_at_unix_ms,
+                    issuer_did,
+                    signature_hex,
+                    status,
+                    consumed_by_transaction_id,
+                    revoked_reason,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_quote_ledger
+                WHERE consumed_by_transaction_id = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(transaction_id.to_string())
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list quote ledger by consumed transaction")?,
+        _ => sqlx::query_as::<_, QuoteLedgerRow>(
+            r#"
+                SELECT
+                    quote_id,
+                    card_id,
+                    source_kind,
+                    quote_url,
+                    previous_quote_id,
+                    superseded_by_quote_id,
+                    negotiation_round,
+                    settlement_supported,
+                    payment_roles,
+                    currency,
+                    quote_mode,
+                    requested_amount,
+                    quoted_amount,
+                    counter_offer_amount,
+                    min_amount,
+                    max_amount,
+                    description_template,
+                    warning,
+                    expires_at_unix_ms,
+                    issuer_did,
+                    signature_hex,
+                    status,
+                    consumed_by_transaction_id,
+                    revoked_reason,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_quote_ledger
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list quote ledger")?,
+    };
+
+    rows.into_iter().map(row_to_quote_record).collect()
+}
+
+async fn revoke_quote_record(
+    state: &AppState,
+    quote_id: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<QuoteLedgerRecord> {
+    let mut record = get_quote_record(state, quote_id)
+        .await?
+        .ok_or_else(|| anyhow!("quote not found: {quote_id}"))?;
+    match record.status {
+        QuoteLedgerStatus::Consumed => {
+            anyhow::bail!("quote '{}' has already been consumed by a settlement", quote_id)
+        }
+        QuoteLedgerStatus::Superseded => {
+            anyhow::bail!("quote '{}' has already been superseded", quote_id)
+        }
+        QuoteLedgerStatus::Revoked => return Ok(record),
+        QuoteLedgerStatus::Offered => {}
+    }
+    record.status = QuoteLedgerStatus::Revoked;
+    record.revoked_reason = reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| Some("manually revoked".to_string()));
+    record.updated_at_unix_ms = unix_timestamp_ms();
+    save_quote_record(state, &record).await?;
+    Ok(record)
 }
 
 async fn persist_card_source_metadata(
@@ -1891,6 +2447,7 @@ fn row_to_remote_settlement(
             .with_context(|| format!("invalid transaction_id '{}'", row.transaction_id))?,
         mandate_id: Uuid::parse_str(&row.mandate_id)
             .with_context(|| format!("invalid mandate_id '{}'", row.mandate_id))?,
+        quote_id: row.quote_id,
         amount: row.amount,
         description: row.description,
         status: PaymentStatus::from_db(&row.status)?,
@@ -1899,6 +2456,50 @@ fn row_to_remote_settlement(
             .context("negative created_at_unix_ms in remote_agent_settlements")?,
         updated_at_unix_ms: u128::try_from(row.updated_at_unix_ms)
             .context("negative updated_at_unix_ms in remote_agent_settlements")?,
+    })
+}
+
+fn row_to_quote_record(row: QuoteLedgerRow) -> anyhow::Result<QuoteLedgerRecord> {
+    Ok(QuoteLedgerRecord {
+        quote_id: row.quote_id,
+        card_id: row.card_id,
+        source_kind: row.source_kind,
+        quote_url: row.quote_url,
+        previous_quote_id: row.previous_quote_id,
+        superseded_by_quote_id: row.superseded_by_quote_id,
+        negotiation_round: u32::try_from(row.negotiation_round)
+            .context("negative negotiation_round in agent_quote_ledger")?,
+        settlement_supported: row.settlement_supported != 0,
+        payment_roles: serde_json::from_str(&row.payment_roles)
+            .context("failed to parse quote ledger payment_roles")?,
+        currency: row.currency,
+        quote_mode: row.quote_mode,
+        requested_amount: row.requested_amount,
+        quoted_amount: row.quoted_amount,
+        counter_offer_amount: row.counter_offer_amount,
+        min_amount: row.min_amount,
+        max_amount: row.max_amount,
+        description_template: row.description_template,
+        warning: row.warning,
+        expires_at_unix_ms: row
+            .expires_at_unix_ms
+            .map(|value| u128::try_from(value).context("negative expires_at_unix_ms in agent_quote_ledger"))
+            .transpose()?,
+        issuer_did: row.issuer_did,
+        signature_hex: row.signature_hex,
+        status: QuoteLedgerStatus::from_db(&row.status)?,
+        consumed_by_transaction_id: row
+            .consumed_by_transaction_id
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .with_context(|| format!("invalid consumed_by_transaction_id '{value}'"))
+            })
+            .transpose()?,
+        revoked_reason: row.revoked_reason,
+        created_at_unix_ms: u128::try_from(row.created_at_unix_ms)
+            .context("negative created_at_unix_ms in agent_quote_ledger")?,
+        updated_at_unix_ms: u128::try_from(row.updated_at_unix_ms)
+            .context("negative updated_at_unix_ms in agent_quote_ledger")?,
     })
 }
 
@@ -2388,6 +2989,134 @@ fn verify_signed_quote(
     Ok(())
 }
 
+async fn record_quote_offer(
+    state: &AppState,
+    card: &PublishedAgentCard,
+    quote: &AgentSettlementQuote,
+    source_kind: &str,
+) -> anyhow::Result<Option<QuoteLedgerRecord>> {
+    let Some(quote_id) = quote.quote_id.clone() else {
+        return Ok(None);
+    };
+
+    let now = unix_timestamp_ms();
+    let existing = get_quote_record(state, &quote_id).await?;
+    if let Some(existing) = &existing {
+        match existing.status {
+            QuoteLedgerStatus::Consumed => {
+                anyhow::bail!("quote '{}' has already been consumed", quote_id)
+            }
+            QuoteLedgerStatus::Revoked => anyhow::bail!("quote '{}' has been revoked", quote_id),
+            QuoteLedgerStatus::Superseded => anyhow::bail!("quote '{}' has been superseded", quote_id),
+            QuoteLedgerStatus::Offered => {}
+        }
+    }
+
+    let previous = match quote.previous_quote_id.as_deref() {
+        Some(previous_quote_id) if previous_quote_id != quote_id => {
+            let Some(mut previous) = get_quote_record(state, previous_quote_id).await? else {
+                anyhow::bail!("previous quote '{}' was not found in the ledger", previous_quote_id);
+            };
+            match previous.status {
+                QuoteLedgerStatus::Consumed => anyhow::bail!(
+                    "previous quote '{}' has already been consumed",
+                    previous_quote_id
+                ),
+                QuoteLedgerStatus::Revoked => {
+                    anyhow::bail!("previous quote '{}' has been revoked", previous_quote_id)
+                }
+                QuoteLedgerStatus::Superseded => {
+                    if previous.superseded_by_quote_id.as_deref() != Some(quote_id.as_str()) {
+                        anyhow::bail!(
+                            "previous quote '{}' has already been superseded by another quote",
+                            previous_quote_id
+                        );
+                    }
+                }
+                QuoteLedgerStatus::Offered => {
+                    previous.status = QuoteLedgerStatus::Superseded;
+                    previous.superseded_by_quote_id = Some(quote_id.clone());
+                    previous.updated_at_unix_ms = now;
+                    save_quote_record(state, &previous).await?;
+                }
+            }
+            Some(previous)
+        }
+        _ => None,
+    };
+
+    let record = QuoteLedgerRecord {
+        quote_id: quote_id.clone(),
+        card_id: card.card_id.clone(),
+        source_kind: source_kind.to_string(),
+        quote_url: quote.quote_url.clone(),
+        previous_quote_id: quote.previous_quote_id.clone(),
+        superseded_by_quote_id: existing
+            .as_ref()
+            .and_then(|record| record.superseded_by_quote_id.clone()),
+        negotiation_round: previous
+            .as_ref()
+            .map(|record| record.negotiation_round.saturating_add(1))
+            .unwrap_or(0),
+        settlement_supported: quote.settlement_supported,
+        payment_roles: quote.payment_roles.clone(),
+        currency: quote.currency.clone(),
+        quote_mode: quote.quote_mode.clone(),
+        requested_amount: quote.requested_amount,
+        quoted_amount: quote.quoted_amount,
+        counter_offer_amount: quote.counter_offer_amount,
+        min_amount: quote.min_amount,
+        max_amount: quote.max_amount,
+        description_template: quote.description_template.clone(),
+        warning: quote.warning.clone(),
+        expires_at_unix_ms: quote.expires_at_unix_ms,
+        issuer_did: quote.issuer_did.clone(),
+        signature_hex: quote.signature_hex.clone(),
+        status: QuoteLedgerStatus::Offered,
+        consumed_by_transaction_id: existing
+            .as_ref()
+            .and_then(|record| record.consumed_by_transaction_id),
+        revoked_reason: existing.as_ref().and_then(|record| record.revoked_reason.clone()),
+        created_at_unix_ms: existing.as_ref().map(|record| record.created_at_unix_ms).unwrap_or(now),
+        updated_at_unix_ms: now,
+    };
+    save_quote_record(state, &record).await?;
+    Ok(Some(record))
+}
+
+async fn consume_quote_record(
+    state: &AppState,
+    card_id: &str,
+    quote_id: Option<&str>,
+    transaction_id: Uuid,
+) -> anyhow::Result<Option<QuoteLedgerRecord>> {
+    let Some(quote_id) = quote_id else {
+        return Ok(None);
+    };
+    let mut record = get_quote_record(state, quote_id)
+        .await?
+        .ok_or_else(|| anyhow!("quote '{}' was not found in the ledger", quote_id))?;
+    if record.card_id != card_id {
+        anyhow::bail!(
+            "quote '{}' belongs to card '{}' rather than '{}'",
+            quote_id,
+            record.card_id,
+            card_id
+        );
+    }
+    match record.status {
+        QuoteLedgerStatus::Offered => {}
+        QuoteLedgerStatus::Consumed => anyhow::bail!("quote '{}' has already been consumed", quote_id),
+        QuoteLedgerStatus::Revoked => anyhow::bail!("quote '{}' has been revoked", quote_id),
+        QuoteLedgerStatus::Superseded => anyhow::bail!("quote '{}' has been superseded", quote_id),
+    }
+    record.status = QuoteLedgerStatus::Consumed;
+    record.consumed_by_transaction_id = Some(transaction_id);
+    record.updated_at_unix_ms = unix_timestamp_ms();
+    save_quote_record(state, &record).await?;
+    Ok(Some(record))
+}
+
 fn decode_fixed_hex<const N: usize>(raw: &str, label: &str) -> anyhow::Result<[u8; N]> {
     let normalized = normalize_hex(raw)?;
     let bytes = hex::decode(normalized).with_context(|| format!("{label} must be valid hex"))?;
@@ -2873,6 +3602,13 @@ fn service_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
         || message.contains("cannot be empty")
         || message.contains("invalid")
         || message.contains("does not advertise")
+        || message.contains("superseded")
+        || message.contains("revoked")
+        || message.contains("consumed")
+        || message.contains("counter-offer")
+        || message.contains("must match")
+        || message.contains("exceeds")
+        || message.contains("below")
     {
         StatusCode::BAD_REQUEST
     } else {
@@ -2906,12 +3642,13 @@ mod tests {
         AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
         PublishedAgentCard, RemoteInvocationStatus, RemoteSettlementRequest, SearchAgentCardsRequest,
         apply_counter_offer_to_quote, build_search_haystack, build_settlement_quote, derive_card_id,
+        consume_quote_record, get_quote_record,
         enrich_local_card_with_quote_url, extract_ap2_roles, extract_ap2_terms,
         extract_remote_task_id, extract_remote_task_status, fetch_remote_settlement_quote,
         get_remote_settlement_by_invocation, invoke_remote_agent_card, matches_search,
         merge_unique_metadata, publish_card_inner, quote_issuer_did_from_signing_key,
         quote_signing_key, remote_task_create_url, remote_task_detail_url, sign_local_settlement_quote,
-        validate_remote_settlement_request, verify_signed_quote,
+        record_quote_offer, revoke_quote_record, validate_remote_settlement_request, verify_signed_quote,
     };
     use crate::{
         app_state::{StoredTask, TaskStatus, unix_timestamp_ms},
@@ -3175,8 +3912,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_settlement_over_agent_card_cap() {
+        let (state, path) = test_state().await.unwrap();
         let card = sample_card();
         let error = validate_remote_settlement_request(
+            state.as_ref(),
             &card,
             &RemoteSettlementRequest {
                 mandate_id: Uuid::new_v4(),
@@ -3189,6 +3928,153 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("maxAmount"));
+        drop(state);
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn records_counter_offer_quotes_as_superseded_rounds() {
+        let (state, path) = test_state().await.unwrap();
+        let mut card = sample_card();
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "manual",
+                "minAmount": 10.0,
+                "maxAmount": 20.0
+            }
+        }));
+
+        let first_quote = sign_local_settlement_quote(
+            &card,
+            build_settlement_quote(&card, Some(12.0), Some("Settle travel booking")),
+        )
+        .unwrap();
+        record_quote_offer(state.as_ref(), &card, &first_quote, "local")
+            .await
+            .unwrap();
+
+        let counter_quote = sign_local_settlement_quote(
+            &card,
+            apply_counter_offer_to_quote(
+                build_settlement_quote(&card, Some(12.0), Some("Settle travel booking")),
+                Some(13.0),
+                first_quote.quote_id.as_deref(),
+            ),
+        )
+        .unwrap();
+        record_quote_offer(state.as_ref(), &card, &counter_quote, "local")
+            .await
+            .unwrap();
+
+        let previous = get_quote_record(
+            state.as_ref(),
+            first_quote.quote_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let current = get_quote_record(
+            state.as_ref(),
+            counter_quote.quote_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(previous.status.as_db(), "superseded");
+        assert_eq!(
+            previous.superseded_by_quote_id.as_deref(),
+            counter_quote.quote_id.as_deref()
+        );
+        assert_eq!(previous.negotiation_round, 0);
+        assert_eq!(current.status.as_db(), "offered");
+        assert_eq!(current.previous_quote_id, first_quote.quote_id);
+        assert_eq!(current.negotiation_round, 1);
+
+        drop(state);
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn revokes_quotes_and_blocks_consumption() {
+        let (state, path) = test_state().await.unwrap();
+        let card = sample_card();
+        let quote = sign_local_settlement_quote(
+            &card,
+            build_settlement_quote(&card, Some(18.5), Some("Settle travel booking")),
+        )
+        .unwrap();
+        record_quote_offer(state.as_ref(), &card, &quote, "local")
+            .await
+            .unwrap();
+
+        let revoked = revoke_quote_record(
+            state.as_ref(),
+            quote.quote_id.as_deref().unwrap(),
+            Some("quote expired during checkout"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(revoked.status.as_db(), "revoked");
+        assert_eq!(
+            revoked.revoked_reason.as_deref(),
+            Some("quote expired during checkout")
+        );
+
+        let error = consume_quote_record(
+            state.as_ref(),
+            &card.card_id,
+            quote.quote_id.as_deref(),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("revoked"));
+
+        drop(state);
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn consumes_quotes_once_for_replay_protection() {
+        let (state, path) = test_state().await.unwrap();
+        let card = sample_card();
+        let quote = sign_local_settlement_quote(
+            &card,
+            build_settlement_quote(&card, Some(18.5), Some("Settle travel booking")),
+        )
+        .unwrap();
+        record_quote_offer(state.as_ref(), &card, &quote, "local")
+            .await
+            .unwrap();
+
+        let transaction_id = Uuid::new_v4();
+        let consumed = consume_quote_record(
+            state.as_ref(),
+            &card.card_id,
+            quote.quote_id.as_deref(),
+            transaction_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(consumed.status.as_db(), "consumed");
+        assert_eq!(consumed.consumed_by_transaction_id, Some(transaction_id));
+
+        let replay_error = consume_quote_record(
+            state.as_ref(),
+            &card.card_id,
+            quote.quote_id.as_deref(),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap_err();
+        assert!(replay_error.to_string().contains("already been consumed"));
+
+        drop(state);
+        let _ = fs::remove_file(path);
     }
 
     #[tokio::test]

@@ -1985,6 +1985,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
             remote_task_id TEXT,
             transaction_id TEXT NOT NULL UNIQUE,
             mandate_id TEXT NOT NULL,
+            quote_id TEXT,
             amount REAL NOT NULL,
             description TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -2004,6 +2005,56 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_remote_agent_settlements_local_task_id
         ON remote_agent_settlements(local_task_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_remote_agent_settlements_quote_id
+        ON remote_agent_settlements(quote_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_quote_ledger (
+            quote_id TEXT PRIMARY KEY,
+            card_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            quote_url TEXT,
+            previous_quote_id TEXT,
+            superseded_by_quote_id TEXT,
+            negotiation_round INTEGER NOT NULL,
+            settlement_supported INTEGER NOT NULL,
+            payment_roles TEXT NOT NULL,
+            currency TEXT,
+            quote_mode TEXT NOT NULL,
+            requested_amount REAL,
+            quoted_amount REAL,
+            counter_offer_amount REAL,
+            min_amount REAL,
+            max_amount REAL,
+            description_template TEXT,
+            warning TEXT,
+            expires_at_unix_ms INTEGER,
+            issuer_did TEXT,
+            signature_hex TEXT,
+            status TEXT NOT NULL,
+            consumed_by_transaction_id TEXT,
+            revoked_reason TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_quote_ledger_card_id
+        ON agent_quote_ledger(card_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_quote_ledger_previous_quote_id
+        ON agent_quote_ledger(previous_quote_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_quote_ledger_status
+        ON agent_quote_ledger(status, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_quote_ledger_consumed_by_transaction_id
+        ON agent_quote_ledger(consumed_by_transaction_id, created_at_unix_ms DESC)
         "#,
     ] {
         sqlx::query(statement)
@@ -2122,6 +2173,13 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         "wasm_skills",
         "issued_at_unix_ms",
         "ALTER TABLE wasm_skills ADD COLUMN issued_at_unix_ms INTEGER",
+    )
+    .await?;
+    ensure_sqlite_column(
+        pool,
+        "remote_agent_settlements",
+        "quote_id",
+        "ALTER TABLE remote_agent_settlements ADD COLUMN quote_id TEXT",
     )
     .await?;
 
