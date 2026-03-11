@@ -12,6 +12,7 @@ mod connectors;
 mod control_center;
 mod control_plane;
 mod gateway;
+mod identity;
 mod marketplace;
 mod node_attestation;
 mod policy;
@@ -76,6 +77,7 @@ pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
 mod tests {
     use std::{fs, path::PathBuf};
 
+    use anyhow::Context;
     use base64::{Engine as _, prelude::BASE64_STANDARD};
     use ed25519_dalek::{Signer, SigningKey};
     use futures_util::{SinkExt, StreamExt};
@@ -146,6 +148,37 @@ mod tests {
     async fn in_process_smoke_exercises_rollout_and_command_loop() -> anyhow::Result<()> {
         let (base_url, handle, db_path) = spawn_test_server().await?;
         let client = Client::new();
+
+        let bootstrap = post_json(
+            &client,
+            &format!("{base_url}/api/gateway/identity/bootstrap/session"),
+            json!({
+                "bootstrapToken": "dawn-dev-bootstrap",
+                "operatorName": "smoke-operator"
+            }),
+        )
+        .await?;
+        let session_token = bootstrap["sessionToken"]
+            .as_str()
+            .context("missing identity session token")?
+            .to_string();
+        let claim = post_json(
+            &client,
+            &format!("{base_url}/api/gateway/identity/node-claims"),
+            json!({
+                "sessionToken": session_token,
+                "nodeId": "node-smoke",
+                "displayName": "Smoke Node",
+                "transport": "websocket",
+                "requestedCapabilities": ["agent_ping"],
+                "expiresInSeconds": 600
+            }),
+        )
+        .await?;
+        let claim_token = claim["claimToken"]
+            .as_str()
+            .context("missing node claim token")?
+            .to_string();
 
         let node_signing_key = SigningKey::from_bytes(&[41_u8; 32]);
         let node_public_key_hex = hex::encode(node_signing_key.verifying_key().as_bytes());
@@ -252,8 +285,9 @@ mod tests {
         .await?;
 
         let ws_url = format!(
-            "{}/api/gateway/control-plane/nodes/node-smoke/session?displayName=Smoke%20Node&transport=websocket",
-            base_url.replace("http://", "ws://")
+            "{}/api/gateway/control-plane/nodes/node-smoke/session?displayName=Smoke%20Node&transport=websocket&claimToken={}",
+            base_url.replace("http://", "ws://"),
+            claim_token
         );
         let (stream, _) = connect_async(&ws_url).await?;
         let (mut writer, mut reader) = stream.split();

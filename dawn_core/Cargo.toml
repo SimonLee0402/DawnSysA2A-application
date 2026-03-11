@@ -26,6 +26,7 @@ wasmtime = "22.0"
 
 [dev-dependencies]
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tower = "0.5"
 
 # Protocols (Placeholders/stubs for real crates)
 # a2a-rs = "0.3"

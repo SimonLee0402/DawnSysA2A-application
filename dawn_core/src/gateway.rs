@@ -7,7 +7,7 @@ use tracing::error;
 
 use crate::{
     agent_cards, app_state::AppState, approval_center, chat_ingress, connectors, control_plane,
-    marketplace, policy, skill_registry,
+    identity, marketplace, policy, skill_registry,
 };
 
 #[derive(Debug, Serialize)]
@@ -45,6 +45,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/approvals", approval_center::router())
         .nest("/control-plane", control_plane::router())
         .nest("/connectors", connectors::router())
+        .nest("/identity", identity::router())
         .nest("/ingress", chat_ingress::router())
         .nest("/marketplace", marketplace::router())
         .nest("/agent-cards", agent_cards::router())

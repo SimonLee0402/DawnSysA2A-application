@@ -2386,6 +2386,56 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         ON approval_requests(kind, reference_id, created_at_unix_ms DESC)
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS workspace_profiles (
+            workspace_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            region TEXT NOT NULL,
+            default_model_providers TEXT NOT NULL,
+            default_chat_platforms TEXT NOT NULL,
+            onboarding_status TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS operator_sessions (
+            session_id TEXT PRIMARY KEY,
+            operator_name TEXT NOT NULL,
+            session_token_hash TEXT NOT NULL UNIQUE,
+            revoked INTEGER NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            last_seen_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS node_claims (
+            claim_id TEXT PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            transport TEXT NOT NULL,
+            requested_capabilities TEXT NOT NULL,
+            claim_token_hash TEXT NOT NULL UNIQUE,
+            issued_by_session_id TEXT,
+            issued_by_operator TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expires_at_unix_ms INTEGER NOT NULL,
+            consumed_at_unix_ms INTEGER,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_node_claims_node_id
+        ON node_claims(node_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_node_claims_status
+        ON node_claims(status, created_at_unix_ms DESC)
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS chat_ingress_events (
             ingress_id TEXT PRIMARY KEY,
             platform TEXT NOT NULL,

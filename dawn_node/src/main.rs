@@ -21,6 +21,7 @@ struct NodeConfig {
     node_id: String,
     node_name: String,
     capabilities: Vec<String>,
+    claim_token: Option<String>,
     allow_shell: bool,
     signing_seed: [u8; 32],
     issuer_did: String,
@@ -229,11 +230,20 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_session(config: &NodeConfig) -> anyhow::Result<()> {
-    let url = format!(
+    let mut url = format!(
         "{}?displayName={}&transport=websocket",
         config.gateway_ws_url,
         url_encode(&config.node_name)
     );
+    if let Some(claim_token) = config
+        .claim_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        url.push_str("&claimToken=");
+        url.push_str(&url_encode(claim_token));
+    }
     let (stream, _) = connect_async(&url)
         .await
         .with_context(|| format!("failed to connect to gateway websocket at {url}"))?;
@@ -861,6 +871,10 @@ fn load_config() -> NodeConfig {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_else(|_| default_capabilities());
+    let claim_token = env::var("DAWN_NODE_CLAIM_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let allow_shell = env::var("DAWN_NODE_ALLOW_SHELL")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
@@ -886,6 +900,7 @@ fn load_config() -> NodeConfig {
         node_id,
         node_name,
         capabilities,
+        claim_token,
         allow_shell,
         signing_seed,
         issuer_did,
@@ -1317,6 +1332,7 @@ mod tests {
             node_id: "node-test".to_string(),
             node_name: "Node Test".to_string(),
             capabilities: vec!["agent_ping".to_string()],
+            claim_token: None,
             allow_shell: false,
             signing_seed: [7_u8; 32],
             issuer_did: "did:dawn:node:test".to_string(),

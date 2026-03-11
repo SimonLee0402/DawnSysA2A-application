@@ -247,14 +247,28 @@ Control Center:
 - the same console now embeds a `Marketplace Catalog` browser so operators can search signed skills and published agent cards, then install or import them without leaving `/console`.
 - the console now also subscribes to `/console/events` over SSE, so task, approval, ingress, node, command, rollout, payment, and policy writes can trigger near-real-time refresh instead of depending only on polling.
 - the right rail now also includes a `Setup Navigator`, which translates connector and ingress readiness into concrete environment-variable blocks, verification endpoints, and China/global go-live presets.
+- the same liquid-glass deck now includes an `Identity & Onboarding` studio for operator bootstrap sessions, workspace profile persistence, and first-time node claim issuance.
 - the same operator deck now includes a `Reconciliation Fabric` view plus receipt-push actions, so cross-gateway settlement receipts and counterparty acknowledgments can be inspected from the same liquid-glass drawer.
-- the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
+  - the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
 
 Approval Center:
 
 - `GET /api/gateway/approvals?status=pending`
 - `GET /api/gateway/approvals/{approval_id}`
 - `POST /api/gateway/approvals/{approval_id}/decision`
+
+Identity And Onboarding:
+
+- `GET /api/gateway/identity/status`
+- `POST /api/gateway/identity/bootstrap/session`
+- `GET /api/gateway/identity/sessions`
+- `GET /api/gateway/identity/workspace`
+- `PUT /api/gateway/identity/workspace`
+- `GET /api/gateway/identity/node-claims`
+- `POST /api/gateway/identity/node-claims`
+- `POST /api/gateway/identity/node-claims/{claim_id}/revoke`
+- first-time node websocket registration now requires a valid `claimToken`
+- existing nodes can reconnect without a new claim
 - `node_command` approvals are created when a node command is dispatched with `payload.approvalRequired = true` or when the command type is `shell_exec`.
 - `payment` approvals are created automatically when AP2 enters `pending_physical_auth`.
 - approving a node-command request releases the command into the existing control-plane queue.
@@ -950,6 +964,8 @@ If a webhook URL is missing, the connector returns `mode = dry_run`.
 - Optional environment variable: `DAWN_NODE_SIGNING_SEED_HEX`
 - If omitted, `dawn_node` derives a deterministic development identity from `DAWN_NODE_ID`
 - The derived identity is convenient for local development, but production deployments should set an explicit signing seed and register the issuer via `POST /api/gateway/control-plane/nodes/trust-roots`
+- Optional environment variable: `DAWN_NODE_CLAIM_TOKEN`
+- When a gateway has not seen a node before, `dawn_node` should present `DAWN_NODE_CLAIM_TOKEN` on its first websocket session so the gateway can consume the onboarding claim
 - Optional environment variable: `DAWN_NODE_POLICY_TRUST_ROOTS`
   - Format: `did:dawn:policy:{pubkey_hex}={pubkey_hex},did:dawn:policy:{pubkey_hex2}={pubkey_hex2}`
 - Optional environment variable: `DAWN_NODE_SKILL_PUBLISHER_TRUST_ROOTS`

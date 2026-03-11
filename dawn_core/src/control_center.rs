@@ -1206,6 +1206,103 @@ async fn dashboard() -> Html<&'static str> {
             </div>
           </div>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Identity &amp; Onboarding</h2>
+            <span class="tiny">Bootstrap operator sessions, workspace context, and first-time node claims</span>
+          </div>
+          <div class="console-form">
+            <div class="result-box" id="identity-status">Bootstrap an operator session to configure workspace identity and node onboarding.</div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-bootstrap-token">Bootstrap Token</label>
+                <input id="identity-bootstrap-token" type="text" value="dawn-dev-bootstrap" />
+              </div>
+              <div class="field">
+                <label for="identity-operator-name">Operator Name</label>
+                <input id="identity-operator-name" type="text" value="console-operator" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-session-token">Operator Session Token</label>
+                <input id="identity-session-token" type="text" placeholder="Bootstrap to mint or paste an existing session token" />
+              </div>
+              <div class="field">
+                <label for="identity-workspace-status">Onboarding Status</label>
+                <input id="identity-workspace-status" type="text" value="bootstrap_pending" />
+              </div>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="bootstrapOperatorSession()">Bootstrap Session</button>
+              <button type="button" class="secondary" onclick="clearOperatorSession()">Clear Session</button>
+              <span class="tiny" id="identity-session-pill">No operator session</span>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-workspace-name">Workspace Name</label>
+                <input id="identity-workspace-name" type="text" value="Dawn Agent Commerce" />
+              </div>
+              <div class="field">
+                <label for="identity-region">Region</label>
+                <input id="identity-region" type="text" value="global" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-tenant-id">Tenant ID</label>
+                <input id="identity-tenant-id" type="text" value="dawn-labs" />
+              </div>
+              <div class="field">
+                <label for="identity-project-id">Project ID</label>
+                <input id="identity-project-id" type="text" value="agent-commerce" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-model-providers">Default Model Providers</label>
+                <input id="identity-model-providers" type="text" value="deepseek,qwen" />
+              </div>
+              <div class="field">
+                <label for="identity-chat-platforms">Default Chat Platforms</label>
+                <input id="identity-chat-platforms" type="text" value="feishu,wechat_official_account" />
+              </div>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="saveWorkspaceProfile()">Save Workspace Profile</button>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-claim-node-id">Node ID</label>
+                <input id="identity-claim-node-id" type="text" value="node-cn-edge-01" />
+              </div>
+              <div class="field">
+                <label for="identity-claim-display-name">Node Display Name</label>
+                <input id="identity-claim-display-name" type="text" value="Shanghai Edge Node" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="identity-claim-transport">Transport</label>
+                <input id="identity-claim-transport" type="text" value="websocket" />
+              </div>
+              <div class="field">
+                <label for="identity-claim-expiry">Expiry Seconds</label>
+                <input id="identity-claim-expiry" type="number" min="60" step="60" value="1800" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="identity-claim-capabilities">Requested Capabilities</label>
+              <input id="identity-claim-capabilities" type="text" value="system_info,process_snapshot,list_directory,read_file_preview,stat_path" />
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="issueNodeClaim()">Issue Node Claim</button>
+            </div>
+            <div class="result-box" id="identity-claim-output">Issued node claims and launch URLs will appear here.</div>
+            <div class="feed" id="identity-claim-feed"></div>
+          </div>
+        </section>
       </div>
     </section>
   </div>
@@ -1237,6 +1334,13 @@ async fn dashboard() -> Html<&'static str> {
     let consoleReconnectTimer = null;
     let latestConnectorStatus = null;
     let latestIngressStatus = null;
+    let currentOperatorSessionToken = (() => {
+      try {
+        return window.localStorage.getItem("dawnOperatorSessionToken") || "";
+      } catch (_error) {
+        return "";
+      }
+    })();
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
@@ -1617,6 +1721,160 @@ async fn dashboard() -> Html<&'static str> {
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean);
+    }
+    function setOperatorSessionToken(token) {
+      const normalized = String(token || "").trim();
+      currentOperatorSessionToken = normalized;
+      try {
+        if (normalized) {
+          window.localStorage.setItem("dawnOperatorSessionToken", normalized);
+        } else {
+          window.localStorage.removeItem("dawnOperatorSessionToken");
+        }
+      } catch (_error) {}
+      const tokenInput = document.getElementById("identity-session-token");
+      const pill = document.getElementById("identity-session-pill");
+      if (tokenInput) tokenInput.value = normalized;
+      if (pill) pill.textContent = normalized ? "Operator session ready" : "No operator session";
+      return normalized;
+    }
+    function readOperatorSessionToken() {
+      const tokenInput = document.getElementById("identity-session-token");
+      return String(tokenInput?.value || currentOperatorSessionToken || "").trim();
+    }
+    function syncIdentityStudio(identityStatus, identitySessions, identityClaims) {
+      const workspace = identityStatus?.workspace || {};
+      const status = document.getElementById("identity-status");
+      const claimFeed = document.getElementById("identity-claim-feed");
+      const claimOutput = document.getElementById("identity-claim-output");
+      const sessionToken = setOperatorSessionToken(readOperatorSessionToken());
+      const activeSessions = Array.isArray(identitySessions)
+        ? identitySessions.filter((session) => !session.revoked).length
+        : 0;
+      if (status) {
+        status.innerHTML = `${badge(identityStatus?.bootstrapMode || "bootstrap")} <strong>${escapeHtml(workspace.displayName || "Workspace")}</strong> · ${escapeHtml(workspace.region || "global")} · sessions <strong>${activeSessions}</strong> · pending claims <strong>${identityStatus?.pendingNodeClaims ?? 0}</strong>`;
+      }
+      if (claimOutput && !claimOutput.dataset.touched) {
+        claimOutput.innerHTML = sessionToken
+          ? `Operator session is stored locally. Issue a node claim to mint a first-connect URL.`
+          : `Bootstrap an operator session first, then issue a node claim for a new Dawn node.`;
+      }
+      const assignValue = (id, value) => {
+        const element = document.getElementById(id);
+        if (!element || element.dataset.dirty === "true") return;
+        element.value = value ?? "";
+      };
+      assignValue("identity-workspace-name", workspace.displayName || "Dawn Agent Commerce");
+      assignValue("identity-region", workspace.region || "global");
+      assignValue("identity-tenant-id", workspace.tenantId || "dawn-labs");
+      assignValue("identity-project-id", workspace.projectId || "agent-commerce");
+      assignValue("identity-model-providers", (workspace.defaultModelProviders || ["deepseek", "qwen"]).join(","));
+      assignValue("identity-chat-platforms", (workspace.defaultChatPlatforms || ["feishu", "wechat_official_account"]).join(","));
+      assignValue("identity-workspace-status", workspace.onboardingStatus || "bootstrap_pending");
+
+      if (claimFeed) {
+        claimFeed.innerHTML = (identityClaims || []).slice(0, 6).map((claim) => `
+          <article class="feed-item">
+            <strong>${escapeHtml(claim.displayName || claim.nodeId)}</strong>
+            <p><code>${escapeHtml(claim.nodeId)}</code> · ${badge(claim.status)} · expires ${escapeHtml(claim.expiresAtUnixMs)}</p>
+            <p>${escapeHtml((claim.requestedCapabilities || []).join(", ") || "no declared capabilities")}</p>
+          </article>
+        `).join("") || `<div class="tiny">No node claims issued yet.</div>`;
+      }
+    }
+    async function bootstrapOperatorSession() {
+      const bootstrapToken = document.getElementById("identity-bootstrap-token")?.value?.trim();
+      const operatorName = document.getElementById("identity-operator-name")?.value?.trim();
+      const status = document.getElementById("identity-status");
+      if (!bootstrapToken || !operatorName) {
+        window.alert("Bootstrap token and operator name are required.");
+        return;
+      }
+      try {
+        const response = await postJson("/api/gateway/identity/bootstrap/session", {
+          bootstrapToken,
+          operatorName
+        });
+        setOperatorSessionToken(response.sessionToken);
+        if (status) {
+          status.innerHTML = `${badge("session_created")} Operator <strong>${escapeHtml(response.session.operatorName)}</strong> bootstrapped a session.`;
+        }
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
+    function clearOperatorSession() {
+      setOperatorSessionToken("");
+      const output = document.getElementById("identity-claim-output");
+      if (output) {
+        output.dataset.touched = "";
+        output.textContent = "Operator session cleared. Bootstrap again to issue new node claims.";
+      }
+    }
+    async function saveWorkspaceProfile() {
+      const sessionToken = readOperatorSessionToken();
+      const status = document.getElementById("identity-status");
+      if (!sessionToken) {
+        window.alert("Bootstrap or paste an operator session token first.");
+        return;
+      }
+      try {
+        const response = await fetch("/api/gateway/identity/workspace", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sessionToken,
+            tenantId: document.getElementById("identity-tenant-id")?.value?.trim(),
+            projectId: document.getElementById("identity-project-id")?.value?.trim(),
+            displayName: document.getElementById("identity-workspace-name")?.value?.trim(),
+            region: document.getElementById("identity-region")?.value?.trim(),
+            defaultModelProviders: splitList(document.getElementById("identity-model-providers")?.value),
+            defaultChatPlatforms: splitList(document.getElementById("identity-chat-platforms")?.value),
+            onboardingStatus: document.getElementById("identity-workspace-status")?.value?.trim() || "configured"
+          })
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || `workspace update failed (${response.status})`);
+        }
+        const payload = await response.json();
+        if (status) {
+          status.innerHTML = `${badge("workspace_updated")} Workspace <strong>${escapeHtml(payload.workspace.displayName)}</strong> updated by ${escapeHtml(payload.actor)}.`;
+        }
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
+    async function issueNodeClaim() {
+      const sessionToken = readOperatorSessionToken();
+      const output = document.getElementById("identity-claim-output");
+      if (!sessionToken) {
+        window.alert("Bootstrap or paste an operator session token first.");
+        return;
+      }
+      try {
+        const response = await postJson("/api/gateway/identity/node-claims", {
+          sessionToken,
+          nodeId: document.getElementById("identity-claim-node-id")?.value?.trim(),
+          displayName: document.getElementById("identity-claim-display-name")?.value?.trim(),
+          transport: document.getElementById("identity-claim-transport")?.value?.trim() || "websocket",
+          requestedCapabilities: splitList(document.getElementById("identity-claim-capabilities")?.value),
+          expiresInSeconds: Number(document.getElementById("identity-claim-expiry")?.value || 1800)
+        });
+        const sessionUrl = String(response.sessionUrl || "").replace("{claimToken}", encodeURIComponent(response.claimToken));
+        if (output) {
+          output.dataset.touched = "true";
+          output.innerHTML = `Issued claim <code>${escapeHtml(response.claim.claimId)}</code> for <strong>${escapeHtml(response.claim.nodeId)}</strong>.<br /><code>${escapeHtml(sessionUrl)}</code><br /><code>DAWN_NODE_CLAIM_TOKEN=${escapeHtml(response.claimToken)}</code>`;
+        }
+        await refresh(response.claim.nodeId);
+      } catch (error) {
+        if (output) {
+          output.dataset.touched = "true";
+          output.textContent = error.message;
+        }
+      }
     }
     function readConfiguredConnector(configured, key) {
       if (!configured) return false;
@@ -2712,7 +2970,7 @@ async fn dashboard() -> Html<&'static str> {
       }
     }
     async function refresh(preferredNodeId) {
-      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, reconciliation, marketplaceCatalog, connectorStatus, ingressStatus] = await Promise.all([
+      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, reconciliation, marketplaceCatalog, connectorStatus, ingressStatus, identityStatus, identitySessions, identityClaims] = await Promise.all([
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJson("/api/gateway/agent-cards/settlements"),
@@ -2724,7 +2982,10 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/agent-cards/reconciliation"),
         fetchJson(`/api/gateway/marketplace/catalog?${currentMarketplaceCatalogQuery()}`),
         fetchJson("/api/gateway/connectors/status"),
-        fetchJson("/api/gateway/ingress/status")
+        fetchJson("/api/gateway/ingress/status"),
+        fetchJson("/api/gateway/identity/status"),
+        fetchJson("/api/gateway/identity/sessions"),
+        fetchJson("/api/gateway/identity/node-claims")
       ]);
       latestConnectorStatus = connectorStatus;
       latestIngressStatus = ingressStatus;
@@ -2751,7 +3012,9 @@ async fn dashboard() -> Html<&'static str> {
         ["Approvals", approvals.length],
         ["Quotes", quotes.length],
         ["Invocations", invocations.length],
-        ["Reconciliation", reconciliation.length]
+        ["Reconciliation", reconciliation.length],
+        ["Sessions", identityStatus.activeSessions ?? identitySessions.length],
+        ["Node Claims", identityClaims.length]
       ].map(([label, value]) => `
         <div class="stat">
           <div class="stat-label">${label}</div>
@@ -2800,6 +3063,7 @@ async fn dashboard() -> Html<&'static str> {
       syncNodeCommandForm(nodes, selectedNodeId);
       syncRolloutConsole(nodes, selectedNodeId);
       syncAgentDelegationForm(cards);
+      syncIdentityStudio(identityStatus, identitySessions, identityClaims);
       renderConnectorMatrix(connectorStatus, ingressStatus);
       updateSetupNavigator(document.getElementById("setup-surface")?.value || "model", connectorStatus, ingressStatus);
 
@@ -2871,6 +3135,17 @@ async fn dashboard() -> Html<&'static str> {
       if (event.target?.id === "node-command-payload") {
         event.target.dataset.dirty = "true";
       }
+      if ([
+        "identity-workspace-name",
+        "identity-region",
+        "identity-tenant-id",
+        "identity-project-id",
+        "identity-model-providers",
+        "identity-chat-platforms",
+        "identity-workspace-status"
+      ].includes(event.target?.id)) {
+        event.target.dataset.dirty = "true";
+      }
     });
     document.addEventListener("change", (event) => {
       if (event.target?.id === "node-command-type") {
@@ -2930,6 +3205,11 @@ mod tests {
         assert!(markup.contains("Setup Navigator"));
         assert!(markup.contains("setup-navigator-status"));
         assert!(markup.contains("copySetupEnvBlock"));
+        assert!(markup.contains("Identity &amp; Onboarding"));
+        assert!(markup.contains("bootstrapOperatorSession"));
+        assert!(markup.contains("saveWorkspaceProfile"));
+        assert!(markup.contains("issueNodeClaim"));
+        assert!(markup.contains("identity-session-token"));
         assert!(markup.contains("Reconciliation Fabric"));
         assert!(markup.contains("reconciliation-rows"));
         assert!(markup.contains("openReconciliationDetail"));

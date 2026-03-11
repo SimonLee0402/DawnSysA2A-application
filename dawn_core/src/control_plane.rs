@@ -23,7 +23,7 @@ use crate::app_state::{
     NodeCommandStatus, NodeRecord, NodeRolloutRecord, NodeRolloutStatus, NodeSessionStatus,
     unix_timestamp_ms,
 };
-use crate::{node_attestation, policy, skill_registry};
+use crate::{identity, node_attestation, policy, skill_registry};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +127,7 @@ struct NodeInboundEnvelope {
 struct SessionQuery {
     display_name: Option<String>,
     transport: Option<String>,
+    claim_token: Option<String>,
 }
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -499,8 +500,13 @@ async fn open_node_session(
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
     Query(query): Query<SessionQuery>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| node_session(socket, state, node_id, query))
+) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
+    let claim_required =
+        identity::authorize_node_session_open(&state, &node_id, query.claim_token.as_deref())
+        .await
+        .map_err(auth_error)?
+        .is_some();
+    Ok(ws.on_upgrade(move |socket| node_session(socket, state, node_id, query, claim_required)))
 }
 
 async fn node_session(
@@ -508,14 +514,18 @@ async fn node_session(
     state: Arc<AppState>,
     node_id: String,
     query: SessionQuery,
+    claim_required: bool,
 ) {
+    let SessionQuery {
+        display_name,
+        transport,
+        claim_token,
+    } = query;
     let node = match state
         .upsert_node(
             node_id.clone(),
-            query
-                .display_name
-                .unwrap_or_else(|| format!("Dawn Node {node_id}")),
-            query.transport.unwrap_or_else(|| "websocket".to_string()),
+            display_name.unwrap_or_else(|| format!("Dawn Node {node_id}")),
+            transport.unwrap_or_else(|| "websocket".to_string()),
             Vec::new(),
         )
         .await
@@ -526,6 +536,17 @@ async fn node_session(
             return;
         }
     };
+    if claim_required {
+        if let Err(error) =
+            identity::consume_node_session_claim(&state, &node_id, claim_token.as_deref()).await
+        {
+            error!(?error, "Failed to consume onboarding claim for {node_id}");
+            let _ = state
+                .set_node_connection(&node_id, false, NodeSessionStatus::Disconnected)
+                .await;
+            return;
+        }
+    }
     info!("Node session connected: {}", node.node_id);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -997,6 +1018,15 @@ async fn dispatch_pending_commands_for_node(state: &Arc<AppState>, node_id: &str
 
 fn not_found(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
+}
+
+fn auth_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": error.to_string()
+        })),
+    )
 }
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
