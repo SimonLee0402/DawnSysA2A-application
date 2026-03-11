@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -298,6 +298,10 @@ struct SearchAgentCardsRequest {
 #[serde(rename_all = "camelCase")]
 struct SettlementQuoteQuery {
     requested_amount: Option<f64>,
+    description: Option<String>,
+    remote: Option<bool>,
+    timeout_seconds: Option<u64>,
+    allow_metadata_fallback: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,6 +356,8 @@ pub struct AgentSettlementQuote {
     pub payment_roles: Vec<String>,
     pub currency: Option<String>,
     pub quote_mode: String,
+    pub quote_source: String,
+    pub quote_url: Option<String>,
     pub requested_amount: Option<f64>,
     pub quoted_amount: Option<f64>,
     pub min_amount: Option<f64>,
@@ -365,6 +371,9 @@ struct AgentPaymentTerms {
     roles: Vec<String>,
     currency: Option<String>,
     quote_mode: Option<String>,
+    quote_method: Option<String>,
+    quote_url: Option<String>,
+    quote_path: Option<String>,
     flat_amount: Option<f64>,
     min_amount: Option<f64>,
     max_amount: Option<f64>,
@@ -457,11 +466,20 @@ async fn get_settlement_quote(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| not_found("agent card not found"))?;
-    Ok(Json(build_settlement_quote(
-        &card,
-        query.requested_amount,
-        None,
-    )))
+    let quote = if query.remote.unwrap_or(false) {
+        fetch_remote_settlement_quote(
+            &card,
+            query.requested_amount,
+            query.description.as_deref(),
+            query.timeout_seconds.unwrap_or(10),
+            query.allow_metadata_fallback.unwrap_or(true),
+        )
+        .await
+        .map_err(service_error)?
+    } else {
+        build_settlement_quote(&card, query.requested_amount, query.description.as_deref())
+    };
+    Ok(Json(quote))
 }
 
 async fn publish_card(
@@ -566,8 +584,9 @@ async fn publish_card_inner(
     validate_card(&request.card)?;
     let locally_hosted = request.locally_hosted.unwrap_or(false);
     let published = request.published.unwrap_or(true);
+    let enriched_card = enrich_local_card_with_quote_url(&card_id, locally_hosted, request.card);
     let merged_payment_roles =
-        merge_unique_metadata(request.payment_roles, extract_ap2_roles(&request.card));
+        merge_unique_metadata(request.payment_roles, extract_ap2_roles(&enriched_card));
     let now = unix_timestamp_ms();
     let record = PublishedAgentCard {
         card_id: card_id.clone(),
@@ -592,7 +611,7 @@ async fn publish_card_inner(
         payment_roles: normalize_metadata(merged_payment_roles),
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
-        card: request.card,
+        card: enriched_card,
     };
     save_card_record(state, &record).await?;
     let saved = find_card_record(state, &card_id)
@@ -747,9 +766,9 @@ pub async fn invoke_remote_agent_card(
         .as_ref()
         .and_then(extract_remote_task_status)
         .or(remote_status);
-    let settlement = match request.settlement {
+        let settlement = match request.settlement {
         Some(settlement) => {
-            validate_remote_settlement_request(&card, &settlement)?;
+            validate_remote_settlement_request(&card, &settlement).await?;
             if record.status != RemoteInvocationStatus::Completed {
                 anyhow::bail!(
                     "remote settlement requires a completed remote invocation; current status is {:?}",
@@ -896,11 +915,24 @@ async fn create_remote_settlement(
     Ok(record)
 }
 
-fn validate_remote_settlement_request(
+async fn validate_remote_settlement_request(
     card: &PublishedAgentCard,
     settlement: &RemoteSettlementRequest,
 ) -> anyhow::Result<AgentSettlementQuote> {
-    let quote = build_settlement_quote(card, Some(settlement.amount), Some(&settlement.description));
+    let quote = fetch_remote_settlement_quote(
+        card,
+        Some(settlement.amount),
+        Some(&settlement.description),
+        10,
+        true,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to validate negotiated settlement quote for agent card '{}'",
+            card.card_id
+        )
+    })?;
     if !quote.settlement_supported {
         anyhow::bail!(
             "agent card '{}' does not advertise AP2 payee or merchant settlement capability",
@@ -922,7 +954,7 @@ fn validate_remote_settlement_request(
     if let Some(max_amount) = quote.max_amount {
         if settlement.amount > max_amount {
             anyhow::bail!(
-                "remote settlement amount {:.2} exceeds agent-card maxAmount {:.2}",
+                "remote settlement amount {:.2} exceeds quoted maxAmount {:.2}",
                 settlement.amount,
                 max_amount
             );
@@ -1955,6 +1987,21 @@ fn extract_ap2_terms(card: &AgentCard) -> AgentPaymentTerms {
             .and_then(Value::as_str)
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty()),
+        quote_method: pricing
+            .get("quoteMethod")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty()),
+        quote_url: pricing
+            .get("quoteUrl")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .filter(|value| !value.trim().is_empty()),
+        quote_path: pricing
+            .get("quotePath")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .filter(|value| !value.trim().is_empty()),
         flat_amount: pricing.get("flatAmount").and_then(Value::as_f64),
         min_amount: pricing.get("minAmount").and_then(Value::as_f64),
         max_amount: pricing.get("maxAmount").and_then(Value::as_f64),
@@ -1972,6 +2019,7 @@ fn build_settlement_quote(
     description: Option<&str>,
 ) -> AgentSettlementQuote {
     let terms = extract_ap2_terms(&card.card);
+    let quote_url = resolve_quote_url(card, &terms);
     let settlement_supported = contains_ci(&card.payment_roles, "payee")
         || contains_ci(&card.payment_roles, "merchant")
         || contains_ci(&terms.roles, "payee")
@@ -2029,6 +2077,8 @@ fn build_settlement_quote(
         payment_roles: merge_unique_metadata(Some(card.payment_roles.clone()), terms.roles),
         currency: terms.currency,
         quote_mode,
+        quote_source: "metadata".to_string(),
+        quote_url,
         requested_amount,
         quoted_amount,
         min_amount: terms.min_amount,
@@ -2038,6 +2088,259 @@ fn build_settlement_quote(
             .or(terms.description_template),
         warning,
     }
+}
+
+fn resolve_quote_url(card: &PublishedAgentCard, terms: &AgentPaymentTerms) -> Option<String> {
+    if let Some(quote_url) = terms.quote_url.as_deref() {
+        return absolutize_against_card(card, quote_url);
+    }
+    terms
+        .quote_path
+        .as_deref()
+        .and_then(|quote_path| absolutize_against_card(card, quote_path))
+}
+
+fn absolutize_against_card(card: &PublishedAgentCard, raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if Url::parse(trimmed).is_ok() {
+        return Some(trimmed.to_string());
+    }
+
+    let base = card
+        .card_url
+        .as_deref()
+        .unwrap_or(card.card.url.as_str())
+        .trim();
+    let base = Url::parse(base).ok()?;
+    let joined = if trimmed.starts_with('/') {
+        let mut origin = base;
+        origin.set_path(trimmed);
+        origin.set_query(None);
+        origin.set_fragment(None);
+        origin
+    } else {
+        base.join(trimmed).ok()?
+    };
+    Some(joined.to_string())
+}
+
+fn enrich_local_card_with_quote_url(
+    card_id: &str,
+    locally_hosted: bool,
+    mut card: AgentCard,
+) -> AgentCard {
+    if !locally_hosted {
+        return card;
+    }
+    let Ok(base_url) = Url::parse(card.url.trim()) else {
+        return card;
+    };
+    let Some(host) = base_url.host_str() else {
+        return card;
+    };
+    let authority = match base_url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let quote_url = format!(
+        "{}://{}/api/gateway/agent-cards/{}/quote",
+        base_url.scheme(),
+        authority,
+        card_id
+    );
+
+    for extension in &mut card.capabilities.extensions {
+        if extension.uri != AP2_EXTENSION_URI {
+            continue;
+        }
+        let params = extension.params.get_or_insert_with(|| json!({}));
+        if !params.is_object() {
+            *params = json!({});
+        }
+        let Some(root) = params.as_object_mut() else {
+            continue;
+        };
+        if root.get("pricing").is_some() {
+            let Some(pricing) = root.get_mut("pricing").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            pricing
+                .entry("quoteUrl".to_string())
+                .or_insert_with(|| Value::String(quote_url.clone()));
+        } else {
+            root.entry("pricing".to_string())
+                .or_insert_with(|| json!({ "quoteUrl": quote_url.clone() }));
+        }
+    }
+    card
+}
+
+async fn fetch_remote_settlement_quote(
+    card: &PublishedAgentCard,
+    requested_amount: Option<f64>,
+    description: Option<&str>,
+    timeout_seconds: u64,
+    allow_metadata_fallback: bool,
+) -> anyhow::Result<AgentSettlementQuote> {
+    let metadata_quote = build_settlement_quote(card, requested_amount, description);
+    let terms = extract_ap2_terms(&card.card);
+    let Some(quote_url) = resolve_quote_url(card, &terms) else {
+        if allow_metadata_fallback {
+            return Ok(metadata_quote);
+        }
+        anyhow::bail!(
+            "agent card '{}' does not expose a remote quoteUrl or quotePath",
+            card.card_id
+        );
+    };
+
+    let method = terms
+        .quote_method
+        .clone()
+        .unwrap_or_else(|| "GET".to_string());
+    let client = Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds.max(1)))
+        .build()?;
+    let response = if method == "POST" {
+        client
+            .post(&quote_url)
+            .json(&json!({
+                "cardId": card.card_id,
+                "requestedAmount": requested_amount,
+                "description": description,
+            }))
+            .send()
+            .await
+    } else {
+        client
+            .get(&quote_url)
+            .query(&[
+                ("requestedAmount", requested_amount.map(|value| value.to_string())),
+                ("description", description.map(ToString::to_string)),
+            ])
+            .send()
+            .await
+    };
+
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if allow_metadata_fallback => {
+            let mut fallback = metadata_quote;
+            fallback.warning = Some(format!(
+                "remote quote fetch failed at {} and metadata quote was used instead: {}",
+                quote_url, error
+            ));
+            return Ok(fallback);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed requesting remote settlement quote at {quote_url}"));
+        }
+    };
+
+    let status = response.status();
+    let raw_body = response.text().await?;
+    if !status.is_success() {
+        if allow_metadata_fallback {
+            let mut fallback = metadata_quote;
+            fallback.warning = Some(format!(
+                "remote quote endpoint {} returned status {}; metadata quote was used instead",
+                quote_url, status
+            ));
+            return Ok(fallback);
+        }
+        anyhow::bail!(
+            "remote quote endpoint {} returned status {}: {}",
+            quote_url,
+            status,
+            raw_body
+        );
+    }
+
+    let raw_value = if raw_body.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str::<Value>(&raw_body)
+            .with_context(|| format!("remote quote endpoint {quote_url} returned non-JSON body"))?
+    };
+    parse_remote_settlement_quote(card, &quote_url, &raw_value, metadata_quote)
+}
+
+fn parse_remote_settlement_quote(
+    card: &PublishedAgentCard,
+    quote_url: &str,
+    raw_value: &Value,
+    metadata_quote: AgentSettlementQuote,
+) -> anyhow::Result<AgentSettlementQuote> {
+    if let Ok(mut quote) = serde_json::from_value::<AgentSettlementQuote>(raw_value.clone()) {
+        quote.card_id = card.card_id.clone();
+        quote.quote_source = "remote".to_string();
+        quote.quote_url = Some(quote_url.to_string());
+        return Ok(quote);
+    }
+
+    let body = raw_value.get("quote").unwrap_or(raw_value);
+    let Some(body) = body.as_object() else {
+        anyhow::bail!("remote quote response was not an object");
+    };
+
+    let mut quote = metadata_quote;
+    quote.settlement_supported = body
+        .get("settlementSupported")
+        .and_then(Value::as_bool)
+        .unwrap_or(quote.settlement_supported);
+    quote.payment_roles = body
+        .get("paymentRoles")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .map(normalize_metadata)
+        .unwrap_or(quote.payment_roles);
+    quote.currency = body
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !value.is_empty())
+        .or(quote.currency);
+    quote.quote_mode = body
+        .get("quoteMode")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(quote.quote_mode);
+    quote.requested_amount = body
+        .get("requestedAmount")
+        .and_then(Value::as_f64)
+        .or(quote.requested_amount);
+    quote.quoted_amount = body
+        .get("quotedAmount")
+        .and_then(Value::as_f64)
+        .or(quote.quoted_amount);
+    quote.min_amount = body.get("minAmount").and_then(Value::as_f64).or(quote.min_amount);
+    quote.max_amount = body.get("maxAmount").and_then(Value::as_f64).or(quote.max_amount);
+    quote.description_template = body
+        .get("descriptionTemplate")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .or(quote.description_template);
+    quote.warning = body
+        .get("warning")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .or(quote.warning);
+    quote.quote_source = "remote".to_string();
+    quote.quote_url = Some(quote_url.to_string());
+    quote.card_id = card.card_id.clone();
+    Ok(quote)
 }
 
 fn merge_unique_metadata(primary: Option<Vec<String>>, fallback: Vec<String>) -> Vec<String> {
@@ -2214,7 +2517,7 @@ fn not_found(message: impl Into<String>) -> (StatusCode, Json<Value>) {
 mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
-    use axum::{Json, Router, routing::post};
+    use axum::{Json, Router, routing::{get, post}};
     use reqwest::Client;
     use serde_json::json;
     use tokio::time::{Duration, sleep};
@@ -2225,8 +2528,9 @@ mod tests {
         AP2_EXTENSION_URI, AgentAuthentication, AgentCapabilities, AgentCard, AgentExtension,
         AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
         PublishedAgentCard, RemoteInvocationStatus, RemoteSettlementRequest, SearchAgentCardsRequest,
-        build_search_haystack, build_settlement_quote, derive_card_id, extract_ap2_roles,
-        extract_ap2_terms, extract_remote_task_id, extract_remote_task_status,
+        build_search_haystack, build_settlement_quote, derive_card_id,
+        enrich_local_card_with_quote_url, extract_ap2_roles, extract_ap2_terms,
+        extract_remote_task_id, extract_remote_task_status, fetch_remote_settlement_quote,
         get_remote_settlement_by_invocation, invoke_remote_agent_card, matches_search,
         merge_unique_metadata, publish_card_inner, remote_task_create_url, remote_task_detail_url,
         validate_remote_settlement_request,
@@ -2425,12 +2729,27 @@ mod tests {
         assert!(quote.settlement_supported);
         assert_eq!(quote.currency.as_deref(), Some("CNY"));
         assert_eq!(quote.quote_mode, "flat");
+        assert_eq!(quote.quote_source, "metadata");
         assert_eq!(quote.quoted_amount, Some(18.5));
         assert!(quote.warning.is_some());
     }
 
     #[test]
-    fn rejects_settlement_over_agent_card_cap() {
+    fn enriches_locally_hosted_card_with_quote_url() {
+        let card = enrich_local_card_with_quote_url(
+            "travel-agent-1234abcd",
+            true,
+            sample_card().card,
+        );
+        let terms = extract_ap2_terms(&card);
+        assert_eq!(
+            terms.quote_url.as_deref(),
+            Some("https://example.com/api/gateway/agent-cards/travel-agent-1234abcd/quote")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_settlement_over_agent_card_cap() {
         let card = sample_card();
         let error = validate_remote_settlement_request(
             &card,
@@ -2440,8 +2759,58 @@ mod tests {
                 description: "too much".to_string(),
             },
         )
+        .await
         .unwrap_err();
         assert!(error.to_string().contains("maxAmount"));
+    }
+
+    #[tokio::test]
+    async fn fetches_remote_quote_from_declared_quote_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/quotes/booking",
+                get(|| async {
+                    Json(json!({
+                        "settlementSupported": true,
+                        "paymentRoles": ["payee"],
+                        "currency": "CNY",
+                        "quoteMode": "negotiated",
+                        "requestedAmount": 12.0,
+                        "quotedAmount": 13.2,
+                        "minAmount": 10.0,
+                        "maxAmount": 15.0,
+                        "descriptionTemplate": "Remote negotiated travel quote"
+                    }))
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let mut card = sample_card();
+        card.card.url = format!("http://{address}/a2a");
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "negotiated",
+                "quoteUrl": format!("http://{address}/quotes/booking")
+            }
+        }));
+
+        let expected_quote_url = format!("http://{address}/quotes/booking");
+        let quote =
+            fetch_remote_settlement_quote(&card, Some(12.0), Some("Book train"), 5, false)
+                .await
+                .unwrap();
+        assert_eq!(quote.quote_source, "remote");
+        assert_eq!(quote.quote_url.as_deref(), Some(expected_quote_url.as_str()));
+        assert_eq!(quote.quoted_amount, Some(13.2));
+        assert_eq!(quote.max_amount, Some(15.0));
+
+        server.abort();
     }
 
     #[tokio::test]
