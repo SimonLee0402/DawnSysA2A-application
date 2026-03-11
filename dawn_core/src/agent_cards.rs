@@ -704,6 +704,13 @@ async fn publish_card(
         .map_err(internal_error)
 }
 
+pub async fn publish_agent_card(
+    state: &AppState,
+    request: PublishAgentCardRequest,
+) -> anyhow::Result<PublishedAgentCard> {
+    Ok(publish_card_inner(state, request).await?.record)
+}
+
 async fn import_card(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ImportAgentCardRequest>,
@@ -712,6 +719,13 @@ async fn import_card(
         .await
         .map(Json)
         .map_err(internal_error)
+}
+
+pub async fn import_agent_card(
+    state: &AppState,
+    request: ImportAgentCardRequest,
+) -> anyhow::Result<PublishedAgentCard> {
+    Ok(import_card_inner(state, request).await?.record)
 }
 
 async fn list_invocations(
@@ -1471,6 +1485,10 @@ async fn list_card_records(state: &AppState) -> anyhow::Result<Vec<PublishedAgen
     .context("failed to list agent cards")?;
 
     rows.into_iter().map(row_to_card_record).collect()
+}
+
+pub async fn list_agent_cards(state: &AppState) -> anyhow::Result<Vec<PublishedAgentCard>> {
+    list_card_records(state).await
 }
 
 async fn save_card_record(state: &AppState, record: &PublishedAgentCard) -> anyhow::Result<()> {

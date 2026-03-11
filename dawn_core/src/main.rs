@@ -12,6 +12,7 @@ mod connectors;
 mod control_center;
 mod control_plane;
 mod gateway;
+mod marketplace;
 mod node_attestation;
 mod policy;
 mod sandbox;
@@ -60,6 +61,11 @@ pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
             "/.well-known/agent.json",
             get(agent_cards::well_known_agent_card_json),
         )
+        .route(
+            "/.well-known/dawn-marketplace.json",
+            get(marketplace::well_known_catalog),
+        )
+        .nest("/marketplace", marketplace::page_router())
         .nest("/api/gateway", gateway::router())
         .nest("/api/ap2", ap2::router())
         .nest("/api/a2a", a2a::router())

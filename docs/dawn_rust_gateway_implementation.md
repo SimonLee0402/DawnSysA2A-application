@@ -9,6 +9,7 @@ The Rust backend now has four active slices:
 - `Gateway` control-plane scaffolding for nodes, model connectors, and chat connectors.
 - `Agent Card` publishing, discovery, remote invocation, and local `.well-known` exposure.
 - `Chat ingress + Approval Center + Control Center` for inbound routing and operator action loops.
+- `Marketplace` catalog + install endpoints for published agent cards and signed Wasm skills.
 
 The project direction is now Rust-only for runtime startup. The legacy Django/Vue launch scripts should be treated as obsolete.
 
@@ -28,6 +29,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
   - Serves the operator-facing dashboard at `/console`.
 - `dawn_core/src/gateway.rs`
   - Exposes the high-level gateway status and nests the control-plane and connector routers.
+- `dawn_core/src/marketplace.rs`
+  - Exposes a public marketplace catalog, skill package install flow, agent-card install flow, and a lightweight `/marketplace` browser.
 - `dawn_core/src/approval_center.rs`
   - Exposes a unified approval queue for pending node-command approvals and AP2 payment approvals.
 - `dawn_core/src/control_plane.rs`
@@ -56,6 +59,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /health`
 - `GET /.well-known/agent-card.json`
 - `GET /.well-known/agent.json`
+- `GET /.well-known/dawn-marketplace.json`
 - `GET /api/gateway/status`
 - `GET /api/gateway/capabilities`
 - `GET /api/gateway/policy`
@@ -96,7 +100,11 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/ingress/events`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
 - `POST /api/gateway/ingress/feishu/events`
+- `GET /api/gateway/marketplace/catalog`
+- `POST /api/gateway/marketplace/install/skill`
+- `POST /api/gateway/marketplace/install/agent-card`
 - `GET /console`
+- `GET /marketplace`
 - `GET /api/gateway/agent-cards/status`
 - `GET /api/gateway/agent-cards/`
 - `GET /api/gateway/agent-cards/search`
@@ -219,6 +227,27 @@ Approval Center:
 - rejecting a node-command request marks the command as `failed`.
 - approving a payment approval requires the same MCU DID + signature payload that `POST /api/ap2/authorize` already accepts.
 - rejecting a payment approval marks the payment and any linked settlement as `rejected`.
+
+## Marketplace
+
+The gateway now exposes a public marketplace layer over the existing agent-card registry and signed skill registry.
+
+Marketplace endpoints:
+
+- `GET /.well-known/dawn-marketplace.json`
+- `GET /api/gateway/marketplace/catalog`
+- `POST /api/gateway/marketplace/install/skill`
+- `POST /api/gateway/marketplace/install/agent-card`
+- `GET /marketplace`
+
+Behavior:
+
+- the catalog combines published agent cards with signed skill versions into one discovery surface
+- skill entries expose a concrete package URL at `/api/gateway/skills/{skill_id}/{version}/package`
+- package export includes skill metadata, signed envelope when present, and the Wasm artifact encoded as `wasmBase64`
+- remote skill installation can fetch a package URL and register it locally; signed packages are verified against existing skill-publisher trust roots
+- remote agent-card installation reuses the existing import path and stores the imported card in the local registry
+- if `DAWN_PUBLIC_BASE_URL` is configured, marketplace package and install URLs are emitted as absolute URLs; otherwise they remain root-relative
 
 An orchestration graph can also pause on payment approval:
 
@@ -963,6 +992,9 @@ Removed legacy launchers:
   - approval-required node commands now persist a pending approval request before dispatch
   - approving the request releases the node command back into the queued control-plane path
   - `POST /api/gateway/approvals/{approval_id}/decision` can reject a pending AP2 transaction and updates both the approval record and payment state
+- Marketplace tests:
+  - the marketplace catalog now includes signed skill packages and published agent cards in one combined discovery document
+  - signed skill entries expose installable package URLs
 - Runtime Agent Card smoke test:
   - `POST /api/gateway/agent-cards/publish` published a locally hosted `local-travel-agent`
   - `GET /.well-known/agent-card.json` returned the active local card
@@ -1022,6 +1054,7 @@ Removed legacy launchers:
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
 - Inbound chat ingress now exists, but it is still early-stage: only Telegram and Feishu are wired for inbound routing, there is not yet a full inbound reply orchestration layer, and the approval UX is currently gateway-console driven rather than native inside each chat platform.
+- Marketplace discovery now exists, but it is still gateway-hosted rather than federation-native; there is not yet ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
 - Remote A2A settlement is now persisted and AP2-linked, but it still assumes a local settlement authority; there is not yet a distributed AP2 settlement network or reconciliation flow across gateways.
 - Agent Card quote support now includes a local replay ledger plus on-demand cross-gateway quote-state verification, but it is still pull-based; there is not yet a push replication bus, federation-wide revocation feed, or quote-state gossip protocol.

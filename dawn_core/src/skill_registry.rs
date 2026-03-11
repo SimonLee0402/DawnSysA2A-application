@@ -131,6 +131,22 @@ pub struct SkillDistributionResponse {
     pub trusted_publishers: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillPackageResponse {
+    pub skill: SkillRecord,
+    pub envelope: Option<SignedSkillEnvelope>,
+    pub wasm_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallSkillPackageRequest {
+    pub package_url: String,
+    pub activate: Option<bool>,
+    pub allow_unsigned: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillActivationResponse {
@@ -161,12 +177,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_skills))
         .route("/register", post(register_skill))
         .route("/register/signed", post(register_signed_skill))
+        .route("/install", post(install_skill_package))
         .route(
             "/trust-roots",
             get(list_skill_publisher_trust_roots).post(upsert_skill_publisher_trust_root),
         )
         .route("/:skill_id", get(get_skill_versions))
         .route("/:skill_id/:version", get(get_skill_version))
+        .route("/:skill_id/:version/package", get(get_skill_package))
         .route("/:skill_id/:version/activate", post(activate_skill_version))
 }
 
@@ -317,6 +335,16 @@ async fn get_skill_version(
         .ok_or_else(|| not_found("skill version not found"))
 }
 
+async fn get_skill_package(
+    State(state): State<Arc<AppState>>,
+    AxumPath((skill_id, version)): AxumPath<(String, String)>,
+) -> Result<Json<SkillPackageResponse>, (StatusCode, Json<Value>)> {
+    export_skill_package(&state, &skill_id, &version)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
 async fn register_skill(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RegisterSkillRequest>,
@@ -337,6 +365,16 @@ async fn register_signed_skill(
         .map_err(internal_error)
 }
 
+async fn install_skill_package(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InstallSkillPackageRequest>,
+) -> Result<Json<SkillActivationResponse>, (StatusCode, Json<Value>)> {
+    install_skill_package_from_url(&state, request)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
 async fn activate_skill_version(
     State(state): State<Arc<AppState>>,
     AxumPath((skill_id, version)): AxumPath<(String, String)>,
@@ -348,6 +386,87 @@ async fn activate_skill_version(
         skill,
         activated: true,
     }))
+}
+
+pub async fn export_skill_package(
+    state: &AppState,
+    skill_id: &str,
+    version: &str,
+) -> anyhow::Result<SkillPackageResponse> {
+    let skill = find_skill(state, skill_id, Some(version))
+        .await?
+        .ok_or_else(|| anyhow!("skill version not found: {skill_id}@{version}"))?;
+    let wasm_bytes = fs::read(&skill.artifact_path)
+        .await
+        .with_context(|| format!("failed to read skill artifact {}", skill.artifact_path))?;
+    let wasm_base64 = BASE64_STANDARD.encode(wasm_bytes);
+    let envelope = match (&skill.issuer_did, &skill.signature_hex) {
+        (Some(issuer_did), Some(signature_hex)) => Some(SignedSkillEnvelope {
+            document: SignedSkillDocument {
+                skill_id: skill.skill_id.clone(),
+                version: skill.version.clone(),
+                display_name: skill.display_name.clone(),
+                description: skill.description.clone(),
+                entry_function: skill.entry_function.clone(),
+                capabilities: skill.capabilities.clone(),
+                artifact_sha256: skill.artifact_sha256.clone(),
+                issuer_did: issuer_did.clone(),
+                issued_at_unix_ms: skill.issued_at_unix_ms.unwrap_or(skill.created_at_unix_ms),
+            },
+            signature_hex: signature_hex.clone(),
+        }),
+        _ => None,
+    };
+    Ok(SkillPackageResponse {
+        skill,
+        envelope,
+        wasm_base64,
+    })
+}
+
+pub async fn install_skill_package_from_url(
+    state: &Arc<AppState>,
+    request: InstallSkillPackageRequest,
+) -> anyhow::Result<SkillActivationResponse> {
+    let package = reqwest::Client::new()
+        .get(&request.package_url)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch skill package {}", request.package_url))?
+        .error_for_status()
+        .with_context(|| format!("skill package endpoint returned an error {}", request.package_url))?
+        .json::<SkillPackageResponse>()
+        .await
+        .with_context(|| format!("failed to decode skill package {}", request.package_url))?;
+
+    if let Some(envelope) = package.envelope {
+        register_signed_skill_inner(
+            state,
+            RegisterSignedSkillRequest {
+                envelope,
+                wasm_base64: package.wasm_base64,
+                activate: request.activate,
+            },
+        )
+        .await
+    } else if request.allow_unsigned.unwrap_or(false) {
+        register_skill_inner(
+            state,
+            RegisterSkillRequest {
+                skill_id: package.skill.skill_id,
+                version: package.skill.version,
+                display_name: Some(package.skill.display_name),
+                description: package.skill.description,
+                entry_function: Some(package.skill.entry_function),
+                capabilities: Some(package.skill.capabilities),
+                wasm_base64: package.wasm_base64,
+                activate: request.activate,
+            },
+        )
+        .await
+    } else {
+        anyhow::bail!("remote skill package is unsigned; set allowUnsigned=true to install it")
+    }
 }
 
 async fn list_skill_publisher_trust_roots(
@@ -418,7 +537,7 @@ async fn register_skill_inner(
     .await
 }
 
-async fn register_signed_skill_inner(
+pub(crate) async fn register_signed_skill_inner(
     state: &AppState,
     request: RegisterSignedSkillRequest,
 ) -> anyhow::Result<SkillActivationResponse> {
@@ -538,7 +657,7 @@ async fn persist_registered_skill(
     })
 }
 
-async fn upsert_skill_publisher_trust_root_inner(
+pub(crate) async fn upsert_skill_publisher_trust_root_inner(
     state: &Arc<AppState>,
     request: SkillPublisherTrustRootUpsertRequest,
 ) -> anyhow::Result<SkillPublisherTrustRootUpsertResponse> {
