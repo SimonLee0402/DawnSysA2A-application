@@ -173,7 +173,7 @@ async fn dashboard() -> Html<&'static str> {
     }
     .stats {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
       gap: 12px;
       padding: 22px;
       align-content: end;
@@ -641,6 +641,28 @@ async fn dashboard() -> Html<&'static str> {
             <tbody id="task-rows"></tbody>
           </table>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Remote Invocations</h2>
+            <span class="tiny">Agent-card execution calls and their remote task state</span>
+          </div>
+          <table>
+            <thead><tr><th>Card</th><th>Status</th><th>Remote Task</th></tr></thead>
+            <tbody id="invocation-rows"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Quote Ledger</h2>
+            <span class="tiny">Signed quote rounds, revocations, and replay state</span>
+          </div>
+          <table>
+            <thead><tr><th>Quote</th><th>Status</th><th>Amount</th></tr></thead>
+            <tbody id="quote-rows"></tbody>
+          </table>
+        </section>
       </div>
 
       <div class="stack">
@@ -652,6 +674,17 @@ async fn dashboard() -> Html<&'static str> {
           <table>
             <thead><tr><th>Node</th><th>Status</th><th>Trust</th></tr></thead>
             <tbody id="node-rows"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Rollout Fabric</h2>
+            <span class="tiny">Latest signed policy and skill distribution state per node</span>
+          </div>
+          <table>
+            <thead><tr><th>Node</th><th>Status</th><th>Policy / Skill</th></tr></thead>
+            <tbody id="rollout-rows"></tbody>
           </table>
         </section>
 
@@ -795,6 +828,12 @@ async fn dashboard() -> Html<&'static str> {
     }
     async function fetchJson(url) {
       const response = await fetch(url);
+      if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+      return response.json();
+    }
+    async function fetchJsonOptional(url) {
+      const response = await fetch(url);
+      if (response.status === 404) return null;
       if (!response.ok) throw new Error(`${url} -> ${response.status}`);
       return response.json();
     }
@@ -1001,6 +1040,96 @@ async fn dashboard() -> Html<&'static str> {
           }
         ]);
         pre.textContent = formatJsonBlock(settlement);
+        return;
+      }
+
+      if (state.kind === "invocation") {
+        const invocation = state.invocation;
+        eyebrow.textContent = "Remote Invocation";
+        title.textContent = invocation.cardId;
+        subtitle.textContent = `${invocation.status} · ${invocation.invocationId}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Remote task", invocation.remoteTaskId || "—"],
+          ["Local task", invocation.localTaskId || "—"],
+          ["Updated", invocation.updatedAtUnixMs],
+          ["Error", invocation.error || "—"]
+        ]);
+        actions.innerHTML = renderDrawerActions([
+          {
+            label: "Refresh",
+            onclick: `openInvocationDetail('${invocation.invocationId}')`,
+            secondary: true
+          },
+          ...(state.settlement
+            ? [{
+                label: "Settlement",
+                onclick: `openSettlementDetail('${state.settlement.settlementId}')`,
+                secondary: true
+              }]
+            : [])
+        ]);
+        pre.textContent = formatJsonBlock({
+          invocation,
+          settlement: state.settlement
+        });
+        return;
+      }
+
+      if (state.kind === "quote") {
+        const quote = state.quote;
+        eyebrow.textContent = "Quote Ledger";
+        title.textContent = quote.quoteId;
+        subtitle.textContent = `${quote.cardId} · round ${quote.negotiationRound}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Status", quote.status],
+          ["Mode", quote.quoteMode],
+          ["Quoted", quote.quotedAmount ?? "—"],
+          ["Expires", quote.expiresAtUnixMs || "—"]
+        ]);
+        const quoteActions = [
+          {
+            label: "Refresh",
+            onclick: `openQuoteDetail(decodeURIComponent('${encodeURIComponent(quote.quoteId)}'))`,
+            secondary: true
+          }
+        ];
+        if (quote.sourceKind === "remote") {
+          quoteActions.push({
+            label: "Sync State",
+            onclick: `syncQuoteState(decodeURIComponent('${encodeURIComponent(quote.cardId)}'), decodeURIComponent('${encodeURIComponent(quote.quoteId)}'))`,
+            secondary: true
+          });
+        }
+        if (quote.status === "offered") {
+          quoteActions.push({
+            label: "Revoke",
+            onclick: `revokeQuote(decodeURIComponent('${encodeURIComponent(quote.quoteId)}'))`
+          });
+        }
+        actions.innerHTML = renderDrawerActions(quoteActions);
+        pre.textContent = formatJsonBlock(quote);
+        return;
+      }
+
+      if (state.kind === "rollout") {
+        const rollout = state.rollout;
+        eyebrow.textContent = "Node Rollout";
+        title.textContent = rollout.nodeId;
+        subtitle.textContent = `${rollout.status} · ${rollout.bundleHash}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Policy version", rollout.policyVersion],
+          ["Policy hash", rollout.policyDocumentHash || "—"],
+          ["Skill hash", rollout.skillDistributionHash],
+          ["Last ack", rollout.lastAckAtUnixMs || "—"]
+        ]);
+        actions.innerHTML = renderDrawerActions([
+          {
+            label: "Refresh",
+            onclick: `openRolloutDetail(decodeURIComponent('${encodeURIComponent(rollout.nodeId)}'))`,
+            secondary: true
+          }
+        ]);
+        pre.textContent = formatJsonBlock(rollout);
       }
     }
     async function openApprovalDetail(approvalId) {
@@ -1033,6 +1162,74 @@ async fn dashboard() -> Html<&'static str> {
         openDetailDrawer({
           kind: "settlement",
           settlement
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function openInvocationDetail(invocationId) {
+      try {
+        const [invocation, settlement] = await Promise.all([
+          fetchJson(`/api/gateway/agent-cards/invocations/${encodeURIComponent(invocationId)}`),
+          fetchJsonOptional(`/api/gateway/agent-cards/invocations/${encodeURIComponent(invocationId)}/settlement`)
+        ]);
+        openDetailDrawer({
+          kind: "invocation",
+          invocation,
+          settlement
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function openQuoteDetail(quoteId) {
+      try {
+        const quote = await fetchJson(`/api/gateway/agent-cards/quotes/${encodeURIComponent(quoteId)}`);
+        openDetailDrawer({
+          kind: "quote",
+          quote
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function openRolloutDetail(nodeId) {
+      try {
+        const rollout = await fetchJson(`/api/gateway/control-plane/nodes/${encodeURIComponent(nodeId)}/rollout`);
+        openDetailDrawer({
+          kind: "rollout",
+          rollout
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function revokeQuote(quoteId) {
+      try {
+        const reason = window.prompt("Revocation reason", "revoked via control center");
+        if (!reason) return;
+        const quote = await postJson(`/api/gateway/agent-cards/quotes/${encodeURIComponent(quoteId)}/revoke`, {
+          reason
+        });
+        await refresh();
+        openDetailDrawer({
+          kind: "quote",
+          quote
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function syncQuoteState(cardId, quoteId) {
+      try {
+        const quote = await postJson(
+          `/api/gateway/agent-cards/${encodeURIComponent(cardId)}/quotes/${encodeURIComponent(quoteId)}/sync`,
+          {}
+        );
+        await refresh();
+        openDetailDrawer({
+          kind: "quote",
+          quote
         });
       } catch (error) {
         window.alert(error.message);
@@ -1136,14 +1333,22 @@ async fn dashboard() -> Html<&'static str> {
       }
     }
     async function refresh(preferredNodeId) {
-      const [tasks, nodes, settlements, cards, ingress, approvals] = await Promise.all([
+      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes] = await Promise.all([
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJson("/api/gateway/agent-cards/settlements"),
         fetchJson("/api/gateway/agent-cards/"),
         fetchJson("/api/gateway/ingress/events?limit=8"),
-        fetchJson("/api/gateway/approvals?status=pending")
+        fetchJson("/api/gateway/approvals?status=pending"),
+        fetchJson("/api/gateway/agent-cards/invocations"),
+        fetchJson("/api/gateway/agent-cards/quotes")
       ]);
+      const rollouts = await Promise.all(
+        nodes.slice(0, 8).map(async (node) => ({
+          nodeId: node.nodeId,
+          rollout: await fetchJsonOptional(`/api/gateway/control-plane/nodes/${encodeURIComponent(node.nodeId)}/rollout`)
+        }))
+      );
       const selectedNodeId =
         preferredNodeId ||
         document.getElementById("node-command-node")?.value ||
@@ -1158,7 +1363,9 @@ async fn dashboard() -> Html<&'static str> {
         ["Nodes", nodes.length],
         ["Settlements", settlements.length],
         ["Inbound", ingress.length],
-        ["Approvals", approvals.length]
+        ["Approvals", approvals.length],
+        ["Quotes", quotes.length],
+        ["Invocations", invocations.length]
       ].map(([label, value]) => `
         <div class="stat">
           <div class="stat-label">${label}</div>
@@ -1197,6 +1404,13 @@ async fn dashboard() -> Html<&'static str> {
           <td>${node.attestationVerified ? badge("trusted") : badge("unverified")}</td>
         </tr>`).join("");
 
+      document.getElementById("rollout-rows").innerHTML = rollouts.map(({ nodeId, rollout }) => `
+        <tr class="${rollout ? "interactive-row" : ""}" ${rollout ? `onclick="openRolloutDetail(decodeURIComponent('${encodeURIComponent(nodeId)}'))"` : ""}>
+          <td>${ellipsis(nodeId, 28)}</td>
+          <td>${rollout ? badge(rollout.status) : `<span class="tiny">none</span>`}</td>
+          <td><code>${ellipsis(rollout ? `${rollout.policyVersion} / ${rollout.skillDistributionHash}` : "no rollout", 48)}</code></td>
+        </tr>`).join("");
+
       syncNodeCommandForm(nodes, selectedNodeId);
 
       const visibleCommands = commands.slice(0, 8);
@@ -1221,6 +1435,23 @@ async fn dashboard() -> Html<&'static str> {
           <td>${badge(settlement.status)}</td>
           <td>${settlement.amount}</td>
         </tr>`).join("");
+
+      document.getElementById("invocation-rows").innerHTML = invocations.slice(0, 8).map((invocation) => `
+        <tr class="interactive-row" onclick="openInvocationDetail('${invocation.invocationId}')">
+          <td>${ellipsis(invocation.cardId, 26)}</td>
+          <td>${badge(invocation.status)}</td>
+          <td><code>${ellipsis(invocation.remoteTaskId || "pending", 36)}</code></td>
+        </tr>`).join("") || `<tr><td colspan="3" class="tiny">No remote invocations yet.</td></tr>`;
+
+      document.getElementById("quote-rows").innerHTML = quotes.slice(0, 8).map((quote) => `
+        <tr class="interactive-row" onclick="openQuoteDetail(decodeURIComponent('${encodeURIComponent(quote.quoteId)}'))">
+          <td>
+            <strong>${ellipsis(quote.cardId, 24)}</strong><br />
+            <code>${ellipsis(quote.quoteId, 32)}</code>
+          </td>
+          <td>${badge(quote.status)}</td>
+          <td>${quote.quotedAmount ?? quote.requestedAmount ?? "—"}</td>
+        </tr>`).join("") || `<tr><td colspan="3" class="tiny">No quotes in ledger.</td></tr>`;
 
       document.getElementById("card-rows").innerHTML = cards.slice(0, 8).map((card) => `
         <tr>

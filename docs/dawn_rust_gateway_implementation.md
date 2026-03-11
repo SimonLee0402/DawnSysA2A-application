@@ -235,6 +235,7 @@ Control Center:
 - the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, and `stat_path` through the existing control-plane API.
 - the current console visual direction is a liquid-glass operations deck rather than a plain admin table, and it now includes command template chips plus a full command-detail inspector for recent node results.
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
+- the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
 - the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
 
 Approval Center:
