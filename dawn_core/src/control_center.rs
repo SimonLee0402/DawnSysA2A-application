@@ -328,6 +328,11 @@ async fn dashboard() -> Html<&'static str> {
       display: grid;
       gap: 12px;
     }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
     .field {
       display: grid;
       gap: 6px;
@@ -558,7 +563,7 @@ async fn dashboard() -> Html<&'static str> {
     }
     @media (max-width: 1080px) {
       .hero, .layout { grid-template-columns: 1fr; }
-      .hero-grid, .detail-grid { grid-template-columns: 1fr; }
+      .hero-grid, .detail-grid, .form-grid { grid-template-columns: 1fr; }
       .detail-drawer {
         top: auto;
         left: 12px;
@@ -663,6 +668,62 @@ async fn dashboard() -> Html<&'static str> {
             <tbody id="quote-rows"></tbody>
           </table>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Agent Delegation Studio</h2>
+            <span class="tiny">Preview quotes, counter-offer, and invoke remote agent cards</span>
+          </div>
+          <div class="console-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="delegate-card-id">Target Agent Card</label>
+                <select id="delegate-card-id"></select>
+              </div>
+              <div class="field">
+                <label for="delegate-name">Invocation Name</label>
+                <input id="delegate-name" type="text" value="delegate task" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="delegate-instruction">Instruction</label>
+              <textarea id="delegate-instruction">Coordinate a remote agent action.</textarea>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="delegate-amount">Settlement Amount</label>
+                <input id="delegate-amount" type="number" step="0.01" min="0" placeholder="18.50" />
+              </div>
+              <div class="field">
+                <label for="delegate-quote-id">Quote Id</label>
+                <input id="delegate-quote-id" type="text" placeholder="quote-..." />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="delegate-counter-offer">Counter Offer</label>
+                <input id="delegate-counter-offer" type="number" step="0.01" min="0" placeholder="15.00" />
+              </div>
+              <div class="field">
+                <label for="delegate-await-completion">Await Completion</label>
+                <select id="delegate-await-completion">
+                  <option value="true" selected>Wait for remote completion</option>
+                  <option value="false">Return after dispatch</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="delegate-description">Settlement Description</label>
+              <input id="delegate-description" type="text" value="Settle remote delegation" />
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="previewSettlementQuote(false)">Preview Quote</button>
+              <button type="button" class="secondary" onclick="previewSettlementQuote(true)">Counter Offer</button>
+              <button type="button" class="secondary" onclick="invokeAgentCard()">Invoke Agent</button>
+            </div>
+            <div class="result-box" id="delegate-status">Select an agent card to preview or invoke a remote delegation.</div>
+          </div>
+        </section>
       </div>
 
       <div class="stack">
@@ -686,6 +747,24 @@ async fn dashboard() -> Html<&'static str> {
             <thead><tr><th>Node</th><th>Status</th><th>Policy / Skill</th></tr></thead>
             <tbody id="rollout-rows"></tbody>
           </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Rollout Console</h2>
+            <span class="tiny">Manually dispatch the current signed policy and skill bundle</span>
+          </div>
+          <div class="console-form">
+            <div class="field">
+              <label for="rollout-node-id">Target Node</label>
+              <select id="rollout-node-id"></select>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="dispatchManualRollout()">Dispatch Rollout</button>
+              <button type="button" class="secondary" onclick="refresh(document.getElementById('rollout-node-id')?.value)">Refresh Nodes</button>
+            </div>
+            <div class="result-box" id="rollout-status">Select a node to push the current rollout bundle.</div>
+          </div>
         </section>
 
         <section class="panel">
@@ -803,6 +882,14 @@ async fn dashboard() -> Html<&'static str> {
       if (!value) return "—";
       return value.length > max ? `${value.slice(0, max)}…` : value;
     };
+    const generateUuid = () => {
+      if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+        const random = Math.random() * 16 | 0;
+        const value = char === "x" ? random : ((random & 0x3) | 0x8);
+        return value.toString(16);
+      });
+    };
     const escapeHtml = (value) => String(value ?? "")
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
@@ -891,6 +978,56 @@ async fn dashboard() -> Html<&'static str> {
       }
       renderCommandTemplateChips(commandTypes);
       applyCommandTemplate(false);
+    }
+    function syncRolloutConsole(nodes, selectedNodeId) {
+      const rolloutSelect = document.getElementById("rollout-node-id");
+      if (!rolloutSelect) return;
+      const options = nodes.map((node) =>
+        `<option value="${escapeHtml(node.nodeId)}">${escapeHtml(node.displayName || node.nodeId)}</option>`
+      ).join("");
+      rolloutSelect.innerHTML = options || `<option value="">No nodes</option>`;
+      if (selectedNodeId && nodes.some((node) => node.nodeId === selectedNodeId)) {
+        rolloutSelect.value = selectedNodeId;
+      }
+    }
+    function syncAgentDelegationForm(cards) {
+      const cardSelect = document.getElementById("delegate-card-id");
+      if (!cardSelect) return;
+      const selectedCardId = cardSelect.value;
+      const options = cards.map((card) => {
+        const label = `${card.card?.name || card.cardId} · ${card.locallyHosted ? "local" : "remote"}`;
+        return `<option value="${escapeHtml(card.cardId)}">${escapeHtml(label)}</option>`;
+      }).join("");
+      cardSelect.innerHTML = options || `<option value="">No cards</option>`;
+      if (selectedCardId && cards.some((card) => card.cardId === selectedCardId)) {
+        cardSelect.value = selectedCardId;
+      }
+    }
+    function parseOptionalNumber(rawValue, label) {
+      const trimmed = String(rawValue || "").trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        throw new Error(`${label} must be a non-negative number.`);
+      }
+      return parsed;
+    }
+    function buildSettlementDraft() {
+      const amount = parseOptionalNumber(document.getElementById("delegate-amount")?.value, "Settlement amount");
+      const counterOfferAmount = parseOptionalNumber(document.getElementById("delegate-counter-offer")?.value, "Counter offer");
+      const quoteId = document.getElementById("delegate-quote-id")?.value?.trim() || null;
+      const description = document.getElementById("delegate-description")?.value?.trim() || "Settle remote delegation";
+      if (amount == null && !quoteId && counterOfferAmount == null) return null;
+      if (amount == null) {
+        throw new Error("Settlement amount is required when using quote settlement actions.");
+      }
+      return {
+        mandateId: generateUuid(),
+        amount,
+        description,
+        quoteId,
+        counterOfferAmount
+      };
     }
     function selectCommand(commandId) {
       selectedCommandId = commandId;
@@ -1204,6 +1341,96 @@ async fn dashboard() -> Html<&'static str> {
         window.alert(error.message);
       }
     }
+    async function previewSettlementQuote(useCounterOffer) {
+      const cardId = document.getElementById("delegate-card-id")?.value;
+      const amount = parseOptionalNumber(document.getElementById("delegate-amount")?.value, "Settlement amount");
+      const quoteId = document.getElementById("delegate-quote-id")?.value?.trim() || null;
+      const counterOfferAmount = useCounterOffer
+        ? parseOptionalNumber(document.getElementById("delegate-counter-offer")?.value, "Counter offer")
+        : null;
+      const description = document.getElementById("delegate-description")?.value?.trim() || "";
+      const status = document.getElementById("delegate-status");
+      if (!cardId) {
+        window.alert("Select an agent card first.");
+        return;
+      }
+      if (amount == null) {
+        window.alert("Settlement amount is required to preview a quote.");
+        return;
+      }
+      if (useCounterOffer && counterOfferAmount == null) {
+        window.alert("Enter a counter-offer amount first.");
+        return;
+      }
+
+      try {
+        const params = new URLSearchParams({
+          remote: "true",
+          requestedAmount: String(amount),
+          description,
+          allowMetadataFallback: "true",
+          timeoutSeconds: "10"
+        });
+        if (quoteId) params.set("quoteId", quoteId);
+        if (counterOfferAmount != null) params.set("counterOfferAmount", String(counterOfferAmount));
+        const quote = await fetchJson(`/api/gateway/agent-cards/${encodeURIComponent(cardId)}/quote?${params.toString()}`);
+        if (quote.quoteId) {
+          document.getElementById("delegate-quote-id").value = quote.quoteId;
+        }
+        if (quote.quotedAmount != null) {
+          document.getElementById("delegate-amount").value = quote.quotedAmount;
+        }
+        if (quote.counterOfferAmount != null) {
+          document.getElementById("delegate-counter-offer").value = quote.counterOfferAmount;
+        }
+        status.innerHTML = `Quote <code>${escapeHtml(quote.quoteId || "metadata")}</code> returned <strong>${escapeHtml(quote.quotedAmount ?? amount)}</strong> ${escapeHtml(quote.currency || "")}.`;
+        await refresh();
+        if (quote.quoteId) {
+          await openQuoteDetail(quote.quoteId);
+        }
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
+    async function invokeAgentCard() {
+      const cardId = document.getElementById("delegate-card-id")?.value;
+      const name = document.getElementById("delegate-name")?.value?.trim() || "delegate task";
+      const instruction = document.getElementById("delegate-instruction")?.value?.trim();
+      const awaitCompletion = document.getElementById("delegate-await-completion")?.value !== "false";
+      const status = document.getElementById("delegate-status");
+      if (!cardId) {
+        window.alert("Select an agent card first.");
+        return;
+      }
+      if (!instruction) {
+        window.alert("Instruction is required.");
+        return;
+      }
+
+      let settlement;
+      try {
+        settlement = buildSettlementDraft();
+      } catch (error) {
+        window.alert(error.message);
+        return;
+      }
+
+      try {
+        const response = await postJson(`/api/gateway/agent-cards/${encodeURIComponent(cardId)}/invoke`, {
+          name,
+          instruction,
+          awaitCompletion,
+          timeoutSeconds: 15,
+          pollIntervalMs: 500,
+          settlement
+        });
+        status.innerHTML = `Invocation <code>${escapeHtml(response.invocation.invocationId)}</code> is <strong>${escapeHtml(response.invocation.status)}</strong>.`;
+        await refresh();
+        await openInvocationDetail(response.invocation.invocationId);
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
     async function revokeQuote(quoteId) {
       try {
         const reason = window.prompt("Revocation reason", "revoked via control center");
@@ -1218,6 +1445,22 @@ async fn dashboard() -> Html<&'static str> {
         });
       } catch (error) {
         window.alert(error.message);
+      }
+    }
+    async function dispatchManualRollout() {
+      const nodeId = document.getElementById("rollout-node-id")?.value;
+      const status = document.getElementById("rollout-status");
+      if (!nodeId) {
+        window.alert("Select a node first.");
+        return;
+      }
+      try {
+        const response = await postJson(`/api/gateway/control-plane/nodes/${encodeURIComponent(nodeId)}/rollout`, {});
+        status.innerHTML = `Rollout for <code>${escapeHtml(nodeId)}</code> is <strong>${escapeHtml(response.delivery)}</strong> with bundle <code>${escapeHtml(response.rollout.bundleHash)}</code>.`;
+        await refresh(nodeId);
+        await openRolloutDetail(nodeId);
+      } catch (error) {
+        if (status) status.textContent = error.message;
       }
     }
     async function syncQuoteState(cardId, quoteId) {
@@ -1412,6 +1655,8 @@ async fn dashboard() -> Html<&'static str> {
         </tr>`).join("");
 
       syncNodeCommandForm(nodes, selectedNodeId);
+      syncRolloutConsole(nodes, selectedNodeId);
+      syncAgentDelegationForm(cards);
 
       const visibleCommands = commands.slice(0, 8);
       visibleCommandsCache = visibleCommands;
@@ -1479,4 +1724,22 @@ async fn dashboard() -> Html<&'static str> {
 </body>
 </html>"#,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::response::Html;
+
+    use super::dashboard;
+
+    #[tokio::test]
+    async fn dashboard_includes_operator_action_studios() {
+        let Html(markup) = dashboard().await;
+        assert!(markup.contains("Agent Delegation Studio"));
+        assert!(markup.contains("delegate-card-id"));
+        assert!(markup.contains("previewSettlementQuote"));
+        assert!(markup.contains("Rollout Console"));
+        assert!(markup.contains("rollout-node-id"));
+        assert!(markup.contains("dispatchManualRollout"));
+    }
 }
