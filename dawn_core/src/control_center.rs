@@ -10,7 +10,7 @@ pub fn router() -> Router<Arc<AppState>> {
 
 async fn dashboard() -> Html<&'static str> {
     Html(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -486,7 +486,7 @@ async fn dashboard() -> Html<&'static str> {
       transition: transform 260ms ease;
       z-index: 21;
       display: grid;
-      grid-template-rows: auto auto auto 1fr;
+      grid-template-rows: auto auto auto auto auto 1fr;
       gap: 14px;
       overflow: hidden;
     }
@@ -532,6 +532,84 @@ async fn dashboard() -> Html<&'static str> {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
+    }
+    .drawer-form {
+      display: none;
+      gap: 12px;
+      padding: 14px;
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+      overflow: auto;
+    }
+    .drawer-form.open {
+      display: grid;
+    }
+    .drawer-note {
+      padding: 12px 14px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 13px;
+    }
+    .drawer-status {
+      display: none;
+    }
+    .drawer-status.open {
+      display: block;
+    }
+    .catalog-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 12px;
+    }
+    .catalog-card {
+      padding: 16px;
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+      display: grid;
+      gap: 10px;
+    }
+    .catalog-card strong {
+      font-size: 15px;
+      letter-spacing: -0.02em;
+      display: block;
+    }
+    .catalog-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .catalog-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .catalog-tag {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: #d5ebf5;
+      font-size: 11px;
+      line-height: 1;
+    }
+    .catalog-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .toolbar input[type="search"] {
+      min-width: 220px;
+      flex: 1 1 240px;
+    }
+    .toolbar select {
+      min-width: 140px;
     }
     button {
       border: 0;
@@ -826,6 +904,26 @@ async fn dashboard() -> Html<&'static str> {
             <div class="result-box" id="marketplace-status">Install, import, or publish marketplace assets from here.</div>
           </div>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Marketplace Catalog</h2>
+            <span class="tiny">Browse signed skills and published agents without leaving the ops deck</span>
+          </div>
+          <div class="console-form">
+            <div class="toolbar">
+              <input id="catalog-search" type="search" placeholder="Search skills, agents, capabilities, platforms" />
+              <select id="catalog-kind">
+                <option value="">All</option>
+                <option value="skill">Skills</option>
+                <option value="agent">Agents</option>
+              </select>
+              <button type="button" class="secondary" onclick="loadMarketplaceCatalog()">Search Catalog</button>
+            </div>
+            <div class="result-box" id="marketplace-catalog-status">Catalog browser is loading.</div>
+            <div class="catalog-grid" id="marketplace-catalog-grid"></div>
+          </div>
+        </section>
       </div>
 
       <div class="stack">
@@ -961,6 +1059,8 @@ async fn dashboard() -> Html<&'static str> {
     </div>
     <div class="drawer-meta" id="detail-drawer-meta"></div>
     <div class="drawer-actions" id="detail-drawer-actions"></div>
+    <div class="drawer-form" id="detail-drawer-form"></div>
+    <div class="result-box drawer-status" id="detail-drawer-status"></div>
     <pre class="detail-pre" id="detail-drawer-pre">Nothing selected.</pre>
   </aside>
 
@@ -969,6 +1069,7 @@ async fn dashboard() -> Html<&'static str> {
     let selectedCommandId = null;
     let visibleCommandsCache = [];
     let detailDrawerState = null;
+    let marketplaceCatalogCache = { skills: [], agentCards: [] };
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
@@ -1223,6 +1324,7 @@ async fn dashboard() -> Html<&'static str> {
     }
     function closeDetailDrawer() {
       detailDrawerState = null;
+      renderDetailDrawer(null);
       document.getElementById("detail-drawer")?.classList.remove("open");
       document.getElementById("detail-drawer-backdrop")?.classList.remove("open");
     }
@@ -1258,14 +1360,191 @@ async fn dashboard() -> Html<&'static str> {
         >${escapeHtml(action.label)}</button>
       `).join("");
     }
+    function setDrawerStatus(message, isError = false) {
+      const status = document.getElementById("detail-drawer-status");
+      if (!status) return;
+      if (!message) {
+        status.classList.remove("open");
+        status.innerHTML = "";
+        status.style.borderColor = "rgba(255,255,255,0.08)";
+        status.style.color = "var(--muted)";
+        return;
+      }
+      status.classList.add("open");
+      status.innerHTML = message;
+      status.style.borderColor = isError ? "rgba(255,130,102,0.32)" : "rgba(255,255,255,0.08)";
+      status.style.color = isError ? "#ffd2c7" : "var(--muted)";
+    }
+    function renderApprovalWorkflowForm(approval, state) {
+      const form = document.getElementById("detail-drawer-form");
+      if (!form) return;
+      if (!approval || approval.status !== "pending") {
+        form.classList.remove("open");
+        form.innerHTML = "";
+        return;
+      }
+      const payment = state?.payment;
+      const isPayment = approval.kind === "payment";
+      const defaultReason = isPayment
+        ? "approved via liquid glass approval center"
+        : "approved via command approval drawer";
+      const workflowNote = isPayment
+        ? "Payment approvals require the same MCU DID and signature pair used by the AP2 authorization path. Rejects still record an operator reason."
+        : "Node-command approvals release the pending command into the control-plane queue. Rejects mark the command as failed and preserve the operator reason.";
+      form.classList.add("open");
+      form.innerHTML = `
+        <div class="eyebrow">Workflow Form</div>
+        <div class="drawer-note">${escapeHtml(workflowNote)}</div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="approval-actor">Actor</label>
+            <input id="approval-actor" type="text" value="console-operator" />
+          </div>
+          <div class="field">
+            <label for="approval-reference">${isPayment ? "Transaction" : "Reference"}</label>
+            <input id="approval-reference" type="text" value="${escapeHtml(approval.referenceId)}" disabled />
+          </div>
+        </div>
+        ${isPayment ? `
+          <div class="form-grid">
+            <div class="field">
+              <label for="approval-mcu-public-did">MCU Public DID</label>
+              <input id="approval-mcu-public-did" type="text" placeholder="did:dawn:mcu:..." value="${escapeHtml(payment?.mcuPublicDid || "")}" />
+            </div>
+            <div class="field">
+              <label for="approval-transaction-state">Payment State</label>
+              <input id="approval-transaction-state" type="text" value="${escapeHtml(payment?.status || "pending_physical_auth")}" disabled />
+            </div>
+          </div>
+          <div class="field">
+            <label for="approval-mcu-signature">MCU Signature Hex</label>
+            <textarea id="approval-mcu-signature" placeholder="Paste MCU signature hex captured from the signing device."></textarea>
+          </div>
+        ` : ""}
+        <div class="field">
+          <label for="approval-reason">Reason</label>
+          <textarea id="approval-reason" placeholder="Record why this action should proceed or be rejected.">${escapeHtml(defaultReason)}</textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" onclick="submitDrawerApproval('approve')">Approve</button>
+          <button type="button" class="secondary" onclick="submitDrawerApproval('reject')">Reject</button>
+          <button type="button" class="secondary" onclick="openApprovalDetail('${approval.approvalId}')">Reload</button>
+        </div>
+      `;
+    }
+    async function submitDrawerApproval(decision) {
+      const approval = detailDrawerState?.approval;
+      if (!approval) {
+        setDrawerStatus("No approval is selected.", true);
+        return;
+      }
+      try {
+        const actor = document.getElementById("approval-actor")?.value?.trim() || "console-operator";
+        const reason = document.getElementById("approval-reason")?.value?.trim() || undefined;
+        const payload = { actor, decision, reason };
+        if (approval.kind === "payment" && decision === "approve") {
+          const mcuPublicDid = document.getElementById("approval-mcu-public-did")?.value?.trim();
+          const mcuSignature = document.getElementById("approval-mcu-signature")?.value?.trim();
+          if (!mcuPublicDid) {
+            setDrawerStatus("MCU public DID is required before approving a payment.", true);
+            return;
+          }
+          if (!mcuSignature) {
+            setDrawerStatus("MCU signature hex is required before approving a payment.", true);
+            return;
+          }
+          payload.mcuPublicDid = mcuPublicDid;
+          payload.mcuSignature = mcuSignature;
+        }
+        setDrawerStatus(`Submitting <strong>${escapeHtml(decision)}</strong> for <code>${escapeHtml(approval.approvalId)}</code>…`);
+        await decideApproval(approval.approvalId, approval.kind, decision, payload);
+      } catch (error) {
+        setDrawerStatus(error.message, true);
+      }
+    }
+    function currentMarketplaceCatalogQuery() {
+      const params = new URLSearchParams({
+        signedOnly: "true",
+        publishedOnly: "true"
+      });
+      const q = document.getElementById("catalog-search")?.value?.trim();
+      const kind = document.getElementById("catalog-kind")?.value;
+      if (q) params.set("q", q);
+      if (kind) params.set("kind", kind);
+      return params.toString();
+    }
+    function renderCatalogTags(values) {
+      const tags = (values || []).filter(Boolean).slice(0, 5);
+      return tags.length
+        ? `<div class="catalog-tags">${tags.map((tag) => `<span class="catalog-tag">${escapeHtml(tag)}</span>`).join("")}</div>`
+        : `<div class="catalog-meta">No declared tags.</div>`;
+    }
+    function renderMarketplaceCatalog(catalog) {
+      marketplaceCatalogCache = catalog || { skills: [], agentCards: [] };
+      const grid = document.getElementById("marketplace-catalog-grid");
+      const status = document.getElementById("marketplace-catalog-status");
+      if (!grid || !status) return;
+      const skills = marketplaceCatalogCache.skills || [];
+      const agentCards = marketplaceCatalogCache.agentCards || [];
+      status.innerHTML = `Showing <strong>${skills.length}</strong> signed skills and <strong>${agentCards.length}</strong> published agents in the current query.`;
+      const skillCards = skills.slice(0, 4).map((skill) => `
+        <article class="catalog-card">
+          <div>
+            <strong>${escapeHtml(skill.displayName)} <small>${escapeHtml(skill.skillId)}@${escapeHtml(skill.version)}</small></strong>
+            <div class="catalog-meta">${escapeHtml(skill.description || "Signed marketplace skill package")}</div>
+            <div class="catalog-meta">${skill.signed ? "Trusted publisher" : "Unsigned"} · ${skill.active ? "active locally" : "installable"}</div>
+          </div>
+          ${renderCatalogTags(skill.capabilities)}
+          <div class="catalog-actions">
+            <button type="button" onclick="installSkillPackage(decodeURIComponent('${encodeURIComponent(skill.packageUrl)}'))">Install Skill</button>
+            <button type="button" class="secondary" onclick="window.open(decodeURIComponent('${encodeURIComponent(skill.packageUrl)}'), '_blank')">View Package</button>
+          </div>
+        </article>
+      `);
+      const agentCardsMarkup = agentCards.slice(0, 4).map((agent) => `
+        <article class="catalog-card">
+          <div>
+            <strong>${escapeHtml(agent.name)} <small>${escapeHtml(agent.cardId)}</small></strong>
+            <div class="catalog-meta">${escapeHtml(agent.description || "Published agent card")}</div>
+            <div class="catalog-meta">${agent.locallyHosted ? "Local host" : "Remote import"} · ${escapeHtml((agent.regions || []).join(", ") || "global")}</div>
+          </div>
+          ${renderCatalogTags([...(agent.chatPlatforms || []), ...(agent.paymentRoles || []), ...(agent.modelProviders || [])])}
+          <div class="catalog-actions">
+            ${agent.cardUrl
+              ? `<button type="button" onclick="importAgentCardFromUrl(decodeURIComponent('${encodeURIComponent(agent.cardUrl)}'))">Import Card</button>`
+              : `<button type="button" class="secondary" disabled>No Card URL</button>`}
+            ${agent.cardUrl
+              ? `<button type="button" class="secondary" onclick="window.open(decodeURIComponent('${encodeURIComponent(agent.cardUrl)}'), '_blank')">Open Card</button>`
+              : ""}
+          </div>
+        </article>
+      `);
+      grid.innerHTML = [...skillCards, ...agentCardsMarkup].join("")
+        || `<article class="catalog-card"><strong>No marketplace matches</strong><div class="catalog-meta">Broaden the search or switch the catalog kind filter.</div></article>`;
+    }
+    async function loadMarketplaceCatalog() {
+      const status = document.getElementById("marketplace-catalog-status");
+      try {
+        if (status) status.textContent = "Refreshing marketplace catalog…";
+        const catalog = await fetchJson(`/api/gateway/marketplace/catalog?${currentMarketplaceCatalogQuery()}`);
+        renderMarketplaceCatalog(catalog);
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
     function renderDetailDrawer(state) {
       const eyebrow = document.getElementById("detail-drawer-eyebrow");
       const title = document.getElementById("detail-drawer-title");
       const subtitle = document.getElementById("detail-drawer-subtitle");
       const meta = document.getElementById("detail-drawer-meta");
       const actions = document.getElementById("detail-drawer-actions");
+      const form = document.getElementById("detail-drawer-form");
       const pre = document.getElementById("detail-drawer-pre");
-      if (!eyebrow || !title || !subtitle || !meta || !actions || !pre) return;
+      if (!eyebrow || !title || !subtitle || !meta || !actions || !form || !pre) return;
+
+      form.classList.remove("open");
+      form.innerHTML = "";
+      setDrawerStatus("");
 
       if (!state) {
         eyebrow.textContent = "Inspector";
@@ -1288,25 +1567,14 @@ async fn dashboard() -> Html<&'static str> {
           ["Actor", approval.actor || "—"],
           ["Updated", approval.updatedAtUnixMs]
         ]);
-        const actionSet = approval.status === "pending"
-          ? [
-              {
-                label: "Approve",
-                onclick: `decideApproval('${approval.approvalId}', '${approval.kind}', 'approve')`
-              },
-              {
-                label: "Reject",
-                onclick: `decideApproval('${approval.approvalId}', '${approval.kind}', 'reject')`,
-                secondary: true
-              }
-            ]
-          : [
-              {
-                label: "Refresh",
-                onclick: `openApprovalDetail('${approval.approvalId}')`,
-                secondary: true
-              }
-            ];
+        renderApprovalWorkflowForm(approval, state);
+        const actionSet = [
+          {
+            label: "Refresh",
+            onclick: `openApprovalDetail('${approval.approvalId}')`,
+            secondary: true
+          }
+        ];
         actions.innerHTML = renderDrawerActions(actionSet);
         pre.textContent = formatJsonBlock({
           approval,
@@ -1647,9 +1915,11 @@ async fn dashboard() -> Html<&'static str> {
         if (status) status.textContent = error.message;
       }
     }
-    async function installSkillPackage() {
-      const packageUrl = document.getElementById("marketplace-skill-package-url")?.value?.trim();
+    async function installSkillPackage(packageUrlOverride = null) {
+      const input = document.getElementById("marketplace-skill-package-url");
+      const packageUrl = (packageUrlOverride || input?.value || "").trim();
       const status = document.getElementById("marketplace-status");
+      if (input && packageUrlOverride) input.value = packageUrl;
       if (!packageUrl) {
         window.alert("Skill package URL is required.");
         return;
@@ -1668,9 +1938,11 @@ async fn dashboard() -> Html<&'static str> {
         if (status) status.textContent = error.message;
       }
     }
-    async function importAgentCardFromUrl() {
-      const cardUrl = document.getElementById("marketplace-card-url")?.value?.trim();
+    async function importAgentCardFromUrl(cardUrlOverride = null) {
+      const input = document.getElementById("marketplace-card-url");
+      const cardUrl = (cardUrlOverride || input?.value || "").trim();
       const status = document.getElementById("marketplace-status");
+      if (input && cardUrlOverride) input.value = cardUrl;
       if (!cardUrl) {
         window.alert("Agent card URL is required.");
         return;
@@ -1800,35 +2072,28 @@ async fn dashboard() -> Html<&'static str> {
         document.getElementById("command-status").textContent = error.message;
       }
     }
-    async function decideApproval(approvalId, kind, decision) {
+    async function decideApproval(approvalId, kind, decision, draft = {}) {
       try {
-        if (kind === "payment" && decision === "approve") {
-          const mcuPublicDid = window.prompt("MCU public DID");
-          if (!mcuPublicDid) return;
-          const mcuSignature = window.prompt("MCU signature hex");
-          if (!mcuSignature) return;
-          await postJson(`/api/gateway/approvals/${approvalId}/decision`, {
-            actor: "console-operator",
-            decision,
-            mcuPublicDid,
-            mcuSignature
-          });
-        } else {
-          const reason = window.prompt(
-            decision === "approve" ? "Approval reason" : "Rejection reason",
-            decision === "approve" ? "approved via control center" : "rejected via control center"
-          );
-          if (!reason) return;
-          await postJson(`/api/gateway/approvals/${approvalId}/decision`, {
-            actor: "console-operator",
-            decision,
-            reason
-          });
+        const payload = {
+          actor: draft.actor || "console-operator",
+          decision
+        };
+        if (draft.reason) {
+          payload.reason = draft.reason;
         }
+        if (kind === "payment" && decision === "approve") {
+          if (!draft.mcuPublicDid || !draft.mcuSignature) {
+            throw new Error("Payment approvals require MCU DID and MCU signature.");
+          }
+          payload.mcuPublicDid = draft.mcuPublicDid;
+          payload.mcuSignature = draft.mcuSignature;
+        }
+        const response = await postJson(`/api/gateway/approvals/${approvalId}/decision`, payload);
         await refresh();
         await openApprovalDetail(approvalId);
+        setDrawerStatus(`Approval <code>${escapeHtml(response.approval.approvalId)}</code> is now <strong>${escapeHtml(response.approval.status)}</strong>.`);
       } catch (error) {
-        window.alert(error.message);
+        setDrawerStatus(error.message, true);
       }
     }
     async function refresh(preferredNodeId) {
@@ -1841,7 +2106,7 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/approvals?status=pending"),
         fetchJson("/api/gateway/agent-cards/invocations"),
         fetchJson("/api/gateway/agent-cards/quotes"),
-        fetchJson("/api/gateway/marketplace/catalog?signedOnly=true&publishedOnly=true"),
+        fetchJson(`/api/gateway/marketplace/catalog?${currentMarketplaceCatalogQuery()}`),
         fetchJson("/api/gateway/connectors/status"),
         fetchJson("/api/gateway/ingress/status")
       ]);
@@ -1887,8 +2152,8 @@ async fn dashboard() -> Html<&'static str> {
           <p>${ellipsis(approval.summary, 120)}</p>
           <p><code>${approval.kind}</code> · ${approval.referenceId}</p>
           <div class="approval-actions">
-            <button type="button" onclick="event.stopPropagation(); decideApproval('${approval.approvalId}', '${approval.kind}', 'approve')">Approve</button>
-            <button type="button" class="secondary" onclick="event.stopPropagation(); decideApproval('${approval.approvalId}', '${approval.kind}', 'reject')">Reject</button>
+            <button type="button" onclick="event.stopPropagation(); openApprovalDetail('${approval.approvalId}')">Open Workflow</button>
+            <button type="button" class="secondary" onclick="event.stopPropagation(); openApprovalDetail('${approval.approvalId}')">Inspect</button>
           </div>
         </article>`).join("") || `<div class="tiny">No pending approvals.</div>`;
 
@@ -1923,6 +2188,7 @@ async fn dashboard() -> Html<&'static str> {
         marketplaceSignal.innerHTML =
           `Catalog exposes <strong>${marketplaceCatalog.skills?.length || 0}</strong> signed skills and <strong>${marketplaceCatalog.agentCards?.length || 0}</strong> published agent cards.`;
       }
+      renderMarketplaceCatalog(marketplaceCatalog);
 
       const visibleCommands = commands.slice(0, 8);
       visibleCommandsCache = visibleCommands;
@@ -1983,12 +2249,21 @@ async fn dashboard() -> Html<&'static str> {
       if (event.target?.id === "node-command-node") {
         refresh(event.target.value);
       }
+      if (event.target?.id === "catalog-kind") {
+        loadMarketplaceCatalog();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.target?.id === "catalog-search" && event.key === "Enter") {
+        event.preventDefault();
+        loadMarketplaceCatalog();
+      }
     });
     refresh();
     setInterval(refresh, 5000);
   </script>
 </body>
-</html>"#,
+</html>"##,
     )
 }
 
@@ -2010,7 +2285,12 @@ mod tests {
         assert!(markup.contains("Marketplace Studio"));
         assert!(markup.contains("installSkillPackage"));
         assert!(markup.contains("publishAgentCard"));
+        assert!(markup.contains("Marketplace Catalog"));
+        assert!(markup.contains("marketplace-catalog-grid"));
+        assert!(markup.contains("loadMarketplaceCatalog"));
         assert!(markup.contains("Connector Matrix"));
         assert!(markup.contains("connector-matrix"));
+        assert!(markup.contains("detail-drawer-form"));
+        assert!(markup.contains("submitDrawerApproval"));
     }
 }
