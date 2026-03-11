@@ -24,7 +24,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `dawn_core/src/ap2.rs`
   - Creates pending payment transactions and verifies MCU signatures before authorizing them.
 - `dawn_core/src/chat_ingress.rs`
-  - Accepts inbound Telegram and Feishu webhook traffic, persists ingress events, and routes text into A2A tasks.
+  - Accepts inbound Telegram, Feishu, DingTalk, and WeCom webhook traffic, persists ingress events, and routes text into A2A tasks.
 - `dawn_core/src/control_center.rs`
   - Serves the operator-facing dashboard at `/console`.
 - `dawn_core/src/gateway.rs`
@@ -100,6 +100,9 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/ingress/events`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
 - `POST /api/gateway/ingress/feishu/events`
+- `POST /api/gateway/ingress/dingtalk/events`
+- `GET /api/gateway/ingress/wecom/events`
+- `POST /api/gateway/ingress/wecom/events`
 - `GET /api/gateway/marketplace/catalog`
 - `POST /api/gateway/marketplace/install/skill`
 - `POST /api/gateway/marketplace/install/agent-card`
@@ -201,14 +204,20 @@ Ingress endpoints:
 - `GET /api/gateway/ingress/events?limit=20`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
 - `POST /api/gateway/ingress/feishu/events`
+- `POST /api/gateway/ingress/dingtalk/events`
+- `GET /api/gateway/ingress/wecom/events`
+- `POST /api/gateway/ingress/wecom/events`
 
 Behavior:
 
 - Telegram ingress validates `DAWN_TELEGRAM_WEBHOOK_SECRET` when configured.
 - Feishu ingress supports the standard challenge response plus text-message delivery events.
+- DingTalk ingress accepts text-message style callback payloads and optionally validates `DAWN_DINGTALK_CALLBACK_TOKEN` against the incoming JSON `token` field.
+- WeCom ingress supports a lightweight `echostr` verification endpoint and accepts text-message style callback payloads; it can optionally validate `DAWN_WECOM_CALLBACK_TOKEN` against the incoming JSON token field.
 - inbound text is persisted in `chat_ingress_events` and then routed into the existing A2A task pipeline.
 - `/orchestrate ...`, `/wasm ...`, and `/task ...` are normalized into their corresponding A2A instruction formats before task creation.
 - successful ingress records link back to the created task, so the console can pivot from chat traffic to orchestration state.
+- the current DingTalk and WeCom handlers intentionally target normalized JSON callbacks and do not yet implement encrypted enterprise callback envelopes.
 
 Control Center:
 
