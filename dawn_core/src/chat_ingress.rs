@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 use tracing::warn;
 use uuid::Uuid;
 use wasmtime::Engine;
@@ -26,6 +27,8 @@ struct ChatIngressStatusReport {
     telegram_webhook_secret_configured: bool,
     dingtalk_callback_token_configured: bool,
     wecom_callback_token_configured: bool,
+    wechat_official_account_token_configured: bool,
+    qq_bot_callback_secret_configured: bool,
     total_events: usize,
     task_created_events: usize,
 }
@@ -70,6 +73,15 @@ struct WeComVerifyQuery {
     echostr: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WeChatOfficialAccountVerifyQuery {
+    signature: Option<String>,
+    timestamp: Option<String>,
+    nonce: Option<String>,
+    echostr: Option<String>,
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
@@ -78,21 +90,41 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/feishu/events", post(feishu_events))
         .route("/dingtalk/events", post(dingtalk_events))
         .route("/wecom/events", get(wecom_verify).post(wecom_events))
+        .route(
+            "/wechat-official-account/events",
+            get(wechat_official_account_verify).post(wechat_official_account_events),
+        )
+        .route("/qq/events", post(qq_events))
 }
 
 async fn status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ChatIngressStatusReport>, (StatusCode, Json<Value>)> {
-    let events = state.list_chat_ingress_events(None).await.map_err(internal_error)?;
+    let events = state
+        .list_chat_ingress_events(None)
+        .await
+        .map_err(internal_error)?;
     let task_created_events = events
         .iter()
         .filter(|event| event.status == ChatIngressStatus::TaskCreated)
         .count();
     Ok(Json(ChatIngressStatusReport {
-        supported_platforms: vec!["telegram", "feishu", "dingtalk", "wecom"],
+        supported_platforms: vec![
+            "telegram",
+            "feishu",
+            "dingtalk",
+            "wecom",
+            "wechat_official_account",
+            "qq",
+        ],
         telegram_webhook_secret_configured: std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET").is_ok(),
         dingtalk_callback_token_configured: std::env::var("DAWN_DINGTALK_CALLBACK_TOKEN").is_ok(),
         wecom_callback_token_configured: std::env::var("DAWN_WECOM_CALLBACK_TOKEN").is_ok(),
+        wechat_official_account_token_configured: std::env::var(
+            "DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN",
+        )
+        .is_ok(),
+        qq_bot_callback_secret_configured: std::env::var("DAWN_QQ_BOT_CALLBACK_SECRET").is_ok(),
         total_events: events.len(),
         task_created_events,
     }))
@@ -134,7 +166,9 @@ async fn telegram_webhook(
         "telegram",
         format!(
             "telegram.message.{}",
-            message.message_id.unwrap_or(update.update_id.unwrap_or_default())
+            message
+                .message_id
+                .unwrap_or(update.update_id.unwrap_or_default())
         ),
         Some(message.chat.id.to_string()),
         message.from.as_ref().map(|user| user.id.to_string()),
@@ -339,6 +373,121 @@ async fn wecom_events(
     })))
 }
 
+async fn wechat_official_account_verify(
+    Query(query): Query<WeChatOfficialAccountVerifyQuery>,
+) -> Result<String, (StatusCode, String)> {
+    verify_wechat_official_account_query(&query).map_err(plain_bad_request)?;
+    query
+        .echostr
+        .ok_or_else(|| plain_bad_request(anyhow::anyhow!("missing echostr query parameter")))
+}
+
+async fn wechat_official_account_events(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<WeChatOfficialAccountVerifyQuery>,
+    body: String,
+) -> Result<String, (StatusCode, String)> {
+    verify_wechat_official_account_query(&query).map_err(plain_bad_request)?;
+    let payload = parse_wechat_official_account_xml(&body)
+        .ok_or_else(|| plain_bad_request(anyhow::anyhow!("unsupported wechat xml payload")))?;
+    let event_type = payload
+        .event_type
+        .clone()
+        .or_else(|| payload.msg_type.clone())
+        .unwrap_or_else(|| "wechat.event".to_string());
+    let text = payload.text.clone().ok_or_else(|| {
+        plain_bad_request(anyhow::anyhow!(
+            "unsupported wechat event; expected a text message payload"
+        ))
+    })?;
+
+    ingest_message(
+        state,
+        "wechat_official_account",
+        event_type,
+        payload.chat_id.clone().or(payload.sender_id.clone()),
+        payload.sender_id.clone(),
+        payload.sender_display.clone(),
+        text,
+        json!({
+            "toUserName": payload.to_user_name,
+            "fromUserName": payload.from_user_name,
+            "msgType": payload.msg_type,
+            "msgId": payload.msg_id,
+            "createTime": payload.create_time,
+            "event": payload.event_type,
+            "rawXml": body
+        }),
+    )
+    .await
+    .map_err(plain_service_error)?;
+
+    Ok("success".to_string())
+}
+
+async fn qq_events(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(text) = extract_qq_text(&payload) else {
+        if let Some(plain_token) = payload.pointer("/d/plain_token").and_then(Value::as_str) {
+            return Ok(Json(json!({
+                "plain_token": plain_token,
+                "note": "qq callback challenge echoed; signature flow is not yet enforced by the gateway"
+            })));
+        }
+
+        return Err(bad_request(anyhow::anyhow!(
+            "unsupported qq event; expected a text message payload"
+        )));
+    };
+
+    let chat_id = payload
+        .pointer("/d/group_openid")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/d/group_id").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/d/channel_id").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/d/author/id").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let sender_id = payload
+        .pointer("/d/author/id")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/d/member_openid").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let sender_display = payload
+        .pointer("/d/author/username")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/d/author/nick").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .or(sender_id.clone());
+    let event_type = payload
+        .pointer("/t")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/eventType").and_then(Value::as_str))
+        .unwrap_or("qq.event")
+        .to_string();
+
+    let record = ingest_message(
+        state,
+        "qq",
+        event_type,
+        chat_id,
+        sender_id,
+        sender_display,
+        text,
+        payload,
+    )
+    .await
+    .map_err(service_error)?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "ingressId": record.ingress_id,
+        "status": record.status,
+        "taskId": record.linked_task_id
+    })))
+}
+
 async fn ingest_message(
     state: Arc<AppState>,
     platform: &str,
@@ -501,6 +650,87 @@ fn extract_wecom_text(payload: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn extract_qq_text(payload: &Value) -> Option<String> {
+    let raw_text = payload
+        .pointer("/d/content")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/content").and_then(Value::as_str))?;
+    let normalized = normalize_qq_message_text(raw_text);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn normalize_qq_message_text(text: &str) -> String {
+    let mut cleaned = text.trim().to_string();
+    while let Some(rest) = strip_leading_qq_mention(&cleaned) {
+        cleaned = rest.trim_start().to_string();
+    }
+    cleaned
+}
+
+fn strip_leading_qq_mention(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("<@!")?;
+    let close_idx = rest.find('>')?;
+    Some(&rest[close_idx + 1..])
+}
+
+#[derive(Debug)]
+struct WeChatOfficialAccountMessage {
+    to_user_name: Option<String>,
+    from_user_name: Option<String>,
+    msg_type: Option<String>,
+    text: Option<String>,
+    msg_id: Option<String>,
+    create_time: Option<String>,
+    event_type: Option<String>,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+}
+
+fn parse_wechat_official_account_xml(xml: &str) -> Option<WeChatOfficialAccountMessage> {
+    let msg_type = extract_xml_tag(xml, "MsgType");
+    let text = match msg_type.as_deref() {
+        Some("text") => extract_xml_tag(xml, "Content"),
+        _ => None,
+    };
+    Some(WeChatOfficialAccountMessage {
+        to_user_name: extract_xml_tag(xml, "ToUserName"),
+        from_user_name: extract_xml_tag(xml, "FromUserName"),
+        msg_type: msg_type.clone(),
+        text,
+        msg_id: extract_xml_tag(xml, "MsgId"),
+        create_time: extract_xml_tag(xml, "CreateTime"),
+        event_type: extract_xml_tag(xml, "Event"),
+        chat_id: extract_xml_tag(xml, "FromUserName"),
+        sender_id: extract_xml_tag(xml, "FromUserName"),
+        sender_display: extract_xml_tag(xml, "FromUserName"),
+    })
+}
+
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let cdata_open = format!("<{tag}><![CDATA[");
+    let cdata_close = "]]>";
+    if let Some(start) = xml.find(&cdata_open) {
+        let value_start = start + cdata_open.len();
+        let remainder = &xml[value_start..];
+        let end = remainder.find(cdata_close)?;
+        return Some(remainder[..end].to_string());
+    }
+
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)?;
+    let value_start = start + open.len();
+    let remainder = &xml[value_start..];
+    let end = remainder.find(&close)?;
+    Some(remainder[..end].trim().to_string())
+}
+
 fn verify_telegram_secret(secret: &str) -> anyhow::Result<()> {
     if let Ok(expected) = std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET") {
         if expected != secret {
@@ -508,6 +738,40 @@ fn verify_telegram_secret(secret: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn verify_wechat_official_account_query(
+    query: &WeChatOfficialAccountVerifyQuery,
+) -> anyhow::Result<()> {
+    let Ok(token) = std::env::var("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN") else {
+        return Ok(());
+    };
+
+    let signature = query
+        .signature
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing wechat signature"))?;
+    let timestamp = query
+        .timestamp
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing wechat timestamp"))?;
+    let nonce = query
+        .nonce
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing wechat nonce"))?;
+    let expected = compute_wechat_signature(&token, timestamp, nonce);
+    if expected != signature {
+        anyhow::bail!("wechat signature mismatch");
+    }
+    Ok(())
+}
+
+fn compute_wechat_signature(token: &str, timestamp: &str, nonce: &str) -> String {
+    let mut parts = [token, timestamp, nonce];
+    parts.sort_unstable();
+    let mut sha = Sha1::new();
+    sha.update(parts.concat().as_bytes());
+    hex::encode(sha.finalize())
 }
 
 fn verify_dingtalk_callback_token(payload: &Value) -> anyhow::Result<()> {
@@ -555,6 +819,19 @@ fn service_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     internal_error(error)
 }
 
+fn plain_bad_request(error: anyhow::Error) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, error.to_string())
+}
+
+fn plain_service_error(error: anyhow::Error) -> (StatusCode, String) {
+    let message = error.to_string();
+    if message.contains("unsupported") || message.contains("mismatch") || message.contains("empty")
+    {
+        return plain_bad_request(error);
+    }
+    plain_internal_error(error)
+}
+
 fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -562,6 +839,10 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
             "error": error.to_string()
         })),
     )
+}
+
+fn plain_internal_error(error: anyhow::Error) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
 #[cfg(test)]
@@ -579,7 +860,8 @@ mod tests {
         (format!("sqlite://{}", path.display()), path)
     }
 
-    async fn spawn_test_server() -> anyhow::Result<(String, tokio::task::JoinHandle<()>, Arc<AppState>, PathBuf)> {
+    async fn spawn_test_server()
+    -> anyhow::Result<(String, tokio::task::JoinHandle<()>, Arc<AppState>, PathBuf)> {
         let (database_url, db_path) = temp_database_url();
         let engine: Engine = sandbox::init_engine()?;
         let state = AppState::new_with_database_url(engine, &database_url).await?;
@@ -747,5 +1029,117 @@ mod tests {
         handle.abort();
         fs::remove_file(db_path).ok();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn wechat_official_account_verify_round_trip_is_supported() -> anyhow::Result<()> {
+        let (base_url, handle, _state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .get(format!(
+                "{base_url}/api/gateway/ingress/wechat-official-account/events?echostr=wechat-ok"
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.text().await?;
+        assert_eq!(body, "wechat-ok");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wechat_official_account_xml_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/wechat-official-account/events"
+            ))
+            .header("content-type", "application/xml")
+            .body(
+                "<xml>\
+                    <ToUserName><![CDATA[gh_001]]></ToUserName>\
+                    <FromUserName><![CDATA[user-openid-123]]></FromUserName>\
+                    <CreateTime>1710000000</CreateTime>\
+                    <MsgType><![CDATA[text]]></MsgType>\
+                    <Content><![CDATA[/task Schedule Shenzhen trip]]></Content>\
+                    <MsgId>987654321</MsgId>\
+                </xml>",
+            )
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.text().await?;
+        assert_eq!(body, "success");
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].platform, "wechat_official_account");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        let task_id = events[0]
+            .linked_task_id
+            .ok_or_else(|| anyhow::anyhow!("missing linked task id"))?;
+        let task = state
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        assert_eq!(task.instruction, "Schedule Shenzhen trip");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qq_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!("{base_url}/api/gateway/ingress/qq/events"))
+            .json(&json!({
+                "t": "AT_MESSAGE_CREATE",
+                "d": {
+                    "content": "<@!botid> /task Draft AP2 settlement summary",
+                    "author": {
+                        "id": "qq-user-001",
+                        "username": "qq-operator"
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["ok"], true);
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].platform, "qq");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        let task_id = events[0]
+            .linked_task_id
+            .ok_or_else(|| anyhow::anyhow!("missing linked task id"))?;
+        let task = state
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        assert_eq!(task.instruction, "Draft AP2 settlement summary");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn computes_wechat_signature_with_sorted_parts() {
+        let signature = compute_wechat_signature("token123", "1710000000", "xyz");
+        assert_eq!(signature.len(), 40);
+        assert_eq!(
+            signature,
+            compute_wechat_signature("token123", "1710000000", "xyz")
+        );
     }
 }

@@ -24,7 +24,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `dawn_core/src/ap2.rs`
   - Creates pending payment transactions and verifies MCU signatures before authorizing them.
 - `dawn_core/src/chat_ingress.rs`
-  - Accepts inbound Telegram, Feishu, DingTalk, and WeCom webhook traffic, persists ingress events, and routes text into A2A tasks.
+  - Accepts inbound Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and QQ traffic, persists ingress events, and routes text into A2A tasks.
 - `dawn_core/src/control_center.rs`
   - Serves the operator-facing dashboard at `/console`.
 - `dawn_core/src/gateway.rs`
@@ -103,6 +103,9 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/ingress/dingtalk/events`
 - `GET /api/gateway/ingress/wecom/events`
 - `POST /api/gateway/ingress/wecom/events`
+- `GET /api/gateway/ingress/wechat-official-account/events`
+- `POST /api/gateway/ingress/wechat-official-account/events`
+- `POST /api/gateway/ingress/qq/events`
 - `GET /api/gateway/marketplace/catalog`
 - `POST /api/gateway/marketplace/install/skill`
 - `POST /api/gateway/marketplace/install/agent-card`
@@ -207,6 +210,9 @@ Ingress endpoints:
 - `POST /api/gateway/ingress/dingtalk/events`
 - `GET /api/gateway/ingress/wecom/events`
 - `POST /api/gateway/ingress/wecom/events`
+- `GET /api/gateway/ingress/wechat-official-account/events`
+- `POST /api/gateway/ingress/wechat-official-account/events`
+- `POST /api/gateway/ingress/qq/events`
 
 Behavior:
 
@@ -214,10 +220,13 @@ Behavior:
 - Feishu ingress supports the standard challenge response plus text-message delivery events.
 - DingTalk ingress accepts text-message style callback payloads and optionally validates `DAWN_DINGTALK_CALLBACK_TOKEN` against the incoming JSON `token` field.
 - WeCom ingress supports a lightweight `echostr` verification endpoint and accepts text-message style callback payloads; it can optionally validate `DAWN_WECOM_CALLBACK_TOKEN` against the incoming JSON token field.
+- WeChat Official Account ingress supports the common `GET` signature verification handshake and `POST` XML text-message callback flow; when `DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN` is configured, the gateway verifies the standard `signature/timestamp/nonce` query triplet before accepting the request.
+- QQ ingress accepts normalized JSON event callbacks and routes text events into A2A tasks after stripping leading bot mentions.
 - inbound text is persisted in `chat_ingress_events` and then routed into the existing A2A task pipeline.
 - `/orchestrate ...`, `/wasm ...`, and `/task ...` are normalized into their corresponding A2A instruction formats before task creation.
 - successful ingress records link back to the created task, so the console can pivot from chat traffic to orchestration state.
 - the current DingTalk and WeCom handlers intentionally target normalized JSON callbacks and do not yet implement encrypted enterprise callback envelopes.
+- the current QQ ingress intentionally stops at normalized JSON event handling and does not yet implement full official callback signature verification.
 
 Control Center:
 
@@ -1062,7 +1071,7 @@ Removed legacy launchers:
 - Agent Card discovery and invocation now work for Dawn-compatible task endpoints, but the compatibility layer is still pragmatic rather than a fully heterogeneous A2A adapter matrix.
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
-- Inbound chat ingress now exists, but it is still early-stage: only Telegram and Feishu are wired for inbound routing, there is not yet a full inbound reply orchestration layer, and the approval UX is currently gateway-console driven rather than native inside each chat platform.
+- Inbound chat ingress now covers Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and the approval UX is currently gateway-console driven rather than native inside each chat platform.
 - Marketplace discovery now exists, but it is still gateway-hosted rather than federation-native; there is not yet ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
 - Remote A2A settlement is now persisted and AP2-linked, but it still assumes a local settlement authority; there is not yet a distributed AP2 settlement network or reconciliation flow across gateways.
