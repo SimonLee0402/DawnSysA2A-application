@@ -724,6 +724,108 @@ async fn dashboard() -> Html<&'static str> {
             <div class="result-box" id="delegate-status">Select an agent card to preview or invoke a remote delegation.</div>
           </div>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Marketplace Studio</h2>
+            <span class="tiny">Install skill packages, import remote cards, and publish local agent cards</span>
+          </div>
+          <div class="console-form">
+            <div class="result-box" id="marketplace-signal">Marketplace catalog is loading.</div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="marketplace-skill-package-url">Skill Package URL</label>
+                <input id="marketplace-skill-package-url" type="url" placeholder="https://gateway.example/api/gateway/skills/echo-skill/1.0.0/package" />
+              </div>
+              <div class="field">
+                <label for="marketplace-card-url">Remote Agent Card URL</label>
+                <input id="marketplace-card-url" type="url" placeholder="https://agent.example/.well-known/agent-card.json" />
+              </div>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="installSkillPackage()">Install Skill</button>
+              <button type="button" class="secondary" onclick="importAgentCardFromUrl()">Import Card</button>
+              <button type="button" class="secondary" onclick="window.open('/marketplace', '_blank')">Open Marketplace</button>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="publish-card-id">Local Card Id</label>
+                <input id="publish-card-id" type="text" placeholder="travel-agent-cn" />
+              </div>
+              <div class="field">
+                <label for="publish-card-regions">Regions</label>
+                <input id="publish-card-regions" type="text" value="china" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="publish-card-languages">Languages</label>
+                <input id="publish-card-languages" type="text" value="zh-cn,en" />
+              </div>
+              <div class="field">
+                <label for="publish-card-model-providers">Model Providers</label>
+                <input id="publish-card-model-providers" type="text" value="qwen,deepseek" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="publish-card-chat-platforms">Chat Platforms</label>
+                <input id="publish-card-chat-platforms" type="text" value="wechat_official_account,feishu,dingtalk" />
+              </div>
+              <div class="field">
+                <label for="publish-card-payment-roles">Payment Roles</label>
+                <input id="publish-card-payment-roles" type="text" value="payee" />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="publish-card-local">Hosted Here</label>
+                <select id="publish-card-local">
+                  <option value="true" selected>Locally hosted</option>
+                  <option value="false">Remote metadata only</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="publish-card-published">Visibility</label>
+                <select id="publish-card-published">
+                  <option value="true" selected>Published</option>
+                  <option value="false">Draft</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="publish-card-json">Agent Card JSON</label>
+              <textarea id="publish-card-json">{
+  "name": "Dawn China Travel Agent",
+  "description": "Coordinates bookings, messaging, and AP2 settlement for China-market tasks.",
+  "url": "https://example.com/a2a",
+  "version": "1.0.0",
+  "defaultInputModes": ["text"],
+  "defaultOutputModes": ["text"],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "stateTransitionHistory": true,
+    "extensions": []
+  },
+  "authentication": {
+    "schemes": ["none"]
+  },
+  "skills": [
+    {
+      "id": "travel-plan",
+      "name": "Travel Planning",
+      "description": "Plans and delegates itinerary actions."
+    }
+  ]
+}</textarea>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="publishAgentCard()">Publish Agent Card</button>
+            </div>
+            <div class="result-box" id="marketplace-status">Install, import, or publish marketplace assets from here.</div>
+          </div>
+        </section>
       </div>
 
       <div class="stack">
@@ -834,6 +936,15 @@ async fn dashboard() -> Html<&'static str> {
             <thead><tr><th>Card</th><th>Hosted</th><th>Signals</th></tr></thead>
             <tbody id="card-rows"></tbody>
           </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Connector Matrix</h2>
+            <span class="tiny">Model, chat, and ingress readiness across global and China paths</span>
+          </div>
+          <div class="detail-grid" id="connector-summary-grid"></div>
+          <div class="feed" id="connector-matrix" style="margin-top:14px;"></div>
         </section>
       </div>
     </section>
@@ -1028,6 +1139,79 @@ async fn dashboard() -> Html<&'static str> {
         quoteId,
         counterOfferAmount
       };
+    }
+    function splitList(rawValue) {
+      return String(rawValue || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+    function readConfiguredConnector(configured, key) {
+      if (!configured) return false;
+      const normalizedKey = String(key || "").replace(/_([a-z])/g, (_, value) => value.toUpperCase());
+      return Boolean(configured[normalizedKey]);
+    }
+    function renderConnectorMatrix(connectorStatus, ingressStatus) {
+      const summaryGrid = document.getElementById("connector-summary-grid");
+      const container = document.getElementById("connector-matrix");
+      if (!summaryGrid || !container) return;
+
+      const configured = connectorStatus?.configured || {};
+      const supportedModels = connectorStatus?.supportedModelProviders || [];
+      const supportedChats = connectorStatus?.supportedChatPlatforms || [];
+      const supportedIngress = ingressStatus?.supportedPlatforms || [];
+      const configuredModelCount = supportedModels.filter((provider) => readConfiguredConnector(configured, provider.provider)).length;
+      const configuredChatCount = supportedChats.filter((platform) => readConfiguredConnector(configured, platform.platform)).length;
+      const ingressSecretsCount = [
+        ingressStatus?.telegramWebhookSecretConfigured,
+        ingressStatus?.dingtalkCallbackTokenConfigured,
+        ingressStatus?.wecomCallbackTokenConfigured,
+        ingressStatus?.wechatOfficialAccountTokenConfigured,
+        ingressStatus?.qqBotCallbackSecretConfigured
+      ].filter(Boolean).length;
+
+      summaryGrid.innerHTML = renderDrawerMetrics([
+        ["Model connectors", `${configuredModelCount}/${supportedModels.length}`],
+        ["Chat connectors", `${configuredChatCount}/${supportedChats.length}`],
+        ["Ingress secrets", `${ingressSecretsCount}/${supportedIngress.length}`],
+        ["Ingress tasks", ingressStatus?.taskCreatedEvents ?? 0]
+      ]);
+
+      const connectorCards = [
+        ...supportedModels.map((provider) => ({
+          title: provider.provider,
+          subtitle: `${provider.region} · ${provider.integrationMode}`,
+          active: readConfiguredConnector(configured, provider.provider),
+          type: "Model"
+        })),
+        ...supportedChats.map((platform) => ({
+          title: platform.platform,
+          subtitle: `${platform.region} · ${platform.integrationMode}`,
+          active: readConfiguredConnector(configured, platform.platform),
+          type: "Chat"
+        })),
+        ...supportedIngress.map((platform) => ({
+          title: platform,
+          subtitle: "Inbound gateway route",
+          active: Boolean({
+            telegram: ingressStatus?.telegramWebhookSecretConfigured,
+            dingtalk: ingressStatus?.dingtalkCallbackTokenConfigured,
+            wecom: ingressStatus?.wecomCallbackTokenConfigured,
+            wechat_official_account: ingressStatus?.wechatOfficialAccountTokenConfigured,
+            qq: ingressStatus?.qqBotCallbackSecretConfigured,
+            feishu: true
+          }[platform]),
+          type: "Ingress"
+        }))
+      ];
+
+      container.innerHTML = connectorCards.map((item) => `
+        <article class="feed-item">
+          <strong>${escapeHtml(item.type)} · ${escapeHtml(item.title)}</strong>
+          <p>${escapeHtml(item.subtitle)}</p>
+          <p>${item.active ? badge("configured") : badge("dry_run")}</p>
+        </article>
+      `).join("");
     }
     function selectCommand(commandId) {
       selectedCommandId = commandId;
@@ -1463,6 +1647,78 @@ async fn dashboard() -> Html<&'static str> {
         if (status) status.textContent = error.message;
       }
     }
+    async function installSkillPackage() {
+      const packageUrl = document.getElementById("marketplace-skill-package-url")?.value?.trim();
+      const status = document.getElementById("marketplace-status");
+      if (!packageUrl) {
+        window.alert("Skill package URL is required.");
+        return;
+      }
+      try {
+        const response = await postJson("/api/gateway/marketplace/install/skill", {
+          packageUrl,
+          activate: true,
+          allowUnsigned: false
+        });
+        if (status) {
+          status.innerHTML = `Installed skill <code>${escapeHtml(response.skill.skillId)}@${escapeHtml(response.skill.version)}</code> with activation <strong>${escapeHtml(response.activated)}</strong>.`;
+        }
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
+    async function importAgentCardFromUrl() {
+      const cardUrl = document.getElementById("marketplace-card-url")?.value?.trim();
+      const status = document.getElementById("marketplace-status");
+      if (!cardUrl) {
+        window.alert("Agent card URL is required.");
+        return;
+      }
+      try {
+        const response = await postJson("/api/gateway/marketplace/install/agent-card", {
+          cardUrl,
+          published: true
+        });
+        if (status) {
+          status.innerHTML = `Imported agent card <code>${escapeHtml(response.cardId)}</code> from <code>${escapeHtml(cardUrl)}</code>.`;
+        }
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
+    async function publishAgentCard() {
+      const status = document.getElementById("marketplace-status");
+      const rawCard = document.getElementById("publish-card-json")?.value || "{}";
+      let card;
+      try {
+        card = JSON.parse(rawCard);
+      } catch (error) {
+        window.alert(`Invalid agent card JSON: ${error.message}`);
+        return;
+      }
+
+      try {
+        const response = await postJson("/api/gateway/agent-cards/publish", {
+          cardId: document.getElementById("publish-card-id")?.value?.trim() || null,
+          card,
+          regions: splitList(document.getElementById("publish-card-regions")?.value),
+          languages: splitList(document.getElementById("publish-card-languages")?.value),
+          modelProviders: splitList(document.getElementById("publish-card-model-providers")?.value),
+          chatPlatforms: splitList(document.getElementById("publish-card-chat-platforms")?.value),
+          paymentRoles: splitList(document.getElementById("publish-card-payment-roles")?.value),
+          locallyHosted: document.getElementById("publish-card-local")?.value !== "false",
+          published: document.getElementById("publish-card-published")?.value !== "false"
+        });
+        if (status) {
+          status.innerHTML = `Published card <code>${escapeHtml(response.record.cardId)}</code>${response.wellKnownCardUrl ? ` · <code>${escapeHtml(response.wellKnownCardUrl)}</code>` : ""}.`;
+        }
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
     async function syncQuoteState(cardId, quoteId) {
       try {
         const quote = await postJson(
@@ -1576,7 +1832,7 @@ async fn dashboard() -> Html<&'static str> {
       }
     }
     async function refresh(preferredNodeId) {
-      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes] = await Promise.all([
+      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, marketplaceCatalog, connectorStatus, ingressStatus] = await Promise.all([
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJson("/api/gateway/agent-cards/settlements"),
@@ -1584,7 +1840,10 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/ingress/events?limit=8"),
         fetchJson("/api/gateway/approvals?status=pending"),
         fetchJson("/api/gateway/agent-cards/invocations"),
-        fetchJson("/api/gateway/agent-cards/quotes")
+        fetchJson("/api/gateway/agent-cards/quotes"),
+        fetchJson("/api/gateway/marketplace/catalog?signedOnly=true&publishedOnly=true"),
+        fetchJson("/api/gateway/connectors/status"),
+        fetchJson("/api/gateway/ingress/status")
       ]);
       const rollouts = await Promise.all(
         nodes.slice(0, 8).map(async (node) => ({
@@ -1657,6 +1916,13 @@ async fn dashboard() -> Html<&'static str> {
       syncNodeCommandForm(nodes, selectedNodeId);
       syncRolloutConsole(nodes, selectedNodeId);
       syncAgentDelegationForm(cards);
+      renderConnectorMatrix(connectorStatus, ingressStatus);
+
+      const marketplaceSignal = document.getElementById("marketplace-signal");
+      if (marketplaceSignal) {
+        marketplaceSignal.innerHTML =
+          `Catalog exposes <strong>${marketplaceCatalog.skills?.length || 0}</strong> signed skills and <strong>${marketplaceCatalog.agentCards?.length || 0}</strong> published agent cards.`;
+      }
 
       const visibleCommands = commands.slice(0, 8);
       visibleCommandsCache = visibleCommands;
@@ -1741,5 +2007,10 @@ mod tests {
         assert!(markup.contains("Rollout Console"));
         assert!(markup.contains("rollout-node-id"));
         assert!(markup.contains("dispatchManualRollout"));
+        assert!(markup.contains("Marketplace Studio"));
+        assert!(markup.contains("installSkillPackage"));
+        assert!(markup.contains("publishAgentCard"));
+        assert!(markup.contains("Connector Matrix"));
+        assert!(markup.contains("connector-matrix"));
     }
 }

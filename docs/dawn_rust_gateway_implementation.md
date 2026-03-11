@@ -237,6 +237,7 @@ Control Center:
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
 - the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
 - the console now includes an `Agent Delegation Studio` for remote quote preview, counter-offer negotiation, and direct `Agent Card` invocation, plus a `Rollout Console` for manual dispatch of the current signed policy/skill bundle to a selected node.
+- the console now also includes a `Marketplace Studio` for skill-package install, remote card import, and local card publishing, alongside a `Connector Matrix` that visualizes model/chat/ingress readiness across the current global and China connector set.
 - the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
 
 Approval Center:
