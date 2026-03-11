@@ -2655,6 +2655,41 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         ON remote_agent_settlements(quote_id, created_at_unix_ms DESC)
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS agent_settlement_reconciliation (
+            reconciliation_id TEXT PRIMARY KEY,
+            direction TEXT NOT NULL,
+            settlement_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            invocation_id TEXT,
+            transaction_id TEXT NOT NULL,
+            remote_agent_url TEXT,
+            settlement_status TEXT NOT NULL,
+            reconciliation_status TEXT NOT NULL,
+            receipt_issuer_did TEXT NOT NULL,
+            receipt_signature_hex TEXT NOT NULL,
+            receipt_json TEXT NOT NULL,
+            acknowledgment_issuer_did TEXT,
+            acknowledgment_signature_hex TEXT,
+            acknowledgment_json TEXT,
+            last_error TEXT,
+            last_sync_at_unix_ms INTEGER,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_settlement_reconciliation_direction_settlement
+        ON agent_settlement_reconciliation(direction, settlement_id)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_settlement_reconciliation_card_id
+        ON agent_settlement_reconciliation(card_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_settlement_reconciliation_transaction_id
+        ON agent_settlement_reconciliation(transaction_id, created_at_unix_ms DESC)
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS agent_quote_ledger (
             quote_id TEXT PRIMARY KEY,
             card_id TEXT NOT NULL,

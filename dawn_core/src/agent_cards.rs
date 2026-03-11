@@ -226,6 +226,142 @@ pub struct RemoteAgentSettlementRecord {
     pub updated_at_unix_ms: u128,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ReconciliationDirection {
+    Outbound,
+    Inbound,
+}
+
+impl ReconciliationDirection {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Outbound => "outbound",
+            Self::Inbound => "inbound",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "outbound" => Ok(Self::Outbound),
+            "inbound" => Ok(Self::Inbound),
+            _ => Err(anyhow!("unknown reconciliation direction '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ReconciliationStatus {
+    PendingDelivery,
+    Acknowledged,
+    DeliveryFailed,
+    Received,
+}
+
+impl ReconciliationStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::PendingDelivery => "pending_delivery",
+            Self::Acknowledged => "acknowledged",
+            Self::DeliveryFailed => "delivery_failed",
+            Self::Received => "received",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "pending_delivery" => Ok(Self::PendingDelivery),
+            "acknowledged" => Ok(Self::Acknowledged),
+            "delivery_failed" => Ok(Self::DeliveryFailed),
+            "received" => Ok(Self::Received),
+            _ => Err(anyhow!("unknown reconciliation status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SettlementReceiptSnapshot {
+    settlement_id: Uuid,
+    card_id: String,
+    invocation_id: Uuid,
+    transaction_id: Uuid,
+    quote_id: Option<String>,
+    amount: f64,
+    description: String,
+    status: PaymentStatus,
+    verification_message: String,
+    updated_at_unix_ms: u128,
+    issuer_did: String,
+    signature_hex: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignedSettlementReceiptDocument {
+    settlement_id: Uuid,
+    card_id: String,
+    invocation_id: Uuid,
+    transaction_id: Uuid,
+    quote_id: Option<String>,
+    amount: f64,
+    description: String,
+    status: PaymentStatus,
+    verification_message: String,
+    updated_at_unix_ms: u128,
+    issuer_did: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SettlementReceiptAck {
+    settlement_id: Uuid,
+    card_id: String,
+    transaction_id: Uuid,
+    accepted: bool,
+    message: String,
+    updated_at_unix_ms: u128,
+    issuer_did: String,
+    signature_hex: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignedSettlementReceiptAckDocument {
+    settlement_id: Uuid,
+    card_id: String,
+    transaction_id: Uuid,
+    accepted: bool,
+    message: String,
+    updated_at_unix_ms: u128,
+    issuer_did: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SettlementReconciliationRecord {
+    reconciliation_id: Uuid,
+    direction: ReconciliationDirection,
+    settlement_id: Uuid,
+    card_id: String,
+    invocation_id: Option<Uuid>,
+    transaction_id: Uuid,
+    remote_agent_url: Option<String>,
+    settlement_status: PaymentStatus,
+    reconciliation_status: ReconciliationStatus,
+    receipt_issuer_did: String,
+    receipt_signature_hex: String,
+    receipt_json: Value,
+    acknowledgment_issuer_did: Option<String>,
+    acknowledgment_signature_hex: Option<String>,
+    acknowledgment_json: Option<Value>,
+    last_error: Option<String>,
+    last_sync_at_unix_ms: Option<u128>,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+}
+
 #[derive(Debug, FromRow)]
 struct RemoteAgentSettlementRow {
     settlement_id: String,
@@ -241,6 +377,29 @@ struct RemoteAgentSettlementRow {
     description: String,
     status: String,
     verification_message: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct SettlementReconciliationRow {
+    reconciliation_id: String,
+    direction: String,
+    settlement_id: String,
+    card_id: String,
+    invocation_id: Option<String>,
+    transaction_id: String,
+    remote_agent_url: Option<String>,
+    settlement_status: String,
+    reconciliation_status: String,
+    receipt_issuer_did: String,
+    receipt_signature_hex: String,
+    receipt_json: String,
+    acknowledgment_issuer_did: Option<String>,
+    acknowledgment_signature_hex: Option<String>,
+    acknowledgment_json: Option<String>,
+    last_error: Option<String>,
+    last_sync_at_unix_ms: Option<i64>,
     created_at_unix_ms: i64,
     updated_at_unix_ms: i64,
 }
@@ -328,6 +487,15 @@ struct SettlementListQuery {
     local_task_id: Option<Uuid>,
     transaction_id: Option<Uuid>,
     status: Option<PaymentStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReconciliationListQuery {
+    card_id: Option<String>,
+    direction: Option<ReconciliationDirection>,
+    status: Option<ReconciliationStatus>,
+    transaction_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,6 +597,9 @@ struct AgentPaymentTerms {
     quote_path: Option<String>,
     quote_state_url_template: Option<String>,
     quote_issuer_did: Option<String>,
+    receipt_inbox_url: Option<String>,
+    receipt_inbox_path: Option<String>,
+    receipt_issuer_did: Option<String>,
     flat_amount: Option<f64>,
     min_amount: Option<f64>,
     max_amount: Option<f64>,
@@ -565,12 +736,21 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_cards))
         .route("/search", get(search_cards))
         .route("/:card_id/quote", get(get_settlement_quote))
+        .route("/reconciliation", get(list_reconciliation))
+        .route("/reconciliation/receipts", post(receive_reconciliation_receipt))
+        .route("/reconciliation/:reconciliation_id", get(get_reconciliation))
         .route("/quotes", get(list_quotes))
         .route("/quotes/:quote_id/state", get(get_quote_state))
         .route("/quotes/:quote_id", get(get_quote))
         .route("/quotes/:quote_id/revoke", post(revoke_quote))
         .route("/invocations", get(list_invocations))
         .route("/settlements", get(list_settlements))
+        .route("/settlements/:settlement_id/receipt", get(get_settlement_receipt))
+        .route(
+            "/settlements/:settlement_id/reconciliation",
+            get(get_settlement_reconciliation),
+        )
+        .route("/settlements/:settlement_id/reconcile", post(reconcile_settlement))
         .route("/invocations/:invocation_id", get(get_invocation))
         .route(
             "/invocations/:invocation_id/settlement",
@@ -692,6 +872,89 @@ async fn get_settlement_quote(
             .map_err(service_error)?;
     }
     Ok(Json(quote))
+}
+
+async fn list_reconciliation(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ReconciliationListQuery>,
+) -> Result<Json<Vec<SettlementReconciliationRecord>>, (StatusCode, Json<Value>)> {
+    list_reconciliation_records(
+        &state,
+        query.card_id.as_deref(),
+        query.direction,
+        query.status,
+        query.transaction_id,
+    )
+    .await
+    .map(Json)
+    .map_err(internal_error)
+}
+
+async fn get_reconciliation(
+    State(state): State<Arc<AppState>>,
+    AxumPath(reconciliation_id): AxumPath<Uuid>,
+) -> Result<Json<SettlementReconciliationRecord>, (StatusCode, Json<Value>)> {
+    get_reconciliation_record(&state, reconciliation_id)
+        .await
+        .map_err(internal_error)?
+        .map(Json)
+        .ok_or_else(|| not_found("reconciliation record not found"))
+}
+
+async fn get_settlement_receipt(
+    State(state): State<Arc<AppState>>,
+    AxumPath(settlement_id): AxumPath<Uuid>,
+) -> Result<Json<SettlementReceiptSnapshot>, (StatusCode, Json<Value>)> {
+    let settlement = get_remote_settlement(&state, settlement_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("remote settlement not found"))?;
+    build_settlement_receipt(&settlement)
+        .map(Json)
+        .map_err(service_error)
+}
+
+async fn get_settlement_reconciliation(
+    State(state): State<Arc<AppState>>,
+    AxumPath(settlement_id): AxumPath<Uuid>,
+) -> Result<Json<SettlementReconciliationRecord>, (StatusCode, Json<Value>)> {
+    get_reconciliation_by_settlement(&state, ReconciliationDirection::Outbound, settlement_id)
+        .await
+        .map_err(internal_error)?
+        .map(Json)
+        .ok_or_else(|| not_found("reconciliation record not found for settlement"))
+}
+
+async fn reconcile_settlement(
+    State(state): State<Arc<AppState>>,
+    AxumPath(settlement_id): AxumPath<Uuid>,
+) -> Result<Json<SettlementReconciliationRecord>, (StatusCode, Json<Value>)> {
+    let settlement = get_remote_settlement(&state, settlement_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("remote settlement not found"))?;
+    let card = find_card_record(&state, &settlement.card_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("agent card not found for settlement"))?;
+    reconcile_outbound_settlement(&state, &card, &settlement)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn receive_reconciliation_receipt(
+    State(state): State<Arc<AppState>>,
+    Json(raw_value): Json<Value>,
+) -> Result<Json<SettlementReceiptAck>, (StatusCode, Json<Value>)> {
+    let body = raw_value.get("receipt").cloned().unwrap_or(raw_value);
+    let receipt = serde_json::from_value::<SettlementReceiptSnapshot>(body)
+        .context("receipt payload was not a valid SettlementReceiptSnapshot")
+        .map_err(service_error)?;
+    accept_inbound_receipt(&state, &receipt)
+        .await
+        .map(Json)
+        .map_err(service_error)
 }
 
 async fn publish_card(
@@ -1219,6 +1482,7 @@ async fn create_remote_settlement(
         payment_response.transaction_id,
     )
     .await?;
+    reconcile_outbound_settlement(state, card, &record).await?;
     Ok(record)
 }
 
@@ -1331,6 +1595,181 @@ async fn validate_remote_settlement_request(
     Ok(quote)
 }
 
+async fn accept_inbound_receipt(
+    state: &AppState,
+    receipt: &SettlementReceiptSnapshot,
+) -> anyhow::Result<SettlementReceiptAck> {
+    verify_signed_settlement_receipt(receipt)?;
+    let now = unix_timestamp_ms();
+    let existing =
+        get_reconciliation_by_settlement(state, ReconciliationDirection::Inbound, receipt.settlement_id)
+            .await?;
+    let record = SettlementReconciliationRecord {
+        reconciliation_id: existing
+            .as_ref()
+            .map(|record| record.reconciliation_id)
+            .unwrap_or_else(Uuid::new_v4),
+        direction: ReconciliationDirection::Inbound,
+        settlement_id: receipt.settlement_id,
+        card_id: receipt.card_id.clone(),
+        invocation_id: Some(receipt.invocation_id),
+        transaction_id: receipt.transaction_id,
+        remote_agent_url: None,
+        settlement_status: receipt.status,
+        reconciliation_status: ReconciliationStatus::Received,
+        receipt_issuer_did: receipt.issuer_did.clone(),
+        receipt_signature_hex: receipt.signature_hex.clone(),
+        receipt_json: serde_json::to_value(receipt)
+            .context("failed to serialize inbound settlement receipt")?,
+        acknowledgment_issuer_did: existing
+            .as_ref()
+            .and_then(|record| record.acknowledgment_issuer_did.clone()),
+        acknowledgment_signature_hex: existing
+            .as_ref()
+            .and_then(|record| record.acknowledgment_signature_hex.clone()),
+        acknowledgment_json: existing
+            .as_ref()
+            .and_then(|record| record.acknowledgment_json.clone()),
+        last_error: None,
+        last_sync_at_unix_ms: Some(now),
+        created_at_unix_ms: existing
+            .as_ref()
+            .map(|record| record.created_at_unix_ms)
+            .unwrap_or(now),
+        updated_at_unix_ms: now,
+    };
+    save_reconciliation_record(state, &record).await?;
+    sign_settlement_receipt_ack(
+        receipt.settlement_id,
+        &receipt.card_id,
+        receipt.transaction_id,
+        true,
+        "receipt recorded by counterparty gateway",
+    )
+}
+
+async fn reconcile_outbound_settlement(
+    state: &AppState,
+    card: &PublishedAgentCard,
+    settlement: &RemoteAgentSettlementRecord,
+) -> anyhow::Result<SettlementReconciliationRecord> {
+    let receipt = build_settlement_receipt(settlement)?;
+    let now = unix_timestamp_ms();
+    let existing =
+        get_reconciliation_by_settlement(state, ReconciliationDirection::Outbound, settlement.settlement_id)
+            .await?;
+    let mut record = SettlementReconciliationRecord {
+        reconciliation_id: existing
+            .as_ref()
+            .map(|value| value.reconciliation_id)
+            .unwrap_or(settlement.settlement_id),
+        direction: ReconciliationDirection::Outbound,
+        settlement_id: settlement.settlement_id,
+        card_id: settlement.card_id.clone(),
+        invocation_id: Some(settlement.invocation_id),
+        transaction_id: settlement.transaction_id,
+        remote_agent_url: Some(settlement.remote_agent_url.clone()),
+        settlement_status: settlement.status,
+        reconciliation_status: ReconciliationStatus::PendingDelivery,
+        receipt_issuer_did: receipt.issuer_did.clone(),
+        receipt_signature_hex: receipt.signature_hex.clone(),
+        receipt_json: serde_json::to_value(&receipt)
+            .context("failed to serialize outbound settlement receipt")?,
+        acknowledgment_issuer_did: None,
+        acknowledgment_signature_hex: None,
+        acknowledgment_json: None,
+        last_error: None,
+        last_sync_at_unix_ms: existing
+            .as_ref()
+            .and_then(|value| value.last_sync_at_unix_ms),
+        created_at_unix_ms: existing
+            .as_ref()
+            .map(|value| value.created_at_unix_ms)
+            .unwrap_or(now),
+        updated_at_unix_ms: now,
+    };
+
+    let terms = extract_ap2_terms(&card.card);
+    let Some(receipt_inbox_url) = resolve_receipt_inbox_url(card, &terms) else {
+        record.reconciliation_status = ReconciliationStatus::DeliveryFailed;
+        record.last_error =
+            Some("counterparty agent card does not expose a receiptInboxUrl".to_string());
+        record.last_sync_at_unix_ms = Some(now);
+        save_reconciliation_record(state, &record).await?;
+        return Ok(record);
+    };
+
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    match client
+        .post(&receipt_inbox_url)
+        .json(&json!({ "receipt": receipt }))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+            let raw_body = response.text().await.unwrap_or_default();
+            if !status.is_success() {
+                record.reconciliation_status = ReconciliationStatus::DeliveryFailed;
+                record.last_error = Some(format!(
+                    "counterparty receipt inbox returned status {}: {}",
+                    status, raw_body
+                ));
+            } else {
+                let raw_value = if raw_body.trim().is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str::<Value>(&raw_body).with_context(|| {
+                        format!(
+                            "counterparty receipt inbox {} returned non-JSON body",
+                            receipt_inbox_url
+                        )
+                    })?
+                };
+                let body = raw_value.get("ack").cloned().unwrap_or(raw_value);
+                let ack = serde_json::from_value::<SettlementReceiptAck>(body)
+                    .context("counterparty receipt ack was not valid")?;
+                verify_settlement_receipt_ack(card, &ack)?;
+                if ack.settlement_id != settlement.settlement_id {
+                    anyhow::bail!(
+                        "counterparty receipt ack settlementId '{}' does not match '{}'",
+                        ack.settlement_id,
+                        settlement.settlement_id
+                    );
+                }
+                record.reconciliation_status = if ack.accepted {
+                    ReconciliationStatus::Acknowledged
+                } else {
+                    ReconciliationStatus::DeliveryFailed
+                };
+                record.last_error = if ack.accepted {
+                    None
+                } else {
+                    Some(ack.message.clone())
+                };
+                record.acknowledgment_issuer_did = Some(ack.issuer_did.clone());
+                record.acknowledgment_signature_hex = Some(ack.signature_hex.clone());
+                record.acknowledgment_json = Some(
+                    serde_json::to_value(&ack)
+                        .context("failed to serialize settlement reconciliation ack")?,
+                );
+            }
+        }
+        Err(error) => {
+            record.reconciliation_status = ReconciliationStatus::DeliveryFailed;
+            record.last_error = Some(format!(
+                "failed delivering settlement receipt to {}: {}",
+                receipt_inbox_url, error
+            ));
+        }
+    }
+
+    record.last_sync_at_unix_ms = Some(unix_timestamp_ms());
+    record.updated_at_unix_ms = unix_timestamp_ms();
+    save_reconciliation_record(state, &record).await?;
+    Ok(record)
+}
+
 pub async fn sync_remote_settlement_from_payment(
     state: &AppState,
     payment: &PaymentRecord,
@@ -1344,6 +1783,9 @@ pub async fn sync_remote_settlement_from_payment(
     settlement.verification_message = payment.verification_message.clone();
     settlement.updated_at_unix_ms = unix_timestamp_ms();
     save_remote_settlement(state, &settlement).await?;
+    if let Some(card) = find_card_record(state, &settlement.card_id).await? {
+        reconcile_outbound_settlement(state, &card, &settlement).await?;
+    }
     Ok(Some(settlement))
 }
 
@@ -1784,6 +2226,100 @@ async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyh
     Ok(())
 }
 
+async fn save_reconciliation_record(
+    state: &AppState,
+    record: &SettlementReconciliationRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agent_settlement_reconciliation (
+            reconciliation_id,
+            direction,
+            settlement_id,
+            card_id,
+            invocation_id,
+            transaction_id,
+            remote_agent_url,
+            settlement_status,
+            reconciliation_status,
+            receipt_issuer_did,
+            receipt_signature_hex,
+            receipt_json,
+            acknowledgment_issuer_did,
+            acknowledgment_signature_hex,
+            acknowledgment_json,
+            last_error,
+            last_sync_at_unix_ms,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+        )
+        ON CONFLICT(reconciliation_id) DO UPDATE SET
+            direction = excluded.direction,
+            settlement_id = excluded.settlement_id,
+            card_id = excluded.card_id,
+            invocation_id = excluded.invocation_id,
+            transaction_id = excluded.transaction_id,
+            remote_agent_url = excluded.remote_agent_url,
+            settlement_status = excluded.settlement_status,
+            reconciliation_status = excluded.reconciliation_status,
+            receipt_issuer_did = excluded.receipt_issuer_did,
+            receipt_signature_hex = excluded.receipt_signature_hex,
+            receipt_json = excluded.receipt_json,
+            acknowledgment_issuer_did = excluded.acknowledgment_issuer_did,
+            acknowledgment_signature_hex = excluded.acknowledgment_signature_hex,
+            acknowledgment_json = excluded.acknowledgment_json,
+            last_error = excluded.last_error,
+            last_sync_at_unix_ms = excluded.last_sync_at_unix_ms,
+            created_at_unix_ms = agent_settlement_reconciliation.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(record.reconciliation_id.to_string())
+    .bind(record.direction.as_db())
+    .bind(record.settlement_id.to_string())
+    .bind(&record.card_id)
+    .bind(record.invocation_id.map(|value| value.to_string()))
+    .bind(record.transaction_id.to_string())
+    .bind(&record.remote_agent_url)
+    .bind(record.settlement_status.as_db())
+    .bind(record.reconciliation_status.as_db())
+    .bind(&record.receipt_issuer_did)
+    .bind(&record.receipt_signature_hex)
+    .bind(serde_json::to_string(&record.receipt_json)?)
+    .bind(&record.acknowledgment_issuer_did)
+    .bind(&record.acknowledgment_signature_hex)
+    .bind(
+        record
+            .acknowledgment_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(&record.last_error)
+    .bind(record.last_sync_at_unix_ms.map(|value| value as i64))
+    .bind(record.created_at_unix_ms as i64)
+    .bind(record.updated_at_unix_ms as i64)
+    .execute(state.pool())
+    .await
+    .with_context(|| {
+        format!(
+            "failed to save settlement reconciliation record {}",
+            record.reconciliation_id
+        )
+    })?;
+
+    state.emit_console_event(
+        "reconciliation",
+        Some(record.reconciliation_id.to_string()),
+        Some(record.reconciliation_status.as_db().to_string()),
+        format!("{} receipt for {}", record.direction.as_db(), record.card_id),
+    );
+
+    Ok(())
+}
+
 async fn get_remote_invocation(
     state: &AppState,
     invocation_id: Uuid,
@@ -1846,6 +2382,91 @@ async fn get_remote_settlement(
     .with_context(|| format!("failed to fetch remote settlement {settlement_id}"))?;
 
     row.map(row_to_remote_settlement).transpose()
+}
+
+async fn get_reconciliation_record(
+    state: &AppState,
+    reconciliation_id: Uuid,
+) -> anyhow::Result<Option<SettlementReconciliationRecord>> {
+    let row = sqlx::query_as::<_, SettlementReconciliationRow>(
+        r#"
+        SELECT
+            reconciliation_id,
+            direction,
+            settlement_id,
+            card_id,
+            invocation_id,
+            transaction_id,
+            remote_agent_url,
+            settlement_status,
+            reconciliation_status,
+            receipt_issuer_did,
+            receipt_signature_hex,
+            receipt_json,
+            acknowledgment_issuer_did,
+            acknowledgment_signature_hex,
+            acknowledgment_json,
+            last_error,
+            last_sync_at_unix_ms,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_settlement_reconciliation
+        WHERE reconciliation_id = ?1
+        "#,
+    )
+    .bind(reconciliation_id.to_string())
+    .fetch_optional(state.pool())
+    .await
+    .with_context(|| format!("failed to fetch reconciliation {reconciliation_id}"))?;
+
+    row.map(row_to_reconciliation_record).transpose()
+}
+
+async fn get_reconciliation_by_settlement(
+    state: &AppState,
+    direction: ReconciliationDirection,
+    settlement_id: Uuid,
+) -> anyhow::Result<Option<SettlementReconciliationRecord>> {
+    let row = sqlx::query_as::<_, SettlementReconciliationRow>(
+        r#"
+        SELECT
+            reconciliation_id,
+            direction,
+            settlement_id,
+            card_id,
+            invocation_id,
+            transaction_id,
+            remote_agent_url,
+            settlement_status,
+            reconciliation_status,
+            receipt_issuer_did,
+            receipt_signature_hex,
+            receipt_json,
+            acknowledgment_issuer_did,
+            acknowledgment_signature_hex,
+            acknowledgment_json,
+            last_error,
+            last_sync_at_unix_ms,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_settlement_reconciliation
+        WHERE direction = ?1 AND settlement_id = ?2
+        LIMIT 1
+        "#,
+    )
+    .bind(direction.as_db())
+    .bind(settlement_id.to_string())
+    .fetch_optional(state.pool())
+    .await
+    .with_context(|| {
+        format!(
+            "failed to fetch reconciliation by settlement {}:{}",
+            direction.as_db(),
+            settlement_id
+        )
+    })?;
+
+    row.map(row_to_reconciliation_record).transpose()
 }
 
 async fn get_quote_record(
@@ -2246,6 +2867,172 @@ async fn list_remote_settlements(
     rows.into_iter().map(row_to_remote_settlement).collect()
 }
 
+async fn list_reconciliation_records(
+    state: &AppState,
+    card_id: Option<&str>,
+    direction: Option<ReconciliationDirection>,
+    status: Option<ReconciliationStatus>,
+    transaction_id: Option<Uuid>,
+) -> anyhow::Result<Vec<SettlementReconciliationRecord>> {
+    let rows = match (card_id, direction, status, transaction_id) {
+        (Some(card_id), _, _, _) => sqlx::query_as::<_, SettlementReconciliationRow>(
+            r#"
+                SELECT
+                    reconciliation_id,
+                    direction,
+                    settlement_id,
+                    card_id,
+                    invocation_id,
+                    transaction_id,
+                    remote_agent_url,
+                    settlement_status,
+                    reconciliation_status,
+                    receipt_issuer_did,
+                    receipt_signature_hex,
+                    receipt_json,
+                    acknowledgment_issuer_did,
+                    acknowledgment_signature_hex,
+                    acknowledgment_json,
+                    last_error,
+                    last_sync_at_unix_ms,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_settlement_reconciliation
+                WHERE card_id = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(card_id)
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list reconciliation records by card_id")?,
+        (_, Some(direction), _, _) => sqlx::query_as::<_, SettlementReconciliationRow>(
+            r#"
+                SELECT
+                    reconciliation_id,
+                    direction,
+                    settlement_id,
+                    card_id,
+                    invocation_id,
+                    transaction_id,
+                    remote_agent_url,
+                    settlement_status,
+                    reconciliation_status,
+                    receipt_issuer_did,
+                    receipt_signature_hex,
+                    receipt_json,
+                    acknowledgment_issuer_did,
+                    acknowledgment_signature_hex,
+                    acknowledgment_json,
+                    last_error,
+                    last_sync_at_unix_ms,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_settlement_reconciliation
+                WHERE direction = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(direction.as_db())
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list reconciliation records by direction")?,
+        (_, _, Some(status), _) => sqlx::query_as::<_, SettlementReconciliationRow>(
+            r#"
+                SELECT
+                    reconciliation_id,
+                    direction,
+                    settlement_id,
+                    card_id,
+                    invocation_id,
+                    transaction_id,
+                    remote_agent_url,
+                    settlement_status,
+                    reconciliation_status,
+                    receipt_issuer_did,
+                    receipt_signature_hex,
+                    receipt_json,
+                    acknowledgment_issuer_did,
+                    acknowledgment_signature_hex,
+                    acknowledgment_json,
+                    last_error,
+                    last_sync_at_unix_ms,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_settlement_reconciliation
+                WHERE reconciliation_status = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(status.as_db())
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list reconciliation records by status")?,
+        (_, _, _, Some(transaction_id)) => sqlx::query_as::<_, SettlementReconciliationRow>(
+            r#"
+                SELECT
+                    reconciliation_id,
+                    direction,
+                    settlement_id,
+                    card_id,
+                    invocation_id,
+                    transaction_id,
+                    remote_agent_url,
+                    settlement_status,
+                    reconciliation_status,
+                    receipt_issuer_did,
+                    receipt_signature_hex,
+                    receipt_json,
+                    acknowledgment_issuer_did,
+                    acknowledgment_signature_hex,
+                    acknowledgment_json,
+                    last_error,
+                    last_sync_at_unix_ms,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_settlement_reconciliation
+                WHERE transaction_id = ?1
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .bind(transaction_id.to_string())
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list reconciliation records by transaction_id")?,
+        _ => sqlx::query_as::<_, SettlementReconciliationRow>(
+            r#"
+                SELECT
+                    reconciliation_id,
+                    direction,
+                    settlement_id,
+                    card_id,
+                    invocation_id,
+                    transaction_id,
+                    remote_agent_url,
+                    settlement_status,
+                    reconciliation_status,
+                    receipt_issuer_did,
+                    receipt_signature_hex,
+                    receipt_json,
+                    acknowledgment_issuer_did,
+                    acknowledgment_signature_hex,
+                    acknowledgment_json,
+                    last_error,
+                    last_sync_at_unix_ms,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM agent_settlement_reconciliation
+                ORDER BY created_at_unix_ms DESC
+                "#,
+        )
+        .fetch_all(state.pool())
+        .await
+        .context("failed to list reconciliation records")?,
+    };
+
+    rows.into_iter().map(row_to_reconciliation_record).collect()
+}
+
 async fn list_quote_records(
     state: &AppState,
     card_id: Option<&str>,
@@ -2641,6 +3428,53 @@ fn row_to_quote_record(row: QuoteLedgerRow) -> anyhow::Result<QuoteLedgerRecord>
     })
 }
 
+fn row_to_reconciliation_record(
+    row: SettlementReconciliationRow,
+) -> anyhow::Result<SettlementReconciliationRecord> {
+    Ok(SettlementReconciliationRecord {
+        reconciliation_id: Uuid::parse_str(&row.reconciliation_id)
+            .with_context(|| format!("invalid reconciliation_id '{}'", row.reconciliation_id))?,
+        direction: ReconciliationDirection::from_db(&row.direction)?,
+        settlement_id: Uuid::parse_str(&row.settlement_id)
+            .with_context(|| format!("invalid settlement_id '{}'", row.settlement_id))?,
+        card_id: row.card_id,
+        invocation_id: row
+            .invocation_id
+            .map(|value| Uuid::parse_str(&value).with_context(|| format!("invalid invocation_id '{value}'")))
+            .transpose()?,
+        transaction_id: Uuid::parse_str(&row.transaction_id)
+            .with_context(|| format!("invalid transaction_id '{}'", row.transaction_id))?,
+        remote_agent_url: row.remote_agent_url,
+        settlement_status: PaymentStatus::from_db(&row.settlement_status)?,
+        reconciliation_status: ReconciliationStatus::from_db(&row.reconciliation_status)?,
+        receipt_issuer_did: row.receipt_issuer_did,
+        receipt_signature_hex: row.receipt_signature_hex,
+        receipt_json: serde_json::from_str(&row.receipt_json)
+            .context("failed to parse reconciliation receipt_json")?,
+        acknowledgment_issuer_did: row.acknowledgment_issuer_did,
+        acknowledgment_signature_hex: row.acknowledgment_signature_hex,
+        acknowledgment_json: row
+            .acknowledgment_json
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .context("failed to parse reconciliation acknowledgment_json")
+            })
+            .transpose()?,
+        last_error: row.last_error,
+        last_sync_at_unix_ms: row
+            .last_sync_at_unix_ms
+            .map(|value| {
+                u128::try_from(value)
+                    .context("negative last_sync_at_unix_ms in agent_settlement_reconciliation")
+            })
+            .transpose()?,
+        created_at_unix_ms: u128::try_from(row.created_at_unix_ms)
+            .context("negative created_at_unix_ms in agent_settlement_reconciliation")?,
+        updated_at_unix_ms: u128::try_from(row.updated_at_unix_ms)
+            .context("negative updated_at_unix_ms in agent_settlement_reconciliation")?,
+    })
+}
+
 fn validate_card_id(card_id: &str) -> anyhow::Result<()> {
     if card_id.is_empty() {
         anyhow::bail!("cardId cannot be empty");
@@ -2815,6 +3649,21 @@ fn extract_ap2_terms(card: &AgentCard) -> AgentPaymentTerms {
             .filter(|value| !value.trim().is_empty()),
         quote_issuer_did: pricing
             .get("quoteIssuerDid")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty()),
+        receipt_inbox_url: pricing
+            .get("receiptInboxUrl")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .filter(|value| !value.trim().is_empty()),
+        receipt_inbox_path: pricing
+            .get("receiptInboxPath")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .filter(|value| !value.trim().is_empty()),
+        receipt_issuer_did: pricing
+            .get("receiptIssuerDid")
             .and_then(Value::as_str)
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty()),
@@ -3223,6 +4072,147 @@ fn verify_signed_quote_state(
     Ok(())
 }
 
+fn signed_settlement_receipt_payload(
+    document: &SignedSettlementReceiptDocument,
+) -> anyhow::Result<Vec<u8>> {
+    serde_json::to_vec(document).context("failed to serialize settlement receipt document")
+}
+
+fn build_settlement_receipt(
+    settlement: &RemoteAgentSettlementRecord,
+) -> anyhow::Result<SettlementReceiptSnapshot> {
+    let signing_key = quote_signing_key()?;
+    let issuer_did = quote_issuer_did_from_signing_key(&signing_key);
+    let document = SignedSettlementReceiptDocument {
+        settlement_id: settlement.settlement_id,
+        card_id: settlement.card_id.clone(),
+        invocation_id: settlement.invocation_id,
+        transaction_id: settlement.transaction_id,
+        quote_id: settlement.quote_id.clone(),
+        amount: settlement.amount,
+        description: settlement.description.clone(),
+        status: settlement.status,
+        verification_message: settlement.verification_message.clone(),
+        updated_at_unix_ms: settlement.updated_at_unix_ms,
+        issuer_did: issuer_did.clone(),
+    };
+    let signature = signing_key.sign(&signed_settlement_receipt_payload(&document)?);
+    Ok(SettlementReceiptSnapshot {
+        settlement_id: document.settlement_id,
+        card_id: document.card_id,
+        invocation_id: document.invocation_id,
+        transaction_id: document.transaction_id,
+        quote_id: document.quote_id,
+        amount: document.amount,
+        description: document.description,
+        status: document.status,
+        verification_message: document.verification_message,
+        updated_at_unix_ms: document.updated_at_unix_ms,
+        issuer_did,
+        signature_hex: hex::encode(signature.to_bytes()),
+    })
+}
+
+fn verify_signed_settlement_receipt(receipt: &SettlementReceiptSnapshot) -> anyhow::Result<()> {
+    let verifying_key = decode_quote_verifying_key_from_did(&receipt.issuer_did)?;
+    validate_quote_issuer_did(&receipt.issuer_did, &hex::encode(verifying_key.to_bytes()))?;
+    let document = SignedSettlementReceiptDocument {
+        settlement_id: receipt.settlement_id,
+        card_id: receipt.card_id.clone(),
+        invocation_id: receipt.invocation_id,
+        transaction_id: receipt.transaction_id,
+        quote_id: receipt.quote_id.clone(),
+        amount: receipt.amount,
+        description: receipt.description.clone(),
+        status: receipt.status,
+        verification_message: receipt.verification_message.clone(),
+        updated_at_unix_ms: receipt.updated_at_unix_ms,
+        issuer_did: receipt.issuer_did.clone(),
+    };
+    let signature_bytes =
+        decode_fixed_hex::<64>(&receipt.signature_hex, "settlement receipt signature")?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(&signed_settlement_receipt_payload(&document)?, &signature)
+        .context("settlement receipt signature verification failed")?;
+    Ok(())
+}
+
+fn signed_settlement_ack_payload(
+    document: &SignedSettlementReceiptAckDocument,
+) -> anyhow::Result<Vec<u8>> {
+    serde_json::to_vec(document).context("failed to serialize settlement receipt ack document")
+}
+
+fn sign_settlement_receipt_ack(
+    settlement_id: Uuid,
+    card_id: &str,
+    transaction_id: Uuid,
+    accepted: bool,
+    message: impl Into<String>,
+) -> anyhow::Result<SettlementReceiptAck> {
+    let signing_key = quote_signing_key()?;
+    let issuer_did = quote_issuer_did_from_signing_key(&signing_key);
+    let document = SignedSettlementReceiptAckDocument {
+        settlement_id,
+        card_id: card_id.to_string(),
+        transaction_id,
+        accepted,
+        message: message.into(),
+        updated_at_unix_ms: unix_timestamp_ms(),
+        issuer_did: issuer_did.clone(),
+    };
+    let signature = signing_key.sign(&signed_settlement_ack_payload(&document)?);
+    Ok(SettlementReceiptAck {
+        settlement_id: document.settlement_id,
+        card_id: document.card_id,
+        transaction_id: document.transaction_id,
+        accepted: document.accepted,
+        message: document.message,
+        updated_at_unix_ms: document.updated_at_unix_ms,
+        issuer_did,
+        signature_hex: hex::encode(signature.to_bytes()),
+    })
+}
+
+fn verify_settlement_receipt_ack(
+    card: &PublishedAgentCard,
+    ack: &SettlementReceiptAck,
+) -> anyhow::Result<()> {
+    let terms = extract_ap2_terms(&card.card);
+    if let Some(expected_issuer_did) = terms
+        .receipt_issuer_did
+        .as_deref()
+        .or(terms.quote_issuer_did.as_deref())
+    {
+        if ack.issuer_did.to_ascii_lowercase() != expected_issuer_did {
+            anyhow::bail!(
+                "settlement receipt ack issuer '{}' does not match expected issuer '{}'",
+                ack.issuer_did,
+                expected_issuer_did
+            );
+        }
+    }
+    let verifying_key = decode_quote_verifying_key_from_did(&ack.issuer_did)?;
+    validate_quote_issuer_did(&ack.issuer_did, &hex::encode(verifying_key.to_bytes()))?;
+    let document = SignedSettlementReceiptAckDocument {
+        settlement_id: ack.settlement_id,
+        card_id: ack.card_id.clone(),
+        transaction_id: ack.transaction_id,
+        accepted: ack.accepted,
+        message: ack.message.clone(),
+        updated_at_unix_ms: ack.updated_at_unix_ms,
+        issuer_did: ack.issuer_did.clone(),
+    };
+    let signature_bytes =
+        decode_fixed_hex::<64>(&ack.signature_hex, "settlement receipt ack signature")?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(&signed_settlement_ack_payload(&document)?, &signature)
+        .context("settlement receipt ack signature verification failed")?;
+    Ok(())
+}
+
 fn parse_remote_quote_state(
     card: &PublishedAgentCard,
     quote_id: &str,
@@ -3502,6 +4492,16 @@ fn resolve_quote_state_url(
     absolutize_against_card(card, &expanded)
 }
 
+fn resolve_receipt_inbox_url(card: &PublishedAgentCard, terms: &AgentPaymentTerms) -> Option<String> {
+    if let Some(receipt_inbox_url) = terms.receipt_inbox_url.as_deref() {
+        return absolutize_against_card(card, receipt_inbox_url);
+    }
+    terms
+        .receipt_inbox_path
+        .as_deref()
+        .and_then(|receipt_inbox_path| absolutize_against_card(card, receipt_inbox_path))
+}
+
 fn absolutize_against_card(card: &PublishedAgentCard, raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3558,6 +4558,11 @@ fn enrich_local_card_with_quote_url(
         base_url.scheme(),
         authority
     );
+    let receipt_inbox_url = format!(
+        "{}://{}/api/gateway/agent-cards/reconciliation/receipts",
+        base_url.scheme(),
+        authority
+    );
     let quote_issuer_did = quote_signing_key()
         .ok()
         .map(|signing_key| quote_issuer_did_from_signing_key(&signing_key));
@@ -3587,13 +4592,21 @@ fn enrich_local_card_with_quote_url(
                 pricing
                     .entry("quoteIssuerDid".to_string())
                     .or_insert_with(|| Value::String(quote_issuer_did.clone()));
+                pricing
+                    .entry("receiptIssuerDid".to_string())
+                    .or_insert_with(|| Value::String(quote_issuer_did.clone()));
             }
+            pricing
+                .entry("receiptInboxUrl".to_string())
+                .or_insert_with(|| Value::String(receipt_inbox_url.clone()));
         } else {
             root.entry("pricing".to_string()).or_insert_with(|| {
                 json!({
                     "quoteUrl": quote_url.clone(),
                     "quoteStateUrlTemplate": quote_state_url_template.clone(),
-                    "quoteIssuerDid": quote_issuer_did.clone()
+                    "quoteIssuerDid": quote_issuer_did.clone(),
+                    "receiptInboxUrl": receipt_inbox_url.clone(),
+                    "receiptIssuerDid": quote_issuer_did.clone()
                 })
             });
         }
@@ -4015,7 +5028,7 @@ mod tests {
         routing::{get, post},
     };
     use reqwest::Client;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::time::{Duration, sleep};
     use uuid::Uuid;
     use wasmtime::Engine;
@@ -4023,17 +5036,19 @@ mod tests {
     use super::{
         AP2_EXTENSION_URI, AgentAuthentication, AgentCapabilities, AgentCard, AgentExtension,
         AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
-        PublishedAgentCard, QuoteLedgerRecord, QuoteLedgerStatus, RemoteInvocationStatus,
-        RemoteSettlementRequest, SearchAgentCardsRequest, apply_counter_offer_to_quote,
-        build_search_haystack, build_settlement_quote, consume_quote_record, derive_card_id,
-        enrich_local_card_with_quote_url, extract_ap2_roles, extract_ap2_terms,
-        extract_remote_task_id, extract_remote_task_status, fetch_remote_settlement_quote,
-        get_quote_record, get_remote_settlement_by_invocation, invoke_remote_agent_card,
-        matches_search, merge_unique_metadata, publish_card_inner,
+        PublishedAgentCard, QuoteLedgerRecord, QuoteLedgerStatus, ReconciliationDirection,
+        ReconciliationStatus, RemoteInvocationStatus, RemoteSettlementRequest,
+        SearchAgentCardsRequest, accept_inbound_receipt, apply_counter_offer_to_quote,
+        build_search_haystack, build_settlement_quote, build_settlement_receipt,
+        consume_quote_record, derive_card_id, enrich_local_card_with_quote_url,
+        extract_ap2_roles, extract_ap2_terms, extract_remote_task_id,
+        extract_remote_task_status, fetch_remote_settlement_quote, get_quote_record,
+        get_reconciliation_by_settlement, get_remote_settlement_by_invocation,
+        invoke_remote_agent_card, matches_search, merge_unique_metadata, publish_card_inner,
         quote_issuer_did_from_signing_key, quote_signing_key, record_quote_offer,
         remote_task_create_url, remote_task_detail_url, revoke_quote_record,
-        sign_local_settlement_quote, sign_quote_state, validate_remote_settlement_request,
-        verify_signed_quote,
+        sign_local_settlement_quote, sign_quote_state, sign_settlement_receipt_ack,
+        validate_remote_settlement_request, verify_signed_quote,
     };
     use crate::{
         app_state::{StoredTask, TaskStatus, unix_timestamp_ms},
@@ -4268,6 +5283,14 @@ mod tests {
         );
         assert_eq!(
             terms.quote_issuer_did.as_deref(),
+            Some(expected_quote_issuer_did.as_str())
+        );
+        assert_eq!(
+            terms.receipt_inbox_url.as_deref(),
+            Some("https://example.com/api/gateway/agent-cards/reconciliation/receipts")
+        );
+        assert_eq!(
+            terms.receipt_issuer_did.as_deref(),
             Some(expected_quote_issuer_did.as_str())
         );
     }
@@ -4794,6 +5817,162 @@ mod tests {
         assert_eq!(task.linked_payment_id, Some(settlement.transaction_id));
 
         server.abort();
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn outbound_settlement_reconciliation_posts_signed_receipt_and_stores_ack() {
+        let (state, db_path) = test_state().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receipt_issuer_did =
+            quote_issuer_did_from_signing_key(&quote_signing_key().unwrap());
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/task",
+                    post(|| async {
+                        Json(json!({
+                            "task": {
+                                "taskId": "remote-ack-123",
+                                "status": "completed"
+                            }
+                        }))
+                    }),
+                )
+                .route(
+                    "/reconciliation/receipts",
+                    post(|Json(value): Json<Value>| async move {
+                        let body = value.get("receipt").cloned().unwrap_or(value);
+                        let receipt = serde_json::from_value::<super::SettlementReceiptSnapshot>(body)
+                            .unwrap();
+                        let ack = sign_settlement_receipt_ack(
+                            receipt.settlement_id,
+                            &receipt.card_id,
+                            receipt.transaction_id,
+                            true,
+                            "counterparty acknowledged receipt",
+                        )
+                        .unwrap();
+                        Json(json!({ "ack": ack }))
+                    }),
+                );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let mut card = sample_card();
+        card.card.url = format!("http://{address}");
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "flat",
+                "flatAmount": 18.5,
+                "minAmount": 10.0,
+                "maxAmount": 20.0,
+                "receiptInboxUrl": format!("http://{address}/reconciliation/receipts"),
+                "receiptIssuerDid": receipt_issuer_did
+            }
+        }));
+        publish_card_inner(
+            &state,
+            PublishAgentCardRequest {
+                card_id: Some(card.card_id.clone()),
+                card: card.card.clone(),
+                regions: Some(card.regions.clone()),
+                languages: Some(card.languages.clone()),
+                model_providers: Some(card.model_providers.clone()),
+                chat_platforms: Some(card.chat_platforms.clone()),
+                payment_roles: Some(card.payment_roles.clone()),
+                locally_hosted: Some(false),
+                published: Some(true),
+                issuer_did: None,
+                signature_hex: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = invoke_remote_agent_card(
+            &state,
+            &card.card_id,
+            InvokeAgentCardRequest {
+                name: "delegate with reconciliation".to_string(),
+                instruction: "Book train".to_string(),
+                parent_task_id: None,
+                await_completion: Some(true),
+                timeout_seconds: Some(5),
+                poll_interval_ms: Some(50),
+                settlement: Some(RemoteSettlementRequest {
+                    mandate_id: Uuid::new_v4(),
+                    amount: 18.5,
+                    description: "Settle remote booking".to_string(),
+                    quote_id: None,
+                    counter_offer_amount: None,
+                }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let settlement = response.settlement.unwrap();
+        let reconciliation = get_reconciliation_by_settlement(
+            state.as_ref(),
+            ReconciliationDirection::Outbound,
+            settlement.settlement_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            reconciliation.reconciliation_status,
+            ReconciliationStatus::Acknowledged
+        );
+        assert!(reconciliation.acknowledgment_json.is_some());
+        assert!(reconciliation.last_error.is_none());
+
+        server.abort();
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn accepts_inbound_signed_receipt_and_records_reconciliation() {
+        let (state, db_path) = test_state().await.unwrap();
+        let settlement = super::RemoteAgentSettlementRecord {
+            settlement_id: Uuid::new_v4(),
+            invocation_id: Uuid::new_v4(),
+            card_id: "travel-agent-1234abcd".to_string(),
+            remote_agent_url: "https://remote.example/a2a".to_string(),
+            local_task_id: None,
+            remote_task_id: Some("remote-456".to_string()),
+            transaction_id: Uuid::new_v4(),
+            mandate_id: Uuid::new_v4(),
+            quote_id: Some("quote-receipt".to_string()),
+            amount: 21.0,
+            description: "Settle inbound receipt".to_string(),
+            status: PaymentStatus::Authorized,
+            verification_message: "authorized".to_string(),
+            created_at_unix_ms: unix_timestamp_ms(),
+            updated_at_unix_ms: unix_timestamp_ms(),
+        };
+        let receipt = build_settlement_receipt(&settlement).unwrap();
+        let ack = accept_inbound_receipt(state.as_ref(), &receipt).await.unwrap();
+        assert!(ack.accepted);
+
+        let record = get_reconciliation_by_settlement(
+            state.as_ref(),
+            ReconciliationDirection::Inbound,
+            settlement.settlement_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.reconciliation_status, ReconciliationStatus::Received);
+        assert_eq!(record.settlement_status, PaymentStatus::Authorized);
+        assert_eq!(record.card_id, settlement.card_id);
+
         fs::remove_file(db_path).ok();
     }
 }

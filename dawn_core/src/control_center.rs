@@ -1141,6 +1141,17 @@ async fn dashboard() -> Html<&'static str> {
 
         <section class="panel">
           <div class="panel-head">
+            <h2>Reconciliation Fabric</h2>
+            <span class="tiny">Cross-gateway settlement receipt delivery and acknowledgment</span>
+          </div>
+          <table>
+            <thead><tr><th>Settlement</th><th>Status</th><th>Counterparty</th></tr></thead>
+            <tbody id="reconciliation-rows"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
             <h2>Agent Cards</h2>
             <span class="tiny">Registry footprint</span>
           </div>
@@ -1204,7 +1215,7 @@ async fn dashboard() -> Html<&'static str> {
       <div>
         <div class="eyebrow" id="detail-drawer-eyebrow">Inspector</div>
         <h2 class="drawer-title" id="detail-drawer-title">Detail Drawer</h2>
-        <div class="drawer-subtitle" id="detail-drawer-subtitle">Select an approval, command, or settlement.</div>
+        <div class="drawer-subtitle" id="detail-drawer-subtitle">Select an approval, command, settlement, or reconciliation record.</div>
       </div>
       <button type="button" class="icon-button" onclick="closeDetailDrawer()">×</button>
     </div>
@@ -2084,7 +2095,7 @@ async fn dashboard() -> Html<&'static str> {
       if (!state) {
         eyebrow.textContent = "Inspector";
         title.textContent = "Detail Drawer";
-        subtitle.textContent = "Select an approval, command, or settlement.";
+        subtitle.textContent = "Select an approval, command, settlement, or reconciliation record.";
         meta.innerHTML = "";
         actions.innerHTML = "";
         pre.textContent = "Nothing selected.";
@@ -2161,9 +2172,51 @@ async fn dashboard() -> Html<&'static str> {
             label: "Refresh",
             onclick: `openSettlementDetail('${settlement.settlementId}')`,
             secondary: true
-          }
+          },
+          {
+            label: "Reconcile",
+            onclick: `reconcileSettlement('${settlement.settlementId}')`
+          },
+          ...(state.reconciliation
+            ? [{
+                label: "Receipt Ledger",
+                onclick: `openReconciliationDetail('${state.reconciliation.reconciliationId}')`,
+                secondary: true
+              }]
+            : [])
         ]);
-        pre.textContent = formatJsonBlock(settlement);
+        pre.textContent = formatJsonBlock({
+          settlement,
+          reconciliation: state.reconciliation
+        });
+        return;
+      }
+
+      if (state.kind === "reconciliation") {
+        const reconciliation = state.reconciliation;
+        eyebrow.textContent = "Reconciliation";
+        title.textContent = reconciliation.cardId;
+        subtitle.textContent = `${reconciliation.direction} · ${reconciliation.settlementId}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["Status", reconciliation.reconciliationStatus],
+          ["Settlement", reconciliation.settlementStatus],
+          ["Transaction", reconciliation.transactionId],
+          ["Last sync", reconciliation.lastSyncAtUnixMs || "—"]
+        ]);
+        actions.innerHTML = renderDrawerActions([
+          {
+            label: "Refresh",
+            onclick: `openReconciliationDetail('${reconciliation.reconciliationId}')`,
+            secondary: true
+          },
+          ...(reconciliation.direction === "outbound"
+            ? [{
+                label: "Push Receipt",
+                onclick: `reconcileSettlement('${reconciliation.settlementId}')`
+              }]
+            : [])
+        ]);
+        pre.textContent = formatJsonBlock(reconciliation);
         return;
       }
 
@@ -2282,10 +2335,25 @@ async fn dashboard() -> Html<&'static str> {
     }
     async function openSettlementDetail(settlementId) {
       try {
-        const settlement = await fetchJson(`/api/gateway/agent-cards/settlements/${encodeURIComponent(settlementId)}`);
+        const [settlement, reconciliation] = await Promise.all([
+          fetchJson(`/api/gateway/agent-cards/settlements/${encodeURIComponent(settlementId)}`),
+          fetchJsonOptional(`/api/gateway/agent-cards/settlements/${encodeURIComponent(settlementId)}/reconciliation`)
+        ]);
         openDetailDrawer({
           kind: "settlement",
-          settlement
+          settlement,
+          reconciliation
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function openReconciliationDetail(reconciliationId) {
+      try {
+        const reconciliation = await fetchJson(`/api/gateway/agent-cards/reconciliation/${encodeURIComponent(reconciliationId)}`);
+        openDetailDrawer({
+          kind: "reconciliation",
+          reconciliation
         });
       } catch (error) {
         window.alert(error.message);
@@ -2429,6 +2497,18 @@ async fn dashboard() -> Html<&'static str> {
         openDetailDrawer({
           kind: "quote",
           quote
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function reconcileSettlement(settlementId) {
+      try {
+        const reconciliation = await postJson(`/api/gateway/agent-cards/settlements/${encodeURIComponent(settlementId)}/reconcile`, {});
+        await refresh();
+        openDetailDrawer({
+          kind: "reconciliation",
+          reconciliation
         });
       } catch (error) {
         window.alert(error.message);
@@ -2632,7 +2712,7 @@ async fn dashboard() -> Html<&'static str> {
       }
     }
     async function refresh(preferredNodeId) {
-      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, marketplaceCatalog, connectorStatus, ingressStatus] = await Promise.all([
+      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, reconciliation, marketplaceCatalog, connectorStatus, ingressStatus] = await Promise.all([
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJson("/api/gateway/agent-cards/settlements"),
@@ -2641,6 +2721,7 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/approvals?status=pending"),
         fetchJson("/api/gateway/agent-cards/invocations"),
         fetchJson("/api/gateway/agent-cards/quotes"),
+        fetchJson("/api/gateway/agent-cards/reconciliation"),
         fetchJson(`/api/gateway/marketplace/catalog?${currentMarketplaceCatalogQuery()}`),
         fetchJson("/api/gateway/connectors/status"),
         fetchJson("/api/gateway/ingress/status")
@@ -2669,7 +2750,8 @@ async fn dashboard() -> Html<&'static str> {
         ["Inbound", ingress.length],
         ["Approvals", approvals.length],
         ["Quotes", quotes.length],
-        ["Invocations", invocations.length]
+        ["Invocations", invocations.length],
+        ["Reconciliation", reconciliation.length]
       ].map(([label, value]) => `
         <div class="stat">
           <div class="stat-label">${label}</div>
@@ -2750,6 +2832,16 @@ async fn dashboard() -> Html<&'static str> {
           <td>${badge(settlement.status)}</td>
           <td>${settlement.amount}</td>
         </tr>`).join("");
+
+      document.getElementById("reconciliation-rows").innerHTML = reconciliation.slice(0, 8).map((record) => `
+        <tr class="interactive-row" onclick="openReconciliationDetail('${record.reconciliationId}')">
+          <td>
+            <strong>${ellipsis(record.cardId, 24)}</strong><br />
+            <code>${ellipsis(record.settlementId, 32)}</code>
+          </td>
+          <td>${badge(record.reconciliationStatus)}</td>
+          <td><code>${ellipsis(record.remoteAgentUrl || record.receiptIssuerDid || "counterparty receipt", 44)}</code></td>
+        </tr>`).join("") || `<tr><td colspan="3" class="tiny">No reconciliation records yet.</td></tr>`;
 
       document.getElementById("invocation-rows").innerHTML = invocations.slice(0, 8).map((invocation) => `
         <tr class="interactive-row" onclick="openInvocationDetail('${invocation.invocationId}')">
@@ -2838,6 +2930,10 @@ mod tests {
         assert!(markup.contains("Setup Navigator"));
         assert!(markup.contains("setup-navigator-status"));
         assert!(markup.contains("copySetupEnvBlock"));
+        assert!(markup.contains("Reconciliation Fabric"));
+        assert!(markup.contains("reconciliation-rows"));
+        assert!(markup.contains("openReconciliationDetail"));
+        assert!(markup.contains("reconcileSettlement"));
         assert!(markup.contains("detail-drawer-form"));
         assert!(markup.contains("submitDrawerApproval"));
         assert!(markup.contains("console-stream-pill"));

@@ -120,6 +120,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/agent-cards/quotes/{quote_id}/state`
 - `GET /api/gateway/agent-cards/invocations`
 - `GET /api/gateway/agent-cards/settlements`
+- `GET /api/gateway/agent-cards/reconciliation`
 - `POST /api/gateway/agent-cards/publish`
 - `POST /api/gateway/agent-cards/import`
 - `POST /api/gateway/agent-cards/quotes/{quote_id}/revoke`
@@ -129,6 +130,10 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/agent-cards/invocations/{invocation_id}`
 - `GET /api/gateway/agent-cards/invocations/{invocation_id}/settlement`
 - `GET /api/gateway/agent-cards/settlements/{settlement_id}`
+- `GET /api/gateway/agent-cards/settlements/{settlement_id}/receipt`
+- `GET /api/gateway/agent-cards/settlements/{settlement_id}/reconciliation`
+- `POST /api/gateway/agent-cards/settlements/{settlement_id}/reconcile`
+- `POST /api/gateway/agent-cards/reconciliation/receipts`
 - `GET /api/gateway/skills/status`
 - `GET /api/gateway/skills/distribution`
 - `GET /api/gateway/skills/`
@@ -242,6 +247,7 @@ Control Center:
 - the same console now embeds a `Marketplace Catalog` browser so operators can search signed skills and published agent cards, then install or import them without leaving `/console`.
 - the console now also subscribes to `/console/events` over SSE, so task, approval, ingress, node, command, rollout, payment, and policy writes can trigger near-real-time refresh instead of depending only on polling.
 - the right rail now also includes a `Setup Navigator`, which translates connector and ingress readiness into concrete environment-variable blocks, verification endpoints, and China/global go-live presets.
+- the same operator deck now includes a `Reconciliation Fabric` view plus receipt-push actions, so cross-gateway settlement receipts and counterparty acknowledgments can be inspected from the same liquid-glass drawer.
 - the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
 
 Approval Center:
@@ -1097,7 +1103,7 @@ Removed legacy launchers:
 - Inbound chat ingress now covers Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and the approval UX is currently gateway-console driven rather than native inside each chat platform.
 - Marketplace discovery now exists, but it is still gateway-hosted rather than federation-native; there is not yet ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
-- Remote A2A settlement is now persisted and AP2-linked, but it still assumes a local settlement authority; there is not yet a distributed AP2 settlement network or reconciliation flow across gateways.
+- Remote A2A settlement is now AP2-linked and can push signed settlement receipts plus receive signed counterparty acknowledgments, but there is not yet a full federated reconciliation bus, dispute workflow, or multi-gateway consensus layer.
 - Agent Card quote support now includes a local replay ledger plus on-demand cross-gateway quote-state verification, but it is still pull-based; there is not yet a push replication bus, federation-wide revocation feed, or quote-state gossip protocol.
 - Policy and skill rollout now reach attested nodes and the node can independently verify trusted policy and skill publisher signatures, but there is not yet a node-side persisted trust-root store or full artifact-by-artifact Wasm binary verification against downloaded module bytes.
 - Runtime multi-process smoke is still blocked by the current host command policy, but the rollout + attestation + command loop is now covered by an in-process integration test instead of relying only on unit tests.
