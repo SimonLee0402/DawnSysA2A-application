@@ -662,6 +662,61 @@ async fn dashboard() -> Html<&'static str> {
       gap: 10px;
       flex-wrap: wrap;
     }
+    .setup-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+    .setup-card {
+      padding: 16px;
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.09), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    .setup-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .setup-card strong {
+      display: block;
+      font-family: var(--font-display);
+      font-size: 24px;
+      letter-spacing: -0.03em;
+      margin-bottom: 6px;
+    }
+    .setup-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .setup-requirements {
+      display: grid;
+      gap: 10px;
+    }
+    .setup-requirement {
+      padding: 12px 14px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .setup-requirement strong {
+      display: block;
+      font-size: 13px;
+      letter-spacing: -0.01em;
+      margin-bottom: 6px;
+    }
+    .setup-requirement p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
     .toolbar input[type="search"] {
       min-width: 220px;
       flex: 1 1 240px;
@@ -1103,6 +1158,43 @@ async fn dashboard() -> Html<&'static str> {
           <div class="detail-grid" id="connector-summary-grid"></div>
           <div class="feed" id="connector-matrix" style="margin-top:14px;"></div>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Setup Navigator</h2>
+            <span class="tiny">Turn connector and ingress readiness into a concrete go-live checklist</span>
+          </div>
+          <div class="console-form">
+            <div class="setup-grid" id="setup-summary-grid"></div>
+            <div class="chip-row" id="setup-preset-chips"></div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="setup-surface">Surface</label>
+                <select id="setup-surface">
+                  <option value="model">Model Connector</option>
+                  <option value="chat">Chat Connector</option>
+                  <option value="ingress">Ingress Route</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="setup-target">Target</label>
+                <select id="setup-target"></select>
+              </div>
+            </div>
+            <div class="result-box" id="setup-navigator-status">Choose a surface to see required secrets, test routes, and next steps.</div>
+            <div class="setup-requirements" id="setup-requirements"></div>
+            <div class="field">
+              <label for="setup-env-block">Suggested Environment Block</label>
+              <textarea id="setup-env-block" readonly></textarea>
+            </div>
+            <div class="toolbar">
+              <button type="button" onclick="copySetupEnvBlock()">Copy Env Block</button>
+              <button type="button" class="secondary" onclick="loadSetupPreset('china')">China Go-Live</button>
+              <button type="button" class="secondary" onclick="loadSetupPreset('global')">Global MVP</button>
+              <button type="button" class="secondary" onclick="loadSetupPreset('ingress')">Ingress First</button>
+            </div>
+          </div>
+        </section>
       </div>
     </section>
   </div>
@@ -1132,6 +1224,8 @@ async fn dashboard() -> Html<&'static str> {
     let consoleEventSource = null;
     let consoleRefreshTimer = null;
     let consoleReconnectTimer = null;
+    let latestConnectorStatus = null;
+    let latestIngressStatus = null;
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
@@ -1151,6 +1245,158 @@ async fn dashboard() -> Html<&'static str> {
       read_file_preview: "Safe bounded file preview",
       stat_path: "Filesystem metadata",
       shell_exec: "Policy-gated shell execution"
+    };
+    const setupProfiles = {
+      model: {
+        openai: {
+          label: "OpenAI",
+          region: "global",
+          mode: "live",
+          envs: ["OPENAI_API_KEY"],
+          endpoint: "/api/gateway/connectors/model/openai/respond",
+          note: "Fastest path for global reasoning and responses."
+        },
+        deepseek: {
+          label: "DeepSeek",
+          region: "china",
+          mode: "live",
+          envs: ["DEEPSEEK_API_KEY"],
+          endpoint: "/api/gateway/connectors/model/deepseek/respond",
+          note: "Primary China-market reasoning provider."
+        },
+        qwen: {
+          label: "Qwen",
+          region: "china",
+          mode: "live_openai_compatible",
+          envs: ["QWEN_API_KEY or DASHSCOPE_API_KEY"],
+          endpoint: "/api/gateway/connectors/model/qwen/respond",
+          note: "Strong China-native default for public-facing agents."
+        },
+        zhipu: {
+          label: "Zhipu",
+          region: "china",
+          mode: "live",
+          envs: ["ZHIPU_API_KEY"],
+          endpoint: "/api/gateway/connectors/model/zhipu/respond",
+          note: "Useful backup path for domestic deployments."
+        },
+        moonshot: {
+          label: "Moonshot",
+          region: "china",
+          mode: "live",
+          envs: ["MOONSHOT_API_KEY"],
+          endpoint: "/api/gateway/connectors/model/moonshot/respond",
+          note: "Long-context China model path."
+        },
+        doubao: {
+          label: "Doubao",
+          region: "china",
+          mode: "live",
+          envs: ["DOUBAO_API_KEY or ARK_API_KEY"],
+          endpoint: "/api/gateway/connectors/model/doubao/respond",
+          note: "Volcengine Ark path for ByteDance-aligned deployments."
+        }
+      },
+      chat: {
+        telegram: {
+          label: "Telegram",
+          region: "global",
+          mode: "live_bot",
+          envs: ["TELEGRAM_BOT_TOKEN"],
+          endpoint: "/api/gateway/connectors/chat/telegram/send",
+          note: "Global outbound bot delivery."
+        },
+        feishu: {
+          label: "Feishu",
+          region: "china",
+          mode: "live_webhook",
+          envs: ["FEISHU_BOT_WEBHOOK_URL"],
+          endpoint: "/api/gateway/connectors/chat/feishu/send",
+          note: "China collaboration default with inbound and outbound coverage."
+        },
+        dingtalk: {
+          label: "DingTalk",
+          region: "china",
+          mode: "live_webhook",
+          envs: ["DINGTALK_BOT_WEBHOOK_URL"],
+          endpoint: "/api/gateway/connectors/chat/dingtalk/send",
+          note: "Best for enterprise China deployment."
+        },
+        wecom_bot: {
+          label: "WeCom Bot",
+          region: "china",
+          mode: "live_webhook",
+          envs: ["WECOM_BOT_WEBHOOK_URL"],
+          endpoint: "/api/gateway/connectors/chat/wecom/send",
+          note: "Outbound enterprise WeCom webhook path."
+        },
+        wechat_official_account: {
+          label: "WeChat Official Account",
+          region: "china",
+          mode: "live_official_account_text",
+          envs: ["WECHAT_OFFICIAL_ACCOUNT_APP_ID", "WECHAT_OFFICIAL_ACCOUNT_APP_SECRET"],
+          endpoint: "/api/gateway/connectors/chat/wechat-official-account/send",
+          note: "Consumer-facing China messaging surface."
+        },
+        qq: {
+          label: "QQ Bot",
+          region: "china",
+          mode: "live_openapi_c2c_group",
+          envs: ["QQ_BOT_APP_ID", "QQ_BOT_CLIENT_SECRET"],
+          endpoint: "/api/gateway/connectors/chat/qq/send",
+          note: "Youth and community-oriented China entry point."
+        }
+      },
+      ingress: {
+        telegram: {
+          label: "Telegram Webhook",
+          region: "global",
+          mode: "secret_path_webhook",
+          envs: ["DAWN_TELEGRAM_WEBHOOK_SECRET"],
+          endpoint: "/api/gateway/ingress/telegram/webhook/{secret}",
+          note: "Inbound Telegram task creation path."
+        },
+        feishu: {
+          label: "Feishu Events",
+          region: "china",
+          mode: "challenge_callback",
+          envs: ["No secret required for basic challenge mode"],
+          endpoint: "/api/gateway/ingress/feishu/events",
+          note: "Inbound Feishu event challenge and message route."
+        },
+        dingtalk: {
+          label: "DingTalk Events",
+          region: "china",
+          mode: "callback_token",
+          envs: ["DAWN_DINGTALK_CALLBACK_TOKEN"],
+          endpoint: "/api/gateway/ingress/dingtalk/events",
+          note: "Inbound DingTalk task launch route."
+        },
+        wecom: {
+          label: "WeCom Events",
+          region: "china",
+          mode: "callback_token",
+          envs: ["DAWN_WECOM_CALLBACK_TOKEN"],
+          endpoint: "/api/gateway/ingress/wecom/events",
+          note: "Inbound enterprise WeCom route."
+        },
+        wechat_official_account: {
+          label: "WeChat Official Account Events",
+          region: "china",
+          mode: "token_verification",
+          envs: ["DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"],
+          endpoint: "/api/gateway/ingress/wechat-official-account/events",
+          note: "Inbound WeChat OA verification and XML message route."
+        },
+        qq: {
+          label: "QQ Bot Events",
+          region: "china",
+          mode: "callback_secret",
+          envs: ["DAWN_QQ_BOT_CALLBACK_SECRET"],
+          endpoint: "/api/gateway/ingress/qq/events",
+          note: "Inbound QQ bot event route."
+        }
+      }
     };
     const ellipsis = (value, max = 66) => {
       if (!value) return "—";
@@ -1427,6 +1673,181 @@ async fn dashboard() -> Html<&'static str> {
           <p>${item.active ? badge("configured") : badge("dry_run")}</p>
         </article>
       `).join("");
+    }
+    function surfaceOptions(surface, connectorStatus, ingressStatus) {
+      if (surface === "model") {
+        return (connectorStatus?.supportedModelProviders || []).map((provider) => ({
+          key: provider.provider,
+          label: provider.provider,
+          region: provider.region,
+          configured: readConfiguredConnector(connectorStatus?.configured, provider.provider)
+        }));
+      }
+      if (surface === "chat") {
+        return (connectorStatus?.supportedChatPlatforms || []).map((platform) => ({
+          key: platform.platform,
+          label: platform.platform,
+          region: platform.region,
+          configured: readConfiguredConnector(connectorStatus?.configured, platform.platform)
+        }));
+      }
+      const ingressMap = {
+        telegram: ingressStatus?.telegramWebhookSecretConfigured,
+        feishu: true,
+        dingtalk: ingressStatus?.dingtalkCallbackTokenConfigured,
+        wecom: ingressStatus?.wecomCallbackTokenConfigured,
+        wechat_official_account: ingressStatus?.wechatOfficialAccountTokenConfigured,
+        qq: ingressStatus?.qqBotCallbackSecretConfigured
+      };
+      return (ingressStatus?.supportedPlatforms || []).map((platform) => ({
+        key: platform,
+        label: platform,
+        region: ["telegram"].includes(platform) ? "global" : "china",
+        configured: Boolean(ingressMap[platform])
+      }));
+    }
+    function currentSetupProfile() {
+      const surface = document.getElementById("setup-surface")?.value || "model";
+      const target = document.getElementById("setup-target")?.value || "";
+      return {
+        surface,
+        target,
+        profile: setupProfiles[surface]?.[target] || null
+      };
+    }
+    function setupEnvBlock(profile) {
+      if (!profile) return "";
+      return profile.envs.map((env) => {
+        if (env.includes(" or ")) {
+          return `# choose one\n${env.split(" or ").map((item) => `${item}=`).join("\n")}`;
+        }
+        if (env.startsWith("No secret required")) {
+          return `# ${env}`;
+        }
+        return `${env}=`;
+      }).join("\n");
+    }
+    function updateSetupNavigator(surface, connectorStatus, ingressStatus) {
+      const surfaceSelect = document.getElementById("setup-surface");
+      const targetSelect = document.getElementById("setup-target");
+      const summaryGrid = document.getElementById("setup-summary-grid");
+      const requirements = document.getElementById("setup-requirements");
+      const status = document.getElementById("setup-navigator-status");
+      const envBlock = document.getElementById("setup-env-block");
+      const presetChips = document.getElementById("setup-preset-chips");
+      if (!surfaceSelect || !targetSelect || !summaryGrid || !requirements || !status || !envBlock || !presetChips) return;
+
+      if (surface && surfaceSelect.value !== surface) {
+        surfaceSelect.value = surface;
+      }
+
+      const options = surfaceOptions(surfaceSelect.value, connectorStatus, ingressStatus);
+      const previousTarget = targetSelect.value;
+      targetSelect.innerHTML = options.map((option) =>
+        `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)} · ${escapeHtml(option.region)}</option>`
+      ).join("") || `<option value="">No targets</option>`;
+      if (previousTarget && options.some((option) => option.key === previousTarget)) {
+        targetSelect.value = previousTarget;
+      }
+
+      const current = currentSetupProfile();
+      const option = options.find((entry) => entry.key === current.target) || options[0];
+      if (option && targetSelect.value !== option.key) {
+        targetSelect.value = option.key;
+      }
+      const profile = setupProfiles[surfaceSelect.value]?.[targetSelect.value] || null;
+      const configuredCount = options.filter((entry) => entry.configured).length;
+      const regionCount = options.filter((entry) => entry.region === "china").length;
+      summaryGrid.innerHTML = [
+        {
+          label: "Configured",
+          value: `${configuredCount}/${options.length || 0}`,
+          note: "Surfaces ready right now"
+        },
+        {
+          label: "China Paths",
+          value: `${regionCount}`,
+          note: "Domestic connectors or routes"
+        },
+        {
+          label: "Surface",
+          value: surfaceSelect.value,
+          note: "Current setup lens"
+        }
+      ].map((card) => `
+        <article class="setup-card">
+          <span>${escapeHtml(card.label)}</span>
+          <strong>${escapeHtml(card.value)}</strong>
+          <p>${escapeHtml(card.note)}</p>
+        </article>
+      `).join("");
+
+      presetChips.innerHTML = [
+        ["china", "China Go-Live"],
+        ["global", "Global MVP"],
+        ["ingress", "Ingress First"]
+      ].map(([preset, label]) => `
+        <button type="button" class="chip" onclick="loadSetupPreset('${preset}')">${escapeHtml(label)}</button>
+      `).join("");
+
+      if (!profile || !option) {
+        requirements.innerHTML = `<div class="setup-requirement"><strong>No target selected</strong><p>Choose a surface and target to see setup instructions.</p></div>`;
+        status.textContent = "Choose a surface to see required secrets, test routes, and next steps.";
+        envBlock.value = "";
+        return;
+      }
+
+      status.innerHTML = `${option.configured ? badge("configured") : badge("missing")} <strong>${escapeHtml(profile.label)}</strong> · ${escapeHtml(profile.region)} · ${escapeHtml(profile.mode)} · test via <code>${escapeHtml(profile.endpoint)}</code>`;
+      requirements.innerHTML = [
+        {
+          title: "Secrets / Env Vars",
+          body: profile.envs.join(", ")
+        },
+        {
+          title: "Activation Path",
+          body: profile.note
+        },
+        {
+          title: "Verification",
+          body: `After setting the variables, confirm readiness in Connector Matrix and test ${profile.endpoint}.`
+        }
+      ].map((item) => `
+        <article class="setup-requirement">
+          <strong>${escapeHtml(item.title)}</strong>
+          <p>${escapeHtml(item.body)}</p>
+        </article>
+      `).join("");
+      envBlock.value = setupEnvBlock(profile);
+    }
+    function loadSetupPreset(preset) {
+      const surfaceSelect = document.getElementById("setup-surface");
+      const targetSelect = document.getElementById("setup-target");
+      if (!surfaceSelect || !targetSelect) return;
+      const presets = {
+        china: { surface: "model", target: "qwen" },
+        global: { surface: "model", target: "openai" },
+        ingress: { surface: "ingress", target: "wechat_official_account" }
+      };
+      const next = presets[preset];
+      if (!next) return;
+      surfaceSelect.value = next.surface;
+      updateSetupNavigator(next.surface, latestConnectorStatus, latestIngressStatus);
+      targetSelect.value = next.target;
+      updateSetupNavigator(next.surface, latestConnectorStatus, latestIngressStatus);
+    }
+    async function copySetupEnvBlock() {
+      const value = document.getElementById("setup-env-block")?.value || "";
+      const status = document.getElementById("setup-navigator-status");
+      if (!value.trim()) {
+        if (status) status.textContent = "No environment block is available for the current selection.";
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(value);
+        if (status) status.innerHTML = `${badge("copied")} Suggested environment block copied to clipboard.`;
+      } catch (_error) {
+        if (status) status.textContent = "Clipboard write failed. Copy directly from the environment block.";
+      }
     }
     function selectCommand(commandId) {
       selectedCommandId = commandId;
@@ -2224,6 +2645,8 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/connectors/status"),
         fetchJson("/api/gateway/ingress/status")
       ]);
+      latestConnectorStatus = connectorStatus;
+      latestIngressStatus = ingressStatus;
       const rollouts = await Promise.all(
         nodes.slice(0, 8).map(async (node) => ({
           nodeId: node.nodeId,
@@ -2296,6 +2719,7 @@ async fn dashboard() -> Html<&'static str> {
       syncRolloutConsole(nodes, selectedNodeId);
       syncAgentDelegationForm(cards);
       renderConnectorMatrix(connectorStatus, ingressStatus);
+      updateSetupNavigator(document.getElementById("setup-surface")?.value || "model", connectorStatus, ingressStatus);
 
       const marketplaceSignal = document.getElementById("marketplace-signal");
       if (marketplaceSignal) {
@@ -2363,6 +2787,12 @@ async fn dashboard() -> Html<&'static str> {
       if (event.target?.id === "node-command-node") {
         refresh(event.target.value);
       }
+      if (event.target?.id === "setup-surface") {
+        updateSetupNavigator(event.target.value, latestConnectorStatus, latestIngressStatus);
+      }
+      if (event.target?.id === "setup-target") {
+        updateSetupNavigator(document.getElementById("setup-surface")?.value || "model", latestConnectorStatus, latestIngressStatus);
+      }
       if (event.target?.id === "catalog-kind") {
         loadMarketplaceCatalog();
       }
@@ -2405,6 +2835,9 @@ mod tests {
         assert!(markup.contains("loadMarketplaceCatalog"));
         assert!(markup.contains("Connector Matrix"));
         assert!(markup.contains("connector-matrix"));
+        assert!(markup.contains("Setup Navigator"));
+        assert!(markup.contains("setup-navigator-status"));
+        assert!(markup.contains("copySetupEnvBlock"));
         assert!(markup.contains("detail-drawer-form"));
         assert!(markup.contains("submitDrawerApproval"));
         assert!(markup.contains("console-stream-pill"));
