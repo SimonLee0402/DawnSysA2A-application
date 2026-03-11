@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -310,10 +311,9 @@ async fn handle_gateway_message(
             None
         }
         "command_dispatch" => {
-            let (Some(command_id), Some(command_type)) = (
-                envelope.command_id.clone(),
-                envelope.command_type.clone(),
-            ) else {
+            let (Some(command_id), Some(command_type)) =
+                (envelope.command_id.clone(), envelope.command_type.clone())
+            else {
                 warn!("Ignoring command_dispatch without command_id/command_type");
                 return None;
             };
@@ -386,6 +386,11 @@ async fn execute_command(config: &NodeConfig, envelope: GatewayCommandEnvelope) 
             })),
             error: None,
         },
+        "system_info" => execute_system_info_command(config, envelope).await,
+        "list_directory" => execute_list_directory_command(envelope).await,
+        "read_file_preview" => execute_read_file_preview_command(envelope).await,
+        "stat_path" => execute_stat_path_command(envelope).await,
+        "process_snapshot" => execute_process_snapshot_command(envelope).await,
         "shell_exec" => execute_shell_command(config, envelope).await,
         other => CommandResultEnvelope {
             message_type: "command_result",
@@ -493,6 +498,281 @@ fn apply_rollout_bundle(
         })
         .to_string()
     })
+}
+
+async fn execute_system_info_command(
+    config: &NodeConfig,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let current_dir = env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string());
+    let current_exe = env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+    let cpu_count = std::thread::available_parallelism()
+        .ok()
+        .map(|count| count.get());
+    let username = env::var("USERNAME").ok().or_else(|| env::var("USER").ok());
+    let hostname = env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| env::var("HOSTNAME").ok());
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "nodeId": config.node_id,
+            "nodeName": config.node_name,
+            "issuerDid": config.issuer_did,
+            "os": env::consts::OS,
+            "arch": env::consts::ARCH,
+            "family": env::consts::FAMILY,
+            "currentDir": current_dir,
+            "currentExe": current_exe,
+            "cpuCount": cpu_count,
+            "username": username,
+            "hostname": hostname,
+            "allowShell": config.allow_shell,
+            "capabilities": config.capabilities,
+            "observedAtUnixMs": unix_timestamp_ms()
+        })),
+        error: None,
+    }
+}
+
+async fn execute_list_directory_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    let path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+    let limit = payload_usize(&envelope.payload, "limit", 50, 500);
+    let path_buf = PathBuf::from(path);
+    let display_path = path_buf.display().to_string();
+
+    let mut read_dir = match tokio::fs::read_dir(&path_buf).await {
+        Ok(read_dir) => read_dir,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "failed to read directory '{}': {error}",
+                    display_path
+                )),
+            };
+        }
+    };
+
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    loop {
+        match read_dir.next_entry().await {
+            Ok(Some(entry)) => {
+                if entries.len() >= limit {
+                    truncated = true;
+                    break;
+                }
+                let entry_path = entry.path();
+                let metadata = entry.metadata().await.ok();
+                entries.push(json!({
+                    "name": entry.file_name().to_string_lossy().to_string(),
+                    "path": entry_path.display().to_string(),
+                    "isDir": metadata.as_ref().is_some_and(|meta| meta.is_dir()),
+                    "isFile": metadata.as_ref().is_some_and(|meta| meta.is_file()),
+                    "len": metadata.as_ref().map(|meta| meta.len()),
+                    "modifiedAtUnixMs": metadata
+                        .as_ref()
+                        .and_then(|meta| meta.modified().ok())
+                        .map(system_time_to_unix_ms)
+                }));
+            }
+            Ok(None) => break,
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "failed while iterating directory '{}': {error}",
+                        display_path
+                    )),
+                };
+            }
+        }
+    }
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "path": display_path,
+            "entries": entries,
+            "count": entries.len(),
+            "truncated": truncated
+        })),
+        error: None,
+    }
+}
+
+async fn execute_read_file_preview_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(path) = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("read_file_preview requires payload.path".to_string()),
+        };
+    };
+
+    let max_bytes = payload_usize(&envelope.payload, "maxBytes", 4096, 65_536);
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let preview_len = bytes.len().min(max_bytes);
+            let preview = String::from_utf8_lossy(&bytes[..preview_len]).to_string();
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "path": path,
+                    "sizeBytes": bytes.len(),
+                    "preview": preview,
+                    "previewBytes": preview_len,
+                    "truncated": bytes.len() > max_bytes
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!("failed to read file '{}': {error}", path)),
+        },
+    }
+}
+
+async fn execute_stat_path_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    let Some(path) = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("stat_path requires payload.path".to_string()),
+        };
+    };
+
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "path": path,
+                "isDir": metadata.is_dir(),
+                "isFile": metadata.is_file(),
+                "len": metadata.len(),
+                "readonly": metadata.permissions().readonly(),
+                "modifiedAtUnixMs": metadata.modified().ok().map(system_time_to_unix_ms),
+                "createdAtUnixMs": metadata.created().ok().map(system_time_to_unix_ms)
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!("failed to stat path '{}': {error}", path)),
+        },
+    }
+}
+
+async fn execute_process_snapshot_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let limit = payload_usize(&envelope.payload, "limit", 50, 500);
+    let output = if cfg!(target_os = "windows") {
+        Command::new("tasklist")
+            .arg("/FO")
+            .arg("CSV")
+            .arg("/NH")
+            .output()
+            .await
+    } else {
+        Command::new("ps")
+            .arg("-eo")
+            .arg("pid=,comm=")
+            .output()
+            .await
+    };
+
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: Some(json!({
+                        "exitCode": output.status.code(),
+                        "stdout": String::from_utf8_lossy(&output.stdout),
+                        "stderr": String::from_utf8_lossy(&output.stderr)
+                    })),
+                    error: Some("process snapshot command failed".to_string()),
+                };
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let processes = if cfg!(target_os = "windows") {
+                parse_windows_tasklist_snapshot(&stdout, limit)
+            } else {
+                parse_unix_process_snapshot(&stdout, limit)
+            };
+
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "count": processes.len(),
+                    "limit": limit,
+                    "processes": processes
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!("failed to gather process snapshot: {error}")),
+        },
+    }
 }
 
 async fn execute_shell_command(
@@ -652,6 +932,11 @@ fn default_capabilities() -> Vec<String> {
         "echo".to_string(),
         "list_capabilities".to_string(),
         "agent_ping".to_string(),
+        "system_info".to_string(),
+        "list_directory".to_string(),
+        "read_file_preview".to_string(),
+        "stat_path".to_string(),
+        "process_snapshot".to_string(),
     ]
 }
 
@@ -750,7 +1035,10 @@ fn verify_rollout_bundle(config: &NodeConfig, bundle: &GatewayRolloutBundle) -> 
     Ok(())
 }
 
-fn verify_policy_distribution(config: &NodeConfig, bundle: &GatewayRolloutBundle) -> anyhow::Result<()> {
+fn verify_policy_distribution(
+    config: &NodeConfig,
+    bundle: &GatewayRolloutBundle,
+) -> anyhow::Result<()> {
     let profile = &bundle.policy.profile;
     if profile.version != bundle.policy_version {
         anyhow::bail!(
@@ -763,15 +1051,20 @@ fn verify_policy_distribution(config: &NodeConfig, bundle: &GatewayRolloutBundle
     match &bundle.policy.envelope {
         Some(envelope) => {
             let issuer_did = envelope.document.issuer_did.to_ascii_lowercase();
-            let public_key_hex = config
-                .policy_trust_roots
-                .get(&issuer_did)
-                .ok_or_else(|| anyhow::anyhow!("policy issuer '{}' is not trusted by this node", issuer_did))?;
+            let public_key_hex = config.policy_trust_roots.get(&issuer_did).ok_or_else(|| {
+                anyhow::anyhow!("policy issuer '{}' is not trusted by this node", issuer_did)
+            })?;
             validate_self_certifying_did(&issuer_did, public_key_hex, "did:dawn:policy:")?;
-            verify_signature(public_key_hex, &serde_json::to_vec(&envelope.document)?, &envelope.signature_hex)
-                .context("policy signature verification failed on node")?;
+            verify_signature(
+                public_key_hex,
+                &serde_json::to_vec(&envelope.document)?,
+                &envelope.signature_hex,
+            )
+            .context("policy signature verification failed on node")?;
 
-            if profile.issuer_did.as_deref().map(str::to_ascii_lowercase) != Some(issuer_did.clone()) {
+            if profile.issuer_did.as_deref().map(str::to_ascii_lowercase)
+                != Some(issuer_did.clone())
+            {
                 anyhow::bail!("policy profile issuer does not match signed policy issuer");
             }
             if profile.version != envelope.document.version
@@ -798,26 +1091,38 @@ fn verify_policy_distribution(config: &NodeConfig, bundle: &GatewayRolloutBundle
     Ok(())
 }
 
-fn verify_skill_distribution(config: &NodeConfig, bundle: &GatewayRolloutBundle) -> anyhow::Result<()> {
+fn verify_skill_distribution(
+    config: &NodeConfig,
+    bundle: &GatewayRolloutBundle,
+) -> anyhow::Result<()> {
     for skill in &bundle.skills.skills {
         match skill.source_kind.as_str() {
             "signed_publisher" => {
                 let issuer_did = skill
                     .issuer_did
                     .clone()
-                    .ok_or_else(|| anyhow::anyhow!("signed skill '{}' is missing issuerDid", skill.skill_id))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("signed skill '{}' is missing issuerDid", skill.skill_id)
+                    })?
                     .to_ascii_lowercase();
-                let signature_hex = skill
-                    .signature_hex
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("signed skill '{}' is missing signatureHex", skill.skill_id))?;
-                let issued_at_unix_ms = skill
-                    .issued_at_unix_ms
-                    .ok_or_else(|| anyhow::anyhow!("signed skill '{}' is missing issuedAtUnixMs", skill.skill_id))?;
+                let signature_hex = skill.signature_hex.clone().ok_or_else(|| {
+                    anyhow::anyhow!("signed skill '{}' is missing signatureHex", skill.skill_id)
+                })?;
+                let issued_at_unix_ms = skill.issued_at_unix_ms.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "signed skill '{}' is missing issuedAtUnixMs",
+                        skill.skill_id
+                    )
+                })?;
                 let public_key_hex = config
                     .skill_publisher_trust_roots
                     .get(&issuer_did)
-                    .ok_or_else(|| anyhow::anyhow!("skill publisher '{}' is not trusted by this node", issuer_did))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "skill publisher '{}' is not trusted by this node",
+                            issuer_did
+                        )
+                    })?;
                 validate_self_certifying_did(
                     &issuer_did,
                     public_key_hex,
@@ -834,8 +1139,12 @@ fn verify_skill_distribution(config: &NodeConfig, bundle: &GatewayRolloutBundle)
                     issuer_did: issuer_did.clone(),
                     issued_at_unix_ms,
                 };
-                verify_signature(public_key_hex, &serde_json::to_vec(&document)?, &signature_hex)
-                    .context("skill signature verification failed on node")?;
+                verify_signature(
+                    public_key_hex,
+                    &serde_json::to_vec(&document)?,
+                    &signature_hex,
+                )
+                .context("skill signature verification failed on node")?;
                 let document_hash = hash_json_value(&document)?;
                 if skill.document_hash.as_deref() != Some(document_hash.as_str()) {
                     anyhow::bail!(
@@ -878,7 +1187,11 @@ fn validate_self_certifying_did(
     Ok(())
 }
 
-fn verify_signature(public_key_hex: &str, payload: &[u8], signature_hex: &str) -> anyhow::Result<()> {
+fn verify_signature(
+    public_key_hex: &str,
+    payload: &[u8],
+    signature_hex: &str,
+) -> anyhow::Result<()> {
     let public_key_bytes = decode_fixed_hex::<32>(public_key_hex, "public key")?;
     let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
         .context("public key must be a valid Ed25519 verifying key")?;
@@ -891,7 +1204,8 @@ fn verify_signature(public_key_hex: &str, payload: &[u8], signature_hex: &str) -
 }
 
 fn decode_fixed_hex<const N: usize>(raw: &str, label: &str) -> anyhow::Result<[u8; N]> {
-    let bytes = hex::decode(normalize_hex(raw)?).with_context(|| format!("{label} must be valid hex"))?;
+    let bytes =
+        hex::decode(normalize_hex(raw)?).with_context(|| format!("{label} must be valid hex"))?;
     bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("{label} must be {N} bytes"))
@@ -907,9 +1221,94 @@ fn hash_json_value(value: &impl Serialize) -> anyhow::Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
 
+fn payload_usize(payload: &Value, key: &str, default: usize, max: usize) -> usize {
+    payload
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .map(|value| value.clamp(1, max))
+        .unwrap_or(default)
+}
+
+fn system_time_to_unix_ms(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn parse_windows_tasklist_snapshot(raw: &str, limit: usize) -> Vec<Value> {
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(parse_windows_tasklist_record)
+        .take(limit)
+        .collect()
+}
+
+fn parse_windows_tasklist_record(line: &str) -> Option<Value> {
+    let fields = parse_csv_record(line);
+    if fields.len() < 5 {
+        return None;
+    }
+    Some(json!({
+        "imageName": fields[0],
+        "pid": fields[1],
+        "sessionName": fields[2],
+        "sessionNumber": fields[3],
+        "memory": fields[4]
+    }))
+}
+
+fn parse_csv_record(line: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                if in_quotes && chars.peek() == Some(&'"') {
+                    current.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = !in_quotes;
+                }
+            }
+            ',' if !in_quotes => {
+                values.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    values.push(current.trim().to_string());
+    values
+}
+
+fn parse_unix_process_snapshot(raw: &str, limit: usize) -> Vec<Value> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let pid = parts.next()?;
+            let command = parts.collect::<Vec<_>>().join(" ");
+            Some(json!({
+                "pid": pid,
+                "command": command
+            }))
+        })
+        .take(limit)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn base_config() -> NodeConfig {
         NodeConfig {
@@ -948,7 +1347,8 @@ mod tests {
             max_payment_amount: Some(10.0),
             updated_reason: "signed rollout".to_string(),
         };
-        let policy_signature = policy_signing_key.sign(&serde_json::to_vec(&policy_document).unwrap());
+        let policy_signature =
+            policy_signing_key.sign(&serde_json::to_vec(&policy_document).unwrap());
         let policy_document_hash = hash_json_value(&policy_document).unwrap();
         let policy_distribution = PolicyDistributionResponse {
             profile: PolicyProfileRecord {
@@ -1075,7 +1475,95 @@ mod tests {
         }))
         .unwrap();
 
-        let error = verify_rollout_bundle(&config, &bundle).unwrap_err().to_string();
+        let error = verify_rollout_bundle(&config, &bundle)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("unsigned skill"));
+    }
+
+    #[tokio::test]
+    async fn system_info_command_reports_node_metadata() {
+        let config = base_config();
+        let response = execute_system_info_command(
+            &config,
+            GatewayCommandEnvelope {
+                command_id: "cmd-system-info".to_string(),
+                command_type: "system_info".to_string(),
+                payload: json!({}),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["nodeId"], "node-test");
+        assert_eq!(result["nodeName"], "Node Test");
+        assert_eq!(result["allowShell"], false);
+    }
+
+    #[tokio::test]
+    async fn read_file_preview_command_truncates_large_files() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "dawn-node-read-preview-{}.txt",
+            unix_timestamp_ms()
+        ));
+        fs::write(&temp_path, "abcdefghijklmnopqrstuvwxyz").unwrap();
+
+        let response = execute_read_file_preview_command(GatewayCommandEnvelope {
+            command_id: "cmd-read-preview".to_string(),
+            command_type: "read_file_preview".to_string(),
+            payload: json!({
+                "path": temp_path.display().to_string(),
+                "maxBytes": 8
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["preview"], "abcdefgh");
+        assert_eq!(result["truncated"], true);
+
+        fs::remove_file(temp_path).ok();
+    }
+
+    #[tokio::test]
+    async fn list_directory_command_returns_entries() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dawn-node-list-dir-{}", unix_timestamp_ms()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("alpha.txt"), "alpha").unwrap();
+
+        let response = execute_list_directory_command(GatewayCommandEnvelope {
+            command_id: "cmd-list-dir".to_string(),
+            command_type: "list_directory".to_string(),
+            payload: json!({
+                "path": temp_dir.display().to_string()
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let entries = response.result.unwrap()["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["name"] == "alpha.txt" && entry["isFile"] == true)
+        );
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn parses_windows_tasklist_csv_records() {
+        let parsed =
+            parse_windows_tasklist_record("\"cmd.exe\",\"1234\",\"Console\",\"1\",\"8,192 K\"")
+                .unwrap();
+        assert_eq!(parsed["imageName"], "cmd.exe");
+        assert_eq!(parsed["pid"], "1234");
+        assert_eq!(parsed["memory"], "8,192 K");
     }
 }

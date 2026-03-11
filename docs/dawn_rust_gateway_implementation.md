@@ -52,7 +52,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `dawn_core/src/skill_registry.rs`
   - Registers versioned Wasm skills, validates module bytes, verifies signed publisher envelopes, stores artifacts on disk, and exposes activation APIs for the A2A runtime.
 - `dawn_node/src/main.rs`
-  - A Rust node agent that connects to the gateway over WebSocket, emits heartbeats, and returns command results.
+  - A Rust node agent that connects to the gateway over WebSocket, emits heartbeats, verifies rollout trust roots, and returns command results for discovery, file, process, and shell capabilities.
 
 ## Key HTTP Endpoints
 
@@ -746,10 +746,23 @@ Supported node command types in the sample Rust node:
 - `echo`
 - `list_capabilities`
 - `agent_ping`
+- `system_info`
+- `list_directory`
+- `read_file_preview`
+- `stat_path`
+- `process_snapshot`
 - `shell_exec`
   - Disabled by default
   - Enable with `DAWN_NODE_ALLOW_SHELL=1`
   - Only attested when shell is enabled
+
+Device-facing node behavior:
+
+- `system_info` returns node identity, OS, architecture, current working directory, executable path, CPU count, hostname, and effective capabilities.
+- `list_directory` lists directory entries with basic metadata and a bounded result size.
+- `read_file_preview` reads a bounded UTF-8 preview of a file without requiring shell access.
+- `stat_path` returns basic filesystem metadata for a file or directory.
+- `process_snapshot` returns a bounded process list using `tasklist` on Windows or `ps` on Unix-like hosts.
 
 ## AP2 Flow
 
