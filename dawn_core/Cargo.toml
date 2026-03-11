@@ -1,0 +1,31 @@
+[package]
+name = "dawn_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+hex = "0.4"
+ed25519-dalek = "2.1"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures-util = "0.3"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros"] }
+base64 = "0.22"
+
+# Wasm Sandbox
+wasmtime = "22.0"
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# Protocols (Placeholders/stubs for real crates)
+# a2a-rs = "0.3"
+# agentic-payments = "0.1"

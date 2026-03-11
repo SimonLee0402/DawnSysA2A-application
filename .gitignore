@@ -76,6 +76,10 @@ venv.bak/
 # Django
 *.sqlite3
 *.sqlite3-journal
+dawn_core/data/
+*.db-wal
+*.db-shm
+.bayes/
 # media/ # Consider if all media should be ignored or if some placeholders are needed
 # a2a_workflow_platform/media/ # More specific path for media if needed
 # static_collected/ # Django's collected static files
@@ -139,3 +143,6 @@ config.ini # If it contains secrets
 *.bak
 *.swp
 *~ 
+
+# Rust
+target/

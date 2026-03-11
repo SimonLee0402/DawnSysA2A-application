@@ -1,2 +1,0 @@
-import{_ as a,a as s,b as o,l as n,h as r,j as c}from"./main.js";const l={name:"TaskCreate"},_={class:"task-create"};function p(d,e,i,f,m,k){const t=r("el-alert");return c(),s("div",_,[e[0]||(e[0]=o("h1",null,"创建任务",-1)),n(t,{title:"页面开发中",type:"info",description:"此页面正在开发中，敬请期待。","show-icon":"",closable:!1})])}const $=a(l,[["render",p],["__scopeId","data-v-9fe3aa88"]]);export{$ as default};
-//# sourceMappingURL=TaskCreate.js.map
