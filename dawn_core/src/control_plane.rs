@@ -503,9 +503,9 @@ async fn open_node_session(
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let claim_required =
         identity::authorize_node_session_open(&state, &node_id, query.claim_token.as_deref())
-        .await
-        .map_err(auth_error)?
-        .is_some();
+            .await
+            .map_err(auth_error)?
+            .is_some();
     Ok(ws.on_upgrade(move |socket| node_session(socket, state, node_id, query, claim_required)))
 }
 
@@ -961,6 +961,8 @@ fn default_payload() -> Value {
 
 fn requires_command_approval(command_type: &str, payload: &Value) -> bool {
     command_type == "shell_exec"
+        || command_type.starts_with("browser_")
+        || command_type.starts_with("desktop_")
         || payload
             .get("approvalRequired")
             .and_then(Value::as_bool)
@@ -1049,7 +1051,7 @@ mod tests {
 
     use super::{
         approve_pending_node_command, dispatch_current_rollout_if_needed, dispatch_gateway_command,
-        process_rollout_ack,
+        process_rollout_ack, requires_command_approval,
     };
     use crate::{
         app_state::{AppState, ApprovalRequestStatus, NodeAttestationState, NodeRolloutStatus},
@@ -1197,5 +1199,46 @@ mod tests {
 
         drop(state);
         fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn browser_commands_are_approval_gated_by_default() {
+        assert!(requires_command_approval("browser_open", &json!({})));
+        assert!(requires_command_approval("browser_search", &json!({})));
+        assert!(requires_command_approval("browser_navigate", &json!({})));
+        assert!(requires_command_approval("browser_extract", &json!({})));
+        assert!(requires_command_approval("browser_click", &json!({})));
+        assert!(requires_command_approval("desktop_open", &json!({})));
+        assert!(requires_command_approval(
+            "desktop_clipboard_set",
+            &json!({})
+        ));
+        assert!(requires_command_approval("desktop_type_text", &json!({})));
+        assert!(requires_command_approval("desktop_key_press", &json!({})));
+        assert!(requires_command_approval(
+            "desktop_windows_list",
+            &json!({})
+        ));
+        assert!(requires_command_approval(
+            "desktop_window_focus",
+            &json!({})
+        ));
+        assert!(requires_command_approval(
+            "desktop_wait_for_window",
+            &json!({})
+        ));
+        assert!(requires_command_approval("desktop_focus_app", &json!({})));
+        assert!(requires_command_approval(
+            "desktop_launch_and_focus",
+            &json!({})
+        ));
+        assert!(requires_command_approval("desktop_mouse_move", &json!({})));
+        assert!(requires_command_approval("desktop_mouse_click", &json!({})));
+        assert!(requires_command_approval("desktop_screenshot", &json!({})));
+        assert!(requires_command_approval(
+            "desktop_accessibility_snapshot",
+            &json!({})
+        ));
+        assert!(!requires_command_approval("agent_ping", &json!({})));
     }
 }

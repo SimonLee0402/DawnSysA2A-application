@@ -38,12 +38,16 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `dawn_core/src/connectors.rs`
   - Exposes the first external connectors:
     - OpenAI Responses API
+    - Anthropic Messages API
     - DeepSeek Chat Completions
     - Qwen via DashScope OpenAI-compatible Chat Completions
     - Zhipu BigModel Chat Completions
     - Moonshot Chat Completions
     - Doubao via Ark Chat Completions
+    - Ollama local chat API
     - Telegram Bot `sendMessage`
+    - Slack webhook bot
+    - Discord webhook bot
     - Feishu webhook bot
     - DingTalk webhook bot
     - WeCom webhook bot
@@ -85,12 +89,16 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
   - WebSocket endpoint for live node sessions
 - `GET /api/gateway/connectors/status`
 - `POST /api/gateway/connectors/model/openai/respond`
+- `POST /api/gateway/connectors/model/anthropic/respond`
 - `POST /api/gateway/connectors/model/deepseek/respond`
 - `POST /api/gateway/connectors/model/qwen/respond`
 - `POST /api/gateway/connectors/model/zhipu/respond`
 - `POST /api/gateway/connectors/model/moonshot/respond`
 - `POST /api/gateway/connectors/model/doubao/respond`
+- `POST /api/gateway/connectors/model/ollama/respond`
 - `POST /api/gateway/connectors/chat/telegram/send`
+- `POST /api/gateway/connectors/chat/slack/send`
+- `POST /api/gateway/connectors/chat/discord/send`
 - `POST /api/gateway/connectors/chat/feishu/send`
 - `POST /api/gateway/connectors/chat/dingtalk/send`
 - `POST /api/gateway/connectors/chat/wecom/send`
@@ -107,6 +115,10 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/ingress/wechat-official-account/events`
 - `POST /api/gateway/ingress/qq/events`
 - `GET /api/gateway/marketplace/catalog`
+- `GET /api/gateway/marketplace/catalog/federated`
+- `GET /api/gateway/marketplace/peers`
+- `POST /api/gateway/marketplace/peers`
+- `GET /api/gateway/marketplace/peers/{peer_id}`
 - `POST /api/gateway/marketplace/install/skill`
 - `POST /api/gateway/marketplace/install/agent-card`
 - `GET /console`
@@ -116,8 +128,15 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/agent-cards/search`
 - `GET /api/gateway/agent-cards/{card_id}/quote`
 - `GET /api/gateway/agent-cards/quotes`
+- `GET /api/gateway/agent-cards/delivery-outbox-summary`
+- `GET /api/gateway/agent-cards/delivery-outbox`
+- `GET /api/gateway/agent-cards/delivery-outbox-dead-letter`
+- `GET /api/gateway/agent-cards/delivery-outbox/{delivery_id}`
+- `POST /api/gateway/agent-cards/delivery-outbox-dead-letter/replay`
+- `POST /api/gateway/agent-cards/delivery-outbox/{delivery_id}/retry`
 - `GET /api/gateway/agent-cards/quotes/{quote_id}`
 - `GET /api/gateway/agent-cards/quotes/{quote_id}/state`
+- `POST /api/gateway/agent-cards/quotes/state-sync`
 - `GET /api/gateway/agent-cards/invocations`
 - `GET /api/gateway/agent-cards/settlements`
 - `GET /api/gateway/agent-cards/reconciliation`
@@ -237,13 +256,14 @@ Control Center:
 
 - `GET /console` serves a live dashboard for inbound chat, tasks, nodes, settlements, and agent cards.
 - the dashboard now includes an `Approval Center` feed for pending node-command and AP2 approvals.
-- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, and `stat_path` through the existing control-plane API.
+- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_navigate`, `browser_extract`, `browser_click`, `browser_back`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
 - the current console visual direction is a liquid-glass operations deck rather than a plain admin table, and it now includes command template chips plus a full command-detail inspector for recent node results.
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
 - the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
 - the console now includes an `Agent Delegation Studio` for remote quote preview, counter-offer negotiation, and direct `Agent Card` invocation, plus a `Rollout Console` for manual dispatch of the current signed policy/skill bundle to a selected node.
 - the console now also includes a `Marketplace Studio` for skill-package install, remote card import, and local card publishing, alongside a `Connector Matrix` that visualizes model/chat/ingress readiness across the current global and China connector set.
 - approval decisions no longer rely on browser prompts; the right-side detail drawer now includes an inline workflow form for operator reason capture and AP2 MCU DID/signature entry.
+- the gateway now also exposes a user-facing `End-User Approval Portal` at `/end-user/approvals/{token}` so AP2 payment approvals created from chat-ingress tasks can be completed by the actual requester instead of only by a console operator.
 - the same console now embeds a `Marketplace Catalog` browser so operators can search signed skills and published agent cards, then install or import them without leaving `/console`.
 - the console now also subscribes to `/console/events` over SSE, so task, approval, ingress, node, command, rollout, payment, and policy writes can trigger near-real-time refresh instead of depending only on polling.
 - the right rail now also includes a `Setup Navigator`, which translates connector and ingress readiness into concrete environment-variable blocks, verification endpoints, and China/global go-live presets.
@@ -257,6 +277,15 @@ Approval Center:
 - `GET /api/gateway/approvals/{approval_id}`
 - `POST /api/gateway/approvals/{approval_id}/decision`
 
+End-User Approval Portal:
+
+- `GET /end-user/approvals/{approval_token}`
+- `GET /api/gateway/end-user/approvals/{approval_token}`
+- `POST /api/gateway/end-user/approvals/{approval_token}/decision`
+- when a payment approval is tied to a task that came from chat ingress, DawnCore now issues a tokenized end-user approval session, stores it, and appends the approval URL into the ingress reply text for downstream delivery
+- the portal response exposes the exact AP2 signature payload, so a companion MCU signer can produce the DID + signature pair without an operator copying fields out of the console
+- approving through the portal runs the same AP2 signature verification path as `POST /api/ap2/authorize`; rejecting through the portal marks the payment and linked approval as rejected
+
 Identity And Onboarding:
 
 - `GET /api/gateway/identity/status`
@@ -264,12 +293,23 @@ Identity And Onboarding:
 - `GET /api/gateway/identity/sessions`
 - `GET /api/gateway/identity/workspace`
 - `PUT /api/gateway/identity/workspace`
+- `GET /api/gateway/identity/setup-verifications`
+- `POST /api/gateway/identity/setup-verifications`
+- `GET /api/gateway/identity/node-claim-events`
 - `GET /api/gateway/identity/node-claims`
 - `POST /api/gateway/identity/node-claims`
 - `POST /api/gateway/identity/node-claims/{claim_id}/revoke`
+- `POST /api/gateway/identity/node-claims/{claim_id}/reissue`
+- `GET /api/gateway/identity/status` now also returns a durable readiness summary with `completionPercent`, `nextStep`, per-surface checklist items, and counts for sessions, nodes, default connectors, ingress, and end-user approval backlog
+- the control-center `Setup Navigator` and `Identity & Onboarding` panels now consume that readiness payload so the operator sees concrete onboarding gaps instead of only raw forms
+- `POST /api/gateway/identity/setup-verifications` records a persistent verification receipt for one setup target (`model`, `chat`, or `ingress`) and captures the operator, endpoint, env-key gap, and whether the target belongs to the current workspace default path
+- the `Setup Navigator` now shows the latest verification receipt for the selected target and lets the operator re-run verification inline without leaving the console
+- node-claim cards in `Identity & Onboarding` now surface connected / trusted node state and allow revoking a pending claim directly from the same console workflow
+- node-claim issuance now returns a concrete `launchUrl` plus `tokenHint`, and `POST /api/gateway/identity/node-claims/{claim_id}/reissue` lets an operator mint a fresh first-connect package without persisting the old raw claim token
+- node-claim lifecycle actions (`issued`, `reissued`, `revoked`, `consumed`) are now written into a persistent audit stream exposed by `GET /api/gateway/identity/node-claim-events`
 - first-time node websocket registration now requires a valid `claimToken`
 - existing nodes can reconnect without a new claim
-- `node_command` approvals are created when a node command is dispatched with `payload.approvalRequired = true` or when the command type is `shell_exec`.
+- `node_command` approvals are created when a node command is dispatched with `payload.approvalRequired = true` or when the command type is `shell_exec`, any `browser_*` command, or any `desktop_*` command.
 - `payment` approvals are created automatically when AP2 enters `pending_physical_auth`.
 - approving a node-command request releases the command into the existing control-plane queue.
 - rejecting a node-command request marks the command as `failed`.
@@ -284,6 +324,10 @@ Marketplace endpoints:
 
 - `GET /.well-known/dawn-marketplace.json`
 - `GET /api/gateway/marketplace/catalog`
+- `GET /api/gateway/marketplace/catalog/federated`
+- `GET /api/gateway/marketplace/peers`
+- `POST /api/gateway/marketplace/peers`
+- `GET /api/gateway/marketplace/peers/{peer_id}`
 - `POST /api/gateway/marketplace/install/skill`
 - `POST /api/gateway/marketplace/install/agent-card`
 - `GET /marketplace`
@@ -296,11 +340,15 @@ Behavior:
 - remote skill installation can fetch a package URL and register it locally; signed packages are verified against existing skill-publisher trust roots
 - remote agent-card installation reuses the existing import path and stores the imported card in the local registry
 - if `DAWN_PUBLIC_BASE_URL` is configured, marketplace package and install URLs are emitted as absolute URLs; otherwise they remain root-relative
+- trusted and enabled peers can now be registered in `marketplace_peers` and are merged into `GET /api/gateway/marketplace/catalog/federated`
+- remote peer entries may return relative `packageUrl`, `installUrl`, `cardUrl`, or agent `url`; DawnCore normalizes them against the peer `baseUrl` before exposing them downstream
+- each federated refresh persists peer health metadata (`syncStatus`, `lastSyncError`, `lastSyncedAtUnixMs`) so operators can distinguish healthy peers from invalid or unreachable catalogs
 
 An orchestration graph can also pause on payment approval:
 
 - `ap2_authorize` creates a pending AP2 transaction
 - the task moves to `waiting_payment_authorization`
+- if the task came from a chat-ingress sender, DawnCore also creates a tokenized end-user approval session and returns its URL as `endUserApprovalUrl`
 - once a valid MCU signature is submitted to `POST /api/ap2/authorize`, DawnCore resumes the orchestration automatically from the next step
 
 An orchestration graph can also delegate to another discovered agent:
@@ -344,8 +392,12 @@ Agent Card endpoints:
 - `GET /api/gateway/agent-cards/search`
 - `GET /api/gateway/agent-cards/{card_id}/quote`
 - `GET /api/gateway/agent-cards/quotes`
+- `GET /api/gateway/agent-cards/delivery-outbox`
+- `GET /api/gateway/agent-cards/delivery-outbox/{delivery_id}`
+- `POST /api/gateway/agent-cards/delivery-outbox/{delivery_id}/retry`
 - `GET /api/gateway/agent-cards/quotes/{quote_id}`
 - `GET /api/gateway/agent-cards/quotes/{quote_id}/state`
+- `POST /api/gateway/agent-cards/quotes/state-sync`
 - `GET /api/gateway/agent-cards/invocations`
 - `GET /api/gateway/agent-cards/settlements`
 - `POST /api/gateway/agent-cards/publish`
@@ -422,13 +474,26 @@ The quote endpoint also supports `quoteId` and `counterOfferAmount` so a client 
 Every signed or negotiated quote is now persisted in a local replay ledger:
 
 - `GET /api/gateway/agent-cards/quotes` lists ledger entries and supports `cardId`, `status`, `sourceKind`, and `transactionId` filters
+- `GET /api/gateway/agent-cards/delivery-outbox-summary` returns queue health for the durable delivery chain, including pending / failed counts, next retry timestamp, and receipt-vs-quote-state volume
+- `GET /api/gateway/agent-cards/delivery-outbox` lists durable receipt / quote-state deliveries and supports `kind`, `status`, `cardId`, `settlementId`, `quoteId`, and `limit` filters
+- `GET /api/gateway/agent-cards/delivery-outbox-dead-letter` lists only terminally failed outbox records and accepts the same filter set as the main outbox listing
+- `GET /api/gateway/agent-cards/delivery-outbox/{delivery_id}` returns one persisted delivery attempt chain
+- `POST /api/gateway/agent-cards/delivery-outbox-dead-letter/replay` requeues up to `limit` failed records, immediately replays them, and returns the refreshed delivery rows
+- `POST /api/gateway/agent-cards/delivery-outbox/{delivery_id}/retry` resets a failed delivery and immediately re-runs it through the outbox pipeline
 - `GET /api/gateway/agent-cards/quotes/{quote_id}` returns the full quote lifecycle record
 - `GET /api/gateway/agent-cards/quotes/{quote_id}/state` returns a signed quote-state snapshot for locally issued quotes
+- `POST /api/gateway/agent-cards/quotes/state-sync` accepts a pushed issuer-signed quote-state snapshot and applies it to a locally stored remote quote
 - `POST /api/gateway/agent-cards/quotes/{quote_id}/revoke` marks an unconsumed quote as revoked
 - `POST /api/gateway/agent-cards/{card_id}/quotes/{quote_id}/sync` fetches and applies the latest signed quote-state snapshot from the remote issuer
 - when a new quote references `quoteId=<prior-quote-id>`, the prior quote is marked `superseded` and the new quote advances the `negotiationRound`
 - when a remote settlement is created from an accepted quote, the quote is marked `consumed` and linked to the AP2 `transactionId`, which blocks replay
 - when a remote card advertises `quoteStateUrlTemplate`, DawnCore verifies the issuer-signed remote state before authorizing settlement, so revoked, superseded, or already-consumed quotes are rejected before AP2 authorization starts
+- when a gateway fetches a remote quote it can now include `stateInboxUrl`, so the issuer can persist a subscriber callback and push later `revoked`, `superseded`, or `consumed` quote-state changes back to the consumer gateway
+- outbound settlement receipts and locally issued quote-state pushes now enter a persistent `agent_delivery_outbox`, so transient gateway-to-gateway failures become queryable and retryable instead of disappearing into best-effort HTTP calls
+- the outbox worker retries transient delivery failures with backoff, marks terminal failures explicitly, and lets operators re-drive one delivery via `POST /api/gateway/agent-cards/delivery-outbox/{delivery_id}/retry`
+- failed outbox records can now be treated as a dead-letter queue, listed separately, and batch replayed from the control-center or API without touching the database manually
+- the control-center now surfaces a `Delivery Outbox` panel that ranks failed / retrying deliveries first, exposes queue health, and links each delivery back to its settlement, reconciliation, or quote ledger record
+- pushed remote quote-state updates now also annotate the linked reconciliation record when the remote issuer reports a conflicting terminal state for a quote that already has a local settlement
 
 When a locally hosted card is published through DawnCore, the gateway now auto-populates `pricing.quoteUrl` when the AP2 extension exists but no quote endpoint is declared. That lets another Dawn gateway discover and negotiate against the local quote endpoint without hand-editing the card JSON.
 
@@ -776,6 +841,34 @@ Supported node command types in the sample Rust node:
 - `echo`
 - `list_capabilities`
 - `agent_ping`
+- `browser_navigate`
+- `browser_extract`
+- `browser_click`
+- `browser_back`
+- `browser_focus`
+- `browser_close`
+- `browser_tabs`
+- `browser_snapshot`
+- `browser_type`
+- `browser_upload`
+- `browser_download`
+- `browser_form_fill`
+- `browser_form_submit`
+- `browser_open`
+- `browser_search`
+- `desktop_open`
+- `desktop_clipboard_set`
+- `desktop_type_text`
+- `desktop_key_press`
+- `desktop_windows_list`
+- `desktop_window_focus`
+- `desktop_wait_for_window`
+- `desktop_focus_app`
+- `desktop_launch_and_focus`
+- `desktop_mouse_move`
+- `desktop_mouse_click`
+- `desktop_screenshot`
+- `desktop_accessibility_snapshot`
 - `system_info`
 - `list_directory`
 - `read_file_preview`
@@ -793,6 +886,36 @@ Device-facing node behavior:
 - `read_file_preview` reads a bounded UTF-8 preview of a file without requiring shell access.
 - `stat_path` returns basic filesystem metadata for a file or directory.
 - `process_snapshot` returns a bounded process list using `tasklist` on Windows or `ps` on Unix-like hosts.
+- `browser_navigate` fetches an HTTP(S) page into a named lightweight browser session inside the node and stores the latest DOM snapshot.
+- `browser_extract` runs CSS-selector extraction against the stored DOM snapshot and returns bounded text plus resolved links.
+- `browser_click` resolves a link from the stored DOM snapshot and advances the named browser session to the target page.
+- `browser_back` replays the previous page in browser session history and preserves the same cookie jar.
+- `browser_focus` marks a named lightweight browser session as the active tab for later commands that omit `sessionId`.
+- `browser_close` removes a lightweight browser session and promotes the next active tab deterministically.
+- `browser_tabs` lists the node's currently tracked lightweight browser sessions, which act as Dawn's current tab abstraction.
+- `browser_snapshot` summarizes headings, links, buttons, forms, and pending staged fields from the stored browser session DOM.
+- `browser_type` resolves an input, textarea, or select element back to its owning form, stages the typed value, and can optionally submit the form in one step.
+- `browser_upload` stages a local file path against a file input and can submit the form as a multipart upload through the same session cookie jar.
+- `browser_download` fetches a URL or linked resource through the same browser session cookie jar and saves it to a local file path on the host.
+- `browser_form_fill` stages named field values against a selected `<form>` inside the browser session so operators or agents can prepare multi-step submits.
+- `browser_form_submit` submits a stored or inline field set through the same browser session cookie jar, with GET/POST derived from the DOM form metadata.
+- `browser_open` normalizes an HTTP(S) target and opens it in the host system's default browser.
+- `browser_search` builds a search URL for `google`, `bing`, `duckduckgo`, or `baidu` and opens it in the default browser.
+- the current browser-session MVP is still HTTP + DOM oriented and does not yet execute page JavaScript or drive a persistent visible browser tab, but it now preserves cookies, tracks multiple named sessions as lightweight tabs, supports active-tab focus/close semantics, and supports bounded field-typing, multipart form upload, form interaction, and cookie-aware downloads on top of the stored DOM.
+- `desktop_open` launches a local application, file, folder, or URL on the host machine and returns the launcher plus spawned process identifier when available.
+- `desktop_clipboard_set` writes text into the host clipboard; it currently supports Windows and macOS.
+- `desktop_type_text` sends text to the currently focused desktop window; it currently uses Windows `WScript.Shell.SendKeys`.
+- `desktop_key_press` sends a keyboard shortcut such as `CTRL+L` or `ALT+TAB` to the currently focused desktop window; it currently uses Windows `WScript.Shell.SendKeys`.
+- `desktop_windows_list` enumerates visible desktop windows, returning title, handle, and process id so later commands can target the correct surface.
+- `desktop_window_focus` brings a visible desktop window to the foreground by title substring, exact window handle, or process name.
+- `desktop_wait_for_window` polls until a visible desktop window matching title, handle, or process name appears, then returns the matched window summary.
+- `desktop_focus_app` focuses the first visible window for a named process such as `notepad`.
+- `desktop_launch_and_focus` launches a target application and then waits until a matching window becomes focusable, which is safer than firing keyboard input immediately after launch.
+- `desktop_mouse_move` moves the host pointer to explicit screen coordinates.
+- `desktop_mouse_click` sends left, right, or middle click input and can optionally move to a target coordinate first.
+- `desktop_screenshot` captures the full desktop, or an explicit rectangular region, into a PNG file on the host machine.
+- `desktop_accessibility_snapshot` reads a focused window through the Windows accessibility tree and returns a bounded control-view snapshot with names, automation ids, control types, state, and child nodes.
+- the current desktop-automation MVP now covers launcher, clipboard, keyboard, visible-window targeting, launch-and-focus orchestration, pointer movement, screenshot capture, and accessibility snapshots, but it still does not implement OCR, semantic action planning over accessibility nodes, or full cross-platform desktop automation parity.
 
 ## AP2 Flow
 
@@ -809,6 +932,8 @@ Device-facing node behavior:
    - `mcuPublicDid`
    - `mcuSignature`
 5. DawnCore verifies the Ed25519 signature and moves the payment to `authorized` or `rejected`.
+
+For the desktop CLI and future hardware signer wire contract, see [docs/ap2_serial_signer_protocol.md](/D:/Agent2Agent应用/docs/ap2_serial_signer_protocol.md).
 
 ## Connector Configuration
 
@@ -839,6 +964,15 @@ This gives the gateway restart-safe task, payment, node, command, and orchestrat
 
 - Environment variable: `OPENAI_API_KEY`
 - Live endpoint used by the gateway: `POST https://api.openai.com/v1/responses`
+- If the key is missing, the connector returns `mode = dry_run`
+
+### Anthropic
+
+- Environment variable: `ANTHROPIC_API_KEY`
+- Optional endpoint override: `ANTHROPIC_MESSAGES_URL`
+- Optional API version override: `ANTHROPIC_VERSION`
+- Live endpoint used by the gateway: `POST https://api.anthropic.com/v1/messages`
+- Default model: `claude-3-5-sonnet-latest`
 - If the key is missing, the connector returns `mode = dry_run`
 
 ### DeepSeek
@@ -890,11 +1024,26 @@ This gives the gateway restart-safe task, payment, node, command, and orchestrat
   - `POST https://ark.cn-beijing.volces.com/api/v3/chat/completions`
 - If the key is missing, the connector returns `mode = dry_run`
 
+### Ollama
+
+- Optional base URL override: `OLLAMA_BASE_URL`
+- Optional full endpoint override: `OLLAMA_CHAT_URL`
+- Default live endpoint used by the gateway: `POST http://127.0.0.1:11434/api/chat`
+- Default model: `llama3.1`
+- Ollama is treated as a local live connector rather than an API-key connector
+
 ### Telegram
 
 - Environment variable: `TELEGRAM_BOT_TOKEN`
 - Live endpoint used by the gateway: `POST https://api.telegram.org/bot{token}/sendMessage`
 - If the token is missing, the connector returns `mode = dry_run`
+
+### Global chat webhook connectors
+
+- `SLACK_BOT_WEBHOOK_URL`
+- `DISCORD_BOT_WEBHOOK_URL`
+
+If a webhook URL is missing, the connector returns `mode = dry_run`.
 
 ### China chat webhook connectors
 
@@ -977,15 +1126,21 @@ If a webhook URL is missing, the connector returns `mode = dry_run`.
 
 ## China Support Direction
 
-The gateway capability model now explicitly includes China-facing providers and chat ecosystems.
+The gateway capability model now explicitly includes both global and China-facing providers and chat ecosystems.
 
 Live now:
 
+- `openai`
+- `anthropic`
 - `deepseek`
 - `qwen`
 - `zhipu`
 - `moonshot`
 - `doubao`
+- `ollama`
+- `telegram`
+- `slack`
+- `discord`
 - `feishu`
 - `dingtalk`
 - `wecom_bot`
@@ -1058,6 +1213,7 @@ Removed legacy launchers:
 - Marketplace tests:
   - the marketplace catalog now includes signed skill packages and published agent cards in one combined discovery document
   - signed skill entries expose installable package URLs
+  - the federated marketplace catalog can now fetch a trusted peer catalog, merge remote entries, and normalize relative peer URLs into absolute installable/callable URLs
 - Runtime Agent Card smoke test:
   - `POST /api/gateway/agent-cards/publish` published a locally hosted `local-travel-agent`
   - `GET /.well-known/agent-card.json` returned the active local card
@@ -1084,6 +1240,7 @@ Removed legacy launchers:
   - revoked quotes cannot be consumed into AP2 settlements
   - consumed quotes are linked to `transactionId` and reject replay consumption
   - remote settlement validation now rejects a signed remote quote when the issuer's signed quote-state endpoint reports that quote as revoked
+  - locally issued quotes can now remember a subscriber `stateInboxUrl` and push signed revocation updates into the counterparty gateway's quote-state inbox
 - Runtime Wasm registry smoke test:
   - `POST /api/gateway/skills/register` accepted a minimal `echo-skill@1.0.0`
   - `GET /api/gateway/skills/echo-skill` returned the active version and stored artifact hash
@@ -1112,14 +1269,15 @@ Removed legacy launchers:
 
 ## Current Limits
 
-- The Wasm runtime now executes registered artifacts and supports signed publisher envelopes, but host calls are still minimal and there is not yet a remote skill marketplace or cross-gateway replication flow.
+- The Wasm runtime now executes registered artifacts and supports signed publisher envelopes, but host calls are still minimal and there is not yet signed peer-catalog verification, remote skill replication, or federation-wide trust-root exchange.
 - Agent Card discovery and invocation now work for Dawn-compatible task endpoints, but the compatibility layer is still pragmatic rather than a fully heterogeneous A2A adapter matrix.
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
-- Inbound chat ingress now covers Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and the approval UX is currently gateway-console driven rather than native inside each chat platform.
-- Marketplace discovery now exists, but it is still gateway-hosted rather than federation-native; there is not yet ranking, reviews, download telemetry, or cross-gateway reputation.
+- Inbound chat ingress now covers Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and approvals still fall back to a web portal link rather than native buttons inside each chat platform.
+- Identity onboarding now exposes a concrete readiness/checklist view, persistent setup verification receipts, node-claim reissue, and claim audit history for operator session bootstrap, workspace setup, connector defaults, ingress, node claims, and end-user approval routing, but it is still not a full opinionated wizard with persisted operator tasks or connector-by-connector validation history beyond the latest receipt chain.
+- Marketplace discovery now includes a federated peer registry and merged remote catalogs, but it is still early-stage: there is not yet signed peer bootstrap, ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.
-- Remote A2A settlement is now AP2-linked and can push signed settlement receipts plus receive signed counterparty acknowledgments, but there is not yet a full federated reconciliation bus, dispute workflow, or multi-gateway consensus layer.
-- Agent Card quote support now includes a local replay ledger plus on-demand cross-gateway quote-state verification, but it is still pull-based; there is not yet a push replication bus, federation-wide revocation feed, or quote-state gossip protocol.
+- Remote A2A settlement is now AP2-linked and uses a gateway-local durable delivery outbox for signed receipt propagation plus counterparty acknowledgments, but there is not yet a full federated reconciliation bus, dispute workflow, or multi-gateway consensus layer.
+- Agent Card quote support now includes a local replay ledger, push inbox, durable quote-state delivery outbox, and on-demand cross-gateway quote-state verification, but it is still early: there is not yet a federation-wide revocation feed or quote-state gossip protocol.
 - Policy and skill rollout now reach attested nodes and the node can independently verify trusted policy and skill publisher signatures, but there is not yet a node-side persisted trust-root store or full artifact-by-artifact Wasm binary verification against downloaded module bytes.
 - Runtime multi-process smoke is still blocked by the current host command policy, but the rollout + attestation + command loop is now covered by an in-process integration test instead of relying only on unit tests.

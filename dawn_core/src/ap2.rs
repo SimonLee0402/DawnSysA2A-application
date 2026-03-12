@@ -18,6 +18,7 @@ use crate::{
         AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, PaymentRecord,
         PaymentStatus, TaskStatus, unix_timestamp_ms,
     },
+    end_user_approvals,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -60,6 +61,7 @@ pub struct PaymentResponse {
     pub status: PaymentStatus,
     pub transaction_id: Uuid,
     pub verification_message: String,
+    pub end_user_approval_url: Option<String>,
 }
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -135,9 +137,9 @@ pub async fn request_payment_authorization(
         created_at_unix_ms: unix_timestamp_ms(),
         updated_at_unix_ms: unix_timestamp_ms(),
     };
-    state.upsert_payment(payment).await?;
+    let payment = state.upsert_payment(payment).await?;
     let now = unix_timestamp_ms();
-    state
+    let approval = state
         .upsert_approval_request(ApprovalRequestRecord {
             approval_id: Uuid::new_v4(),
             kind: ApprovalRequestKind::Payment,
@@ -177,11 +179,14 @@ pub async fn request_payment_authorization(
             )
             .await?;
     }
+    let end_user_approval =
+        end_user_approvals::issue_payment_approval_session(state, &approval, &payment).await?;
 
     Ok(PaymentResponse {
         status: PaymentStatus::PendingPhysicalAuth,
         transaction_id,
         verification_message: "hardware approval required".to_string(),
+        end_user_approval_url: end_user_approval,
     })
 }
 
@@ -208,6 +213,7 @@ pub async fn reject_payment_authorization(
             status: payment.status,
             transaction_id,
             verification_message: payment.verification_message,
+            end_user_approval_url: None,
         });
     }
 
@@ -248,6 +254,7 @@ pub async fn reject_payment_authorization(
         status: payment.status,
         transaction_id,
         verification_message: payment.verification_message,
+        end_user_approval_url: None,
     })
 }
 
@@ -269,6 +276,7 @@ async fn process_signed_payment_authorization(
             status: payment.status,
             transaction_id,
             verification_message: payment.verification_message,
+            end_user_approval_url: None,
         });
     }
 
@@ -373,6 +381,7 @@ async fn process_signed_payment_authorization(
         status,
         transaction_id,
         verification_message,
+        end_user_approval_url: None,
     })
 }
 

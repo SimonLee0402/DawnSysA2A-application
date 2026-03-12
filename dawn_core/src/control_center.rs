@@ -31,33 +31,52 @@ async fn console_event_stream(
         detail: "live event stream connected".to_string(),
         created_at_unix_ms: unix_timestamp_ms(),
     };
-    let stream = stream::unfold((Some(initial), state.subscribe_console_events()), |(pending, mut receiver)| async move {
-        if let Some(event) = pending {
-            let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{\"channel\":\"console\",\"detail\":\"serialization_error\"}".to_string());
-            return Some((Ok(Event::default().event("console_update").data(payload)), (None, receiver)));
-        }
-
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{\"channel\":\"console\",\"detail\":\"serialization_error\"}".to_string());
-                    return Some((Ok(Event::default().event("console_update").data(payload)), (None, receiver)));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    let payload = serde_json::to_string(&ConsoleStreamEvent {
-                        channel: "console".to_string(),
-                        entity_id: None,
-                        status: Some("lagged".to_string()),
-                        detail: format!("skipped {skipped} console updates"),
-                        created_at_unix_ms: unix_timestamp_ms(),
-                    })
-                    .unwrap_or_else(|_| "{\"channel\":\"console\",\"detail\":\"lagged\"}".to_string());
-                    return Some((Ok(Event::default().event("console_update").data(payload)), (None, receiver)));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+    let stream = stream::unfold(
+        (Some(initial), state.subscribe_console_events()),
+        |(pending, mut receiver)| async move {
+            if let Some(event) = pending {
+                let payload = serde_json::to_string(&event).unwrap_or_else(|_| {
+                    "{\"channel\":\"console\",\"detail\":\"serialization_error\"}".to_string()
+                });
+                return Some((
+                    Ok(Event::default().event("console_update").data(payload)),
+                    (None, receiver),
+                ));
             }
-        }
-    });
+
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        let payload = serde_json::to_string(&event).unwrap_or_else(|_| {
+                            "{\"channel\":\"console\",\"detail\":\"serialization_error\"}"
+                                .to_string()
+                        });
+                        return Some((
+                            Ok(Event::default().event("console_update").data(payload)),
+                            (None, receiver),
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let payload = serde_json::to_string(&ConsoleStreamEvent {
+                            channel: "console".to_string(),
+                            entity_id: None,
+                            status: Some("lagged".to_string()),
+                            detail: format!("skipped {skipped} console updates"),
+                            created_at_unix_ms: unix_timestamp_ms(),
+                        })
+                        .unwrap_or_else(|_| {
+                            "{\"channel\":\"console\",\"detail\":\"lagged\"}".to_string()
+                        });
+                        return Some((
+                            Ok(Event::default().event("console_update").data(payload)),
+                            (None, receiver),
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -73,7 +92,7 @@ async fn dashboard() -> Html<&'static str> {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Dawn Control Center</title>
+  <title>Dawn 网关控制台</title>
   <style>
     :root {
       --bg: #08111a;
@@ -777,35 +796,35 @@ async fn dashboard() -> Html<&'static str> {
   <div class="shell">
     <section class="hero">
       <div class="hero-card">
-        <div class="eyebrow">Dawn Gateway</div>
-        <h1>Control Center</h1>
+        <div class="eyebrow">Dawn 网关</div>
+        <h1>控制台</h1>
         <div class="subcopy">
-          Liquid-glass operations deck for inbound chat, A2A execution, node trust, AP2 settlement, and agent-to-agent commerce.
+          面向入站聊天、A2A 执行、节点信任、AP2 结算与 agent-to-agent 商业链路的液态玻璃运维面板。
         </div>
         <div class="hero-meta">
-          <span class="pill">A2A-native routing</span>
-          <span class="pill">AP2-aware payments</span>
-          <span class="pill">Node attestation</span>
-          <span class="pill">China connector path</span>
-          <span class="pill" id="console-stream-pill">Console stream · connecting</span>
+          <span class="pill">A2A 原生路由</span>
+          <span class="pill">AP2 感知支付</span>
+          <span class="pill">节点证明</span>
+          <span class="pill">中国连接器路径</span>
+          <span class="pill" id="console-stream-pill">控制台事件流 · 连接中</span>
         </div>
         <div class="signal-cluster">
           <div class="signal">
-            <span>Ops Mode</span>
-            <strong>Attested Runtime</strong>
+            <span>运维模式</span>
+            <strong>可信运行时</strong>
           </div>
           <div class="signal">
-            <span>Control Plane</span>
-            <strong>Live Dispatch</strong>
+            <span>控制平面</span>
+            <strong>实时派发</strong>
           </div>
           <div class="signal">
-            <span>Design Tone</span>
-            <strong>Liquid Glass</strong>
+            <span>设计语气</span>
+            <strong>液态玻璃</strong>
           </div>
         </div>
       </div>
       <div class="hero-card">
-        <div class="eyebrow">Gateway Pulse</div>
+        <div class="eyebrow">网关脉冲</div>
         <div class="stats" id="stats"></div>
       </div>
     </section>
@@ -814,182 +833,182 @@ async fn dashboard() -> Html<&'static str> {
       <div class="stack">
         <section class="panel">
           <div class="panel-head">
-            <h2>Inbound Chat Feed</h2>
-            <span class="tiny">Latest ingress events</span>
+            <h2>入站聊天流</h2>
+            <span class="tiny">最新入口事件</span>
           </div>
           <div class="feed" id="ingress-feed"></div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Approval Center</h2>
-            <span class="tiny">Pending node and AP2 approvals</span>
+            <h2>审批中心</h2>
+            <span class="tiny">待处理的节点与 AP2 审批</span>
           </div>
           <div class="feed" id="approval-feed"></div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Recent Tasks</h2>
-            <span class="tiny">A2A and inbound-created tasks</span>
+            <h2>最近任务</h2>
+            <span class="tiny">由 A2A 与入站事件创建的任务</span>
           </div>
           <table>
-            <thead><tr><th>Name</th><th>Status</th><th>Instruction</th></tr></thead>
+            <thead><tr><th>名称</th><th>状态</th><th>指令</th></tr></thead>
             <tbody id="task-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Remote Invocations</h2>
-            <span class="tiny">Agent-card execution calls and their remote task state</span>
+            <h2>远端调用</h2>
+            <span class="tiny">Agent Card 执行调用及对应远端任务状态</span>
           </div>
           <table>
-            <thead><tr><th>Card</th><th>Status</th><th>Remote Task</th></tr></thead>
+            <thead><tr><th>卡片</th><th>状态</th><th>远端任务</th></tr></thead>
             <tbody id="invocation-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Quote Ledger</h2>
-            <span class="tiny">Signed quote rounds, revocations, and replay state</span>
+            <h2>报价账本</h2>
+            <span class="tiny">已签名报价轮次、撤销与重放状态</span>
           </div>
           <table>
-            <thead><tr><th>Quote</th><th>Status</th><th>Amount</th></tr></thead>
+            <thead><tr><th>报价</th><th>状态</th><th>金额</th></tr></thead>
             <tbody id="quote-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Agent Delegation Studio</h2>
-            <span class="tiny">Preview quotes, counter-offer, and invoke remote agent cards</span>
+            <h2>Agent 委托工作台</h2>
+            <span class="tiny">预览报价、发起还价并调用远端 Agent Card</span>
           </div>
           <div class="console-form">
             <div class="form-grid">
               <div class="field">
-                <label for="delegate-card-id">Target Agent Card</label>
+                <label for="delegate-card-id">目标 Agent Card</label>
                 <select id="delegate-card-id"></select>
               </div>
               <div class="field">
-                <label for="delegate-name">Invocation Name</label>
-                <input id="delegate-name" type="text" value="delegate task" />
+                <label for="delegate-name">调用名称</label>
+                <input id="delegate-name" type="text" value="委托任务" />
               </div>
             </div>
             <div class="field">
-              <label for="delegate-instruction">Instruction</label>
-              <textarea id="delegate-instruction">Coordinate a remote agent action.</textarea>
+              <label for="delegate-instruction">指令</label>
+              <textarea id="delegate-instruction">协调一次远端 agent 动作。</textarea>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="delegate-amount">Settlement Amount</label>
+                <label for="delegate-amount">结算金额</label>
                 <input id="delegate-amount" type="number" step="0.01" min="0" placeholder="18.50" />
               </div>
               <div class="field">
-                <label for="delegate-quote-id">Quote Id</label>
+                <label for="delegate-quote-id">报价 ID</label>
                 <input id="delegate-quote-id" type="text" placeholder="quote-..." />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="delegate-counter-offer">Counter Offer</label>
+                <label for="delegate-counter-offer">还价金额</label>
                 <input id="delegate-counter-offer" type="number" step="0.01" min="0" placeholder="15.00" />
               </div>
               <div class="field">
-                <label for="delegate-await-completion">Await Completion</label>
+                <label for="delegate-await-completion">等待完成</label>
                 <select id="delegate-await-completion">
-                  <option value="true" selected>Wait for remote completion</option>
-                  <option value="false">Return after dispatch</option>
+                  <option value="true" selected>等待远端完成</option>
+                  <option value="false">派发后立即返回</option>
                 </select>
               </div>
             </div>
             <div class="field">
-              <label for="delegate-description">Settlement Description</label>
-              <input id="delegate-description" type="text" value="Settle remote delegation" />
+              <label for="delegate-description">结算说明</label>
+              <input id="delegate-description" type="text" value="为远端委托结算" />
             </div>
             <div class="toolbar">
-              <button type="button" onclick="previewSettlementQuote(false)">Preview Quote</button>
-              <button type="button" class="secondary" onclick="previewSettlementQuote(true)">Counter Offer</button>
-              <button type="button" class="secondary" onclick="invokeAgentCard()">Invoke Agent</button>
+              <button type="button" onclick="previewSettlementQuote(false)">预览报价</button>
+              <button type="button" class="secondary" onclick="previewSettlementQuote(true)">发起还价</button>
+              <button type="button" class="secondary" onclick="invokeAgentCard()">调用 Agent</button>
             </div>
-            <div class="result-box" id="delegate-status">Select an agent card to preview or invoke a remote delegation.</div>
+            <div class="result-box" id="delegate-status">选择一张 Agent Card 以预览报价或发起远端委托。</div>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Marketplace Studio</h2>
-            <span class="tiny">Install skill packages, import remote cards, and publish local agent cards</span>
+            <h2>市场工作台</h2>
+            <span class="tiny">安装技能包、导入远端卡片并发布本地 Agent Card</span>
           </div>
           <div class="console-form">
-            <div class="result-box" id="marketplace-signal">Marketplace catalog is loading.</div>
+            <div class="result-box" id="marketplace-signal">市场目录加载中。</div>
             <div class="form-grid">
               <div class="field">
-                <label for="marketplace-skill-package-url">Skill Package URL</label>
+                <label for="marketplace-skill-package-url">技能包 URL</label>
                 <input id="marketplace-skill-package-url" type="url" placeholder="https://gateway.example/api/gateway/skills/echo-skill/1.0.0/package" />
               </div>
               <div class="field">
-                <label for="marketplace-card-url">Remote Agent Card URL</label>
+                <label for="marketplace-card-url">远端 Agent Card URL</label>
                 <input id="marketplace-card-url" type="url" placeholder="https://agent.example/.well-known/agent-card.json" />
               </div>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="installSkillPackage()">Install Skill</button>
-              <button type="button" class="secondary" onclick="importAgentCardFromUrl()">Import Card</button>
-              <button type="button" class="secondary" onclick="window.open('/marketplace', '_blank')">Open Marketplace</button>
+              <button type="button" onclick="installSkillPackage()">安装技能</button>
+              <button type="button" class="secondary" onclick="importAgentCardFromUrl()">导入卡片</button>
+              <button type="button" class="secondary" onclick="window.open('/marketplace', '_blank')">打开市场页</button>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="publish-card-id">Local Card Id</label>
+                <label for="publish-card-id">本地卡片 ID</label>
                 <input id="publish-card-id" type="text" placeholder="travel-agent-cn" />
               </div>
               <div class="field">
-                <label for="publish-card-regions">Regions</label>
+                <label for="publish-card-regions">区域</label>
                 <input id="publish-card-regions" type="text" value="china" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="publish-card-languages">Languages</label>
+                <label for="publish-card-languages">语言</label>
                 <input id="publish-card-languages" type="text" value="zh-cn,en" />
               </div>
               <div class="field">
-                <label for="publish-card-model-providers">Model Providers</label>
+                <label for="publish-card-model-providers">模型提供方</label>
                 <input id="publish-card-model-providers" type="text" value="qwen,deepseek" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="publish-card-chat-platforms">Chat Platforms</label>
+                <label for="publish-card-chat-platforms">聊天平台</label>
                 <input id="publish-card-chat-platforms" type="text" value="wechat_official_account,feishu,dingtalk" />
               </div>
               <div class="field">
-                <label for="publish-card-payment-roles">Payment Roles</label>
+                <label for="publish-card-payment-roles">支付角色</label>
                 <input id="publish-card-payment-roles" type="text" value="payee" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="publish-card-local">Hosted Here</label>
+                <label for="publish-card-local">是否本地托管</label>
                 <select id="publish-card-local">
-                  <option value="true" selected>Locally hosted</option>
-                  <option value="false">Remote metadata only</option>
+                  <option value="true" selected>本地托管</option>
+                  <option value="false">仅远端元数据</option>
                 </select>
               </div>
               <div class="field">
-                <label for="publish-card-published">Visibility</label>
+                <label for="publish-card-published">可见性</label>
                 <select id="publish-card-published">
-                  <option value="true" selected>Published</option>
-                  <option value="false">Draft</option>
+                  <option value="true" selected>已发布</option>
+                  <option value="false">草稿</option>
                 </select>
               </div>
             </div>
             <div class="field">
               <label for="publish-card-json">Agent Card JSON</label>
               <textarea id="publish-card-json">{
-  "name": "Dawn China Travel Agent",
-  "description": "Coordinates bookings, messaging, and AP2 settlement for China-market tasks.",
+  "name": "Dawn 中国出行 Agent",
+  "description": "为中国市场任务协调预订、消息编排与 AP2 结算。",
   "url": "https://example.com/a2a",
   "version": "1.0.0",
   "defaultInputModes": ["text"],
@@ -1006,35 +1025,35 @@ async fn dashboard() -> Html<&'static str> {
   "skills": [
     {
       "id": "travel-plan",
-      "name": "Travel Planning",
-      "description": "Plans and delegates itinerary actions."
+        "name": "出行规划",
+        "description": "规划并委托行程动作。"
     }
   ]
 }</textarea>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="publishAgentCard()">Publish Agent Card</button>
+              <button type="button" onclick="publishAgentCard()">发布 Agent Card</button>
             </div>
-            <div class="result-box" id="marketplace-status">Install, import, or publish marketplace assets from here.</div>
+            <div class="result-box" id="marketplace-status">在这里安装、导入或发布市场资产。</div>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Marketplace Catalog</h2>
-            <span class="tiny">Browse signed skills and published agents without leaving the ops deck</span>
+            <h2>市场目录</h2>
+            <span class="tiny">无需离开运维面板即可浏览已签名技能与已发布 Agent</span>
           </div>
           <div class="console-form">
             <div class="toolbar">
-              <input id="catalog-search" type="search" placeholder="Search skills, agents, capabilities, platforms" />
+              <input id="catalog-search" type="search" placeholder="搜索技能、Agent、能力或平台" />
               <select id="catalog-kind">
-                <option value="">All</option>
-                <option value="skill">Skills</option>
-                <option value="agent">Agents</option>
+                <option value="">全部</option>
+                <option value="skill">技能</option>
+                <option value="agent">Agent</option>
               </select>
-              <button type="button" class="secondary" onclick="loadMarketplaceCatalog()">Search Catalog</button>
+              <button type="button" class="secondary" onclick="loadMarketplaceCatalog()">搜索目录</button>
             </div>
-            <div class="result-box" id="marketplace-catalog-status">Catalog browser is loading.</div>
+            <div class="result-box" id="marketplace-catalog-status">目录浏览器加载中。</div>
             <div class="catalog-grid" id="marketplace-catalog-grid"></div>
           </div>
         </section>
@@ -1043,56 +1062,56 @@ async fn dashboard() -> Html<&'static str> {
       <div class="stack">
         <section class="panel">
           <div class="panel-head">
-            <h2>Nodes</h2>
-            <span class="tiny">Session and attestation state</span>
+            <h2>节点</h2>
+            <span class="tiny">会话与证明状态</span>
           </div>
           <table>
-            <thead><tr><th>Node</th><th>Status</th><th>Trust</th></tr></thead>
+            <thead><tr><th>节点</th><th>状态</th><th>信任</th></tr></thead>
             <tbody id="node-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Rollout Fabric</h2>
-            <span class="tiny">Latest signed policy and skill distribution state per node</span>
+            <h2>发布链路</h2>
+            <span class="tiny">每个节点的最新签名策略与技能分发状态</span>
           </div>
           <table>
-            <thead><tr><th>Node</th><th>Status</th><th>Policy / Skill</th></tr></thead>
+            <thead><tr><th>节点</th><th>状态</th><th>策略 / 技能</th></tr></thead>
             <tbody id="rollout-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Rollout Console</h2>
-            <span class="tiny">Manually dispatch the current signed policy and skill bundle</span>
+            <h2>发布控制台</h2>
+            <span class="tiny">手动派发当前签名策略与技能包</span>
           </div>
           <div class="console-form">
             <div class="field">
-              <label for="rollout-node-id">Target Node</label>
+              <label for="rollout-node-id">目标节点</label>
               <select id="rollout-node-id"></select>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="dispatchManualRollout()">Dispatch Rollout</button>
-              <button type="button" class="secondary" onclick="refresh(document.getElementById('rollout-node-id')?.value)">Refresh Nodes</button>
+              <button type="button" onclick="dispatchManualRollout()">派发发布包</button>
+              <button type="button" class="secondary" onclick="refresh(document.getElementById('rollout-node-id')?.value)">刷新节点</button>
             </div>
-            <div class="result-box" id="rollout-status">Select a node to push the current rollout bundle.</div>
+            <div class="result-box" id="rollout-status">选择一个节点以推送当前发布包。</div>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Node Command Console</h2>
-            <span class="tiny">Dispatch attested file, process, and discovery commands</span>
+            <h2>节点命令台</h2>
+            <span class="tiny">派发已证明的文件、进程与发现类命令</span>
           </div>
           <div class="console-form">
             <div class="field">
-              <label for="node-command-node">Target Node</label>
+              <label for="node-command-node">目标节点</label>
               <select id="node-command-node"></select>
             </div>
             <div class="field">
-              <label for="node-command-type">Command Template</label>
+              <label for="node-command-type">命令模板</label>
               <select id="node-command-type"></select>
             </div>
             <div class="chip-row" id="command-template-chips"></div>
@@ -1101,70 +1120,87 @@ async fn dashboard() -> Html<&'static str> {
               <textarea id="node-command-payload"></textarea>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="dispatchNodeCommand()">Dispatch Command</button>
-              <button type="button" class="secondary" onclick="applyCommandTemplate(true)">Reset Payload</button>
-              <span class="tiny">`shell_exec` still follows approval and policy gates.</span>
+              <button type="button" onclick="dispatchNodeCommand()">派发命令</button>
+              <button type="button" class="secondary" onclick="applyCommandTemplate(true)">重置载荷</button>
+              <span class="tiny">`shell_exec` 仍然受审批与策略门控约束。</span>
             </div>
-            <div class="result-box" id="command-status">Select a node and dispatch a command.</div>
+            <div class="result-box" id="command-status">选择一个节点并派发命令。</div>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Recent Node Commands</h2>
-            <span class="tiny">Latest execution results for the selected node</span>
+            <h2>最近节点命令</h2>
+            <span class="tiny">当前所选节点的最新执行结果</span>
           </div>
           <table>
-            <thead><tr><th>Command</th><th>Status</th><th>Payload / Result</th></tr></thead>
+            <thead><tr><th>命令</th><th>状态</th><th>载荷 / 结果</th></tr></thead>
             <tbody id="command-rows"></tbody>
           </table>
           <div class="detail-card" style="margin-top:14px;">
             <div class="panel-head" style="margin-bottom:12px;">
-              <h2>Command Detail</h2>
-              <span class="tiny" id="command-detail-hint">Select a command row to inspect the full result.</span>
+              <h2>命令详情</h2>
+              <span class="tiny" id="command-detail-hint">选择一条命令记录以查看完整结果。</span>
             </div>
             <div class="detail-grid" id="command-detail-grid"></div>
-            <pre class="detail-pre" id="command-detail-pre">No command selected.</pre>
+            <pre class="detail-pre" id="command-detail-pre">尚未选择命令。</pre>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Settlements</h2>
-            <span class="tiny">Remote agent settlement activity</span>
+            <h2>结算</h2>
+            <span class="tiny">远端 Agent 结算活动</span>
           </div>
           <table>
-            <thead><tr><th>Card</th><th>Status</th><th>Amount</th></tr></thead>
+            <thead><tr><th>卡片</th><th>状态</th><th>金额</th></tr></thead>
             <tbody id="settlement-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Reconciliation Fabric</h2>
-            <span class="tiny">Cross-gateway settlement receipt delivery and acknowledgment</span>
+            <h2>对账链路</h2>
+            <span class="tiny">跨网关结算回执投递与确认</span>
           </div>
           <table>
-            <thead><tr><th>Settlement</th><th>Status</th><th>Counterparty</th></tr></thead>
+            <thead><tr><th>结算</th><th>状态</th><th>对端</th></tr></thead>
             <tbody id="reconciliation-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Agent Cards</h2>
-            <span class="tiny">Registry footprint</span>
+            <h2>投递 Outbox</h2>
+            <span class="tiny">面向结算回执与报价状态推送的持久化网关投递链</span>
+          </div>
+          <div class="detail-grid" id="delivery-outbox-summary-grid"></div>
+          <div class="result-box" id="delivery-outbox-status">正在等待 outbox 遥测数据。</div>
+          <div class="toolbar">
+            <button type="button" onclick="replayDeliveryOutboxDeadLetters()">批量重放死信</button>
+            <button type="button" class="secondary" onclick="refresh()">刷新 Outbox</button>
           </div>
           <table>
-            <thead><tr><th>Card</th><th>Hosted</th><th>Signals</th></tr></thead>
+            <thead><tr><th>链路</th><th>状态</th><th>尝试次数</th><th>下一动作</th><th>操作</th></tr></thead>
+            <tbody id="delivery-outbox-rows"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Agent Cards</h2>
+            <span class="tiny">注册面概览</span>
+          </div>
+          <table>
+            <thead><tr><th>卡片</th><th>托管方式</th><th>信号</th></tr></thead>
             <tbody id="card-rows"></tbody>
           </table>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Connector Matrix</h2>
-            <span class="tiny">Model, chat, and ingress readiness across global and China paths</span>
+            <h2>连接器矩阵</h2>
+            <span class="tiny">覆盖全球与中国路径的模型、聊天与入口就绪度</span>
           </div>
           <div class="detail-grid" id="connector-summary-grid"></div>
           <div class="feed" id="connector-matrix" style="margin-top:14px;"></div>
@@ -1172,135 +1208,146 @@ async fn dashboard() -> Html<&'static str> {
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Setup Navigator</h2>
-            <span class="tiny">Turn connector and ingress readiness into a concrete go-live checklist</span>
+            <h2>部署导航</h2>
+            <span class="tiny">把连接器与入口就绪度收敛成可执行的上线清单</span>
           </div>
           <div class="console-form">
             <div class="setup-grid" id="setup-summary-grid"></div>
             <div class="chip-row" id="setup-preset-chips"></div>
             <div class="form-grid">
               <div class="field">
-                <label for="setup-surface">Surface</label>
+                <label for="setup-surface">面向层</label>
                 <select id="setup-surface">
-                  <option value="model">Model Connector</option>
-                  <option value="chat">Chat Connector</option>
-                  <option value="ingress">Ingress Route</option>
+                  <option value="model">模型连接器</option>
+                  <option value="chat">聊天连接器</option>
+                  <option value="ingress">入口路由</option>
                 </select>
               </div>
               <div class="field">
-                <label for="setup-target">Target</label>
+                <label for="setup-target">目标</label>
                 <select id="setup-target"></select>
               </div>
             </div>
-            <div class="result-box" id="setup-navigator-status">Choose a surface to see required secrets, test routes, and next steps.</div>
+            <div class="result-box" id="setup-navigator-status">选择一个面向层以查看所需密钥、测试路径与下一步。</div>
+            <div class="feed" id="setup-guidance-feed"></div>
+            <div class="feed" id="setup-receipt-feed"></div>
             <div class="setup-requirements" id="setup-requirements"></div>
             <div class="field">
-              <label for="setup-env-block">Suggested Environment Block</label>
+              <label for="setup-env-block">建议环境变量块</label>
               <textarea id="setup-env-block" readonly></textarea>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="copySetupEnvBlock()">Copy Env Block</button>
-              <button type="button" class="secondary" onclick="loadSetupPreset('china')">China Go-Live</button>
-              <button type="button" class="secondary" onclick="loadSetupPreset('global')">Global MVP</button>
-              <button type="button" class="secondary" onclick="loadSetupPreset('ingress')">Ingress First</button>
+              <button type="button" onclick="verifySetupTarget()">验证目标</button>
+              <button type="button" onclick="copySetupEnvBlock()">复制环境变量</button>
+              <button type="button" class="secondary" onclick="loadSetupPreset('china')">中国上线</button>
+              <button type="button" class="secondary" onclick="loadSetupPreset('global')">全球 MVP</button>
+              <button type="button" class="secondary" onclick="loadSetupPreset('ingress')">入口优先</button>
             </div>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>Identity &amp; Onboarding</h2>
-            <span class="tiny">Bootstrap operator sessions, workspace context, and first-time node claims</span>
+            <h2>身份与入驻</h2>
+            <span class="tiny">初始化操作员会话、工作区上下文与首次节点认领</span>
           </div>
           <div class="console-form">
-            <div class="result-box" id="identity-status">Bootstrap an operator session to configure workspace identity and node onboarding.</div>
+            <div class="result-box" id="identity-status">先初始化操作员会话，再配置工作区身份与节点入驻。</div>
+            <div class="setup-grid" id="identity-readiness-grid"></div>
+            <div class="feed" id="identity-next-steps"></div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-bootstrap-token">Bootstrap Token</label>
+                <label for="identity-bootstrap-token">初始化令牌</label>
                 <input id="identity-bootstrap-token" type="text" value="dawn-dev-bootstrap" />
               </div>
               <div class="field">
-                <label for="identity-operator-name">Operator Name</label>
+                <label for="identity-operator-name">操作员名称</label>
                 <input id="identity-operator-name" type="text" value="console-operator" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-session-token">Operator Session Token</label>
-                <input id="identity-session-token" type="text" placeholder="Bootstrap to mint or paste an existing session token" />
+                <label for="identity-session-token">操作员会话令牌</label>
+                <input id="identity-session-token" type="text" placeholder="先初始化生成，或粘贴已有会话令牌" />
               </div>
               <div class="field">
-                <label for="identity-workspace-status">Onboarding Status</label>
+                <label for="identity-workspace-status">入驻状态</label>
                 <input id="identity-workspace-status" type="text" value="bootstrap_pending" />
               </div>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="bootstrapOperatorSession()">Bootstrap Session</button>
-              <button type="button" class="secondary" onclick="clearOperatorSession()">Clear Session</button>
-              <span class="tiny" id="identity-session-pill">No operator session</span>
+              <button type="button" onclick="bootstrapOperatorSession()">初始化会话</button>
+              <button type="button" class="secondary" onclick="clearOperatorSession()">清除会话</button>
+              <span class="tiny" id="identity-session-pill">当前没有操作员会话</span>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-workspace-name">Workspace Name</label>
+                <label for="identity-workspace-name">工作区名称</label>
                 <input id="identity-workspace-name" type="text" value="Dawn Agent Commerce" />
               </div>
               <div class="field">
-                <label for="identity-region">Region</label>
+                <label for="identity-region">区域</label>
                 <input id="identity-region" type="text" value="global" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-tenant-id">Tenant ID</label>
+                <label for="identity-tenant-id">租户 ID</label>
                 <input id="identity-tenant-id" type="text" value="dawn-labs" />
               </div>
               <div class="field">
-                <label for="identity-project-id">Project ID</label>
+                <label for="identity-project-id">项目 ID</label>
                 <input id="identity-project-id" type="text" value="agent-commerce" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-model-providers">Default Model Providers</label>
+                <label for="identity-model-providers">默认模型提供方</label>
                 <input id="identity-model-providers" type="text" value="deepseek,qwen" />
               </div>
               <div class="field">
-                <label for="identity-chat-platforms">Default Chat Platforms</label>
+                <label for="identity-chat-platforms">默认聊天平台</label>
                 <input id="identity-chat-platforms" type="text" value="feishu,wechat_official_account" />
               </div>
             </div>
             <div class="toolbar">
-              <button type="button" onclick="saveWorkspaceProfile()">Save Workspace Profile</button>
+              <button type="button" onclick="saveWorkspaceProfile()">保存工作区资料</button>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-claim-node-id">Node ID</label>
+                <label for="identity-claim-node-id">节点 ID</label>
                 <input id="identity-claim-node-id" type="text" value="node-cn-edge-01" />
               </div>
               <div class="field">
-                <label for="identity-claim-display-name">Node Display Name</label>
-                <input id="identity-claim-display-name" type="text" value="Shanghai Edge Node" />
+                <label for="identity-claim-display-name">节点显示名</label>
+                <input id="identity-claim-display-name" type="text" value="上海边缘节点" />
               </div>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="identity-claim-transport">Transport</label>
+                <label for="identity-claim-transport">传输方式</label>
                 <input id="identity-claim-transport" type="text" value="websocket" />
               </div>
               <div class="field">
-                <label for="identity-claim-expiry">Expiry Seconds</label>
+                <label for="identity-claim-expiry">过期秒数</label>
                 <input id="identity-claim-expiry" type="number" min="60" step="60" value="1800" />
               </div>
             </div>
             <div class="field">
-              <label for="identity-claim-capabilities">Requested Capabilities</label>
+              <label for="identity-claim-capabilities">请求能力</label>
               <input id="identity-claim-capabilities" type="text" value="system_info,process_snapshot,list_directory,read_file_preview,stat_path" />
             </div>
             <div class="toolbar">
-              <button type="button" onclick="issueNodeClaim()">Issue Node Claim</button>
+              <button type="button" onclick="issueNodeClaim()">签发节点认领</button>
             </div>
-            <div class="result-box" id="identity-claim-output">Issued node claims and launch URLs will appear here.</div>
+            <div class="result-box" id="identity-claim-output">签发后的节点认领与启动 URL 会显示在这里。</div>
+            <div class="toolbar">
+              <button type="button" class="secondary" onclick="copyLatestNodeClaimBundle('launchUrl')">复制启动 URL</button>
+              <button type="button" class="secondary" onclick="copyLatestNodeClaimBundle('claimToken')">复制认领令牌</button>
+              <button type="button" class="secondary" onclick="copyLatestNodeClaimBundle('envBlock')">复制环境变量</button>
+            </div>
             <div class="feed" id="identity-claim-feed"></div>
+            <div class="feed" id="identity-claim-history"></div>
           </div>
         </section>
       </div>
@@ -1310,9 +1357,9 @@ async fn dashboard() -> Html<&'static str> {
   <aside class="detail-drawer" id="detail-drawer">
     <div class="drawer-head">
       <div>
-        <div class="eyebrow" id="detail-drawer-eyebrow">Inspector</div>
-        <h2 class="drawer-title" id="detail-drawer-title">Detail Drawer</h2>
-        <div class="drawer-subtitle" id="detail-drawer-subtitle">Select an approval, command, settlement, or reconciliation record.</div>
+        <div class="eyebrow" id="detail-drawer-eyebrow">检查器</div>
+        <h2 class="drawer-title" id="detail-drawer-title">详情抽屉</h2>
+        <div class="drawer-subtitle" id="detail-drawer-subtitle">选择一条审批、命令、结算、对账或投递记录。</div>
       </div>
       <button type="button" class="icon-button" onclick="closeDetailDrawer()">×</button>
     </div>
@@ -1334,6 +1381,12 @@ async fn dashboard() -> Html<&'static str> {
     let consoleReconnectTimer = null;
     let latestConnectorStatus = null;
     let latestIngressStatus = null;
+    let latestIdentityStatus = null;
+    let latestDeliveryOutboxSummary = null;
+    let latestDeliveryOutbox = [];
+    let latestSetupVerificationReceipts = [];
+    let latestNodeClaimAuditEvents = [];
+    let latestNodeClaimBundle = null;
     let currentOperatorSessionToken = (() => {
       try {
         return window.localStorage.getItem("dawnOperatorSessionToken") || "";
@@ -1344,6 +1397,34 @@ async fn dashboard() -> Html<&'static str> {
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
+      browser_navigate: { sessionId: "browser-default", url: "https://example.com", approvalRequired: true },
+      browser_extract: { sessionId: "browser-default", selector: "main", limit: 3, limitChars: 600, approvalRequired: true },
+      browser_click: { sessionId: "browser-default", selector: "a", elementIndex: 0, approvalRequired: true },
+      browser_back: { sessionId: "browser-default", approvalRequired: true },
+      browser_focus: { sessionId: "browser-default", approvalRequired: true },
+      browser_close: { sessionId: "browser-default", approvalRequired: true },
+      browser_tabs: { sessionId: "browser-default", approvalRequired: true },
+      browser_snapshot: { sessionId: "browser-default", limit: 5, limitChars: 600, approvalRequired: true },
+      browser_type: { sessionId: "browser-default", selector: "input[name=q]", text: "dawn browser control", submit: false, approvalRequired: true },
+      browser_upload: { sessionId: "browser-default", selector: "input[type=file]", path: "uploads/demo.txt", submit: false, approvalRequired: true },
+      browser_download: { sessionId: "browser-default", selector: "a", elementIndex: 0, path: "downloads/result.bin", approvalRequired: true },
+      browser_form_fill: { sessionId: "browser-default", formSelector: "form", fields: { q: "dawn" }, approvalRequired: true },
+      browser_form_submit: { sessionId: "browser-default", formSelector: "form", fields: { q: "openclaw parity" }, approvalRequired: true },
+      browser_open: { url: "https://example.com", approvalRequired: true },
+      browser_search: { query: "Dawn browser control MVP", engine: "google", approvalRequired: true },
+      desktop_open: { target: "notepad", args: [], approvalRequired: true },
+      desktop_clipboard_set: { text: "hello from dawn", approvalRequired: true },
+      desktop_type_text: { text: "hello from dawn", delayMs: 250, approvalRequired: true },
+      desktop_key_press: { keys: "CTRL+L", delayMs: 150, approvalRequired: true },
+      desktop_windows_list: { limit: 10, approvalRequired: true },
+      desktop_window_focus: { title: "Notepad", approvalRequired: true },
+      desktop_wait_for_window: { processName: "notepad", timeoutMs: 8000, pollMs: 250, approvalRequired: true },
+      desktop_focus_app: { processName: "notepad", approvalRequired: true },
+      desktop_launch_and_focus: { target: "notepad", processName: "notepad", timeoutMs: 10000, approvalRequired: true },
+      desktop_mouse_move: { x: 400, y: 300, approvalRequired: true },
+      desktop_mouse_click: { button: "left", x: 400, y: 300, doubleClick: false, approvalRequired: true },
+      desktop_screenshot: { approvalRequired: true },
+      desktop_accessibility_snapshot: { processName: "notepad", depth: 2, childrenLimit: 20, approvalRequired: true },
       system_info: {},
       process_snapshot: { limit: 20 },
       list_directory: { path: ".", limit: 20 },
@@ -1354,6 +1435,34 @@ async fn dashboard() -> Html<&'static str> {
     const commandTemplateDescriptions = {
       agent_ping: "Fast liveness probe",
       list_capabilities: "Attested capability list",
+      browser_navigate: "Fetch and pin a browser session page snapshot",
+      browser_extract: "Extract text or links from the stored browser session DOM",
+      browser_click: "Follow a link from the stored browser session DOM",
+      browser_back: "Return to the previous page in browser session history",
+      browser_focus: "Make one lightweight browser session the active tab for later commands",
+      browser_close: "Close a lightweight browser session and promote the next active tab",
+      browser_tabs: "List the currently tracked lightweight browser sessions",
+      browser_snapshot: "Summarize headings, links, forms, and pending fields for a browser session",
+      browser_type: "Stage typed text against an input/textarea/select field and optionally submit its form",
+      browser_upload: "Stage a local file against a file input and optionally submit its form",
+      browser_download: "Download a URL or link target through the browser session cookie jar to local storage",
+      browser_form_fill: "Stage named form field values inside the browser session",
+      browser_form_submit: "Submit a DOM form through the browser session HTTP client",
+      browser_open: "Open an HTTP(S) URL in the default browser",
+      browser_search: "Launch a browser search via the default browser",
+      desktop_open: "Open a local app, file, folder, or URL on the host desktop",
+      desktop_clipboard_set: "Write text into the host clipboard",
+      desktop_type_text: "Type text into the currently focused desktop window",
+      desktop_key_press: "Send a keyboard shortcut to the currently focused desktop window",
+      desktop_windows_list: "Enumerate visible desktop windows for later focus and input",
+      desktop_window_focus: "Focus a visible desktop window by title or handle",
+      desktop_wait_for_window: "Poll until a visible desktop window appears",
+      desktop_focus_app: "Focus the first visible window for a named process",
+      desktop_launch_and_focus: "Launch an app and wait until its window becomes focusable",
+      desktop_mouse_move: "Move the desktop pointer to screen coordinates",
+      desktop_mouse_click: "Send a mouse click, optionally after moving to coordinates",
+      desktop_screenshot: "Capture a desktop screenshot to a PNG file on the host machine",
+      desktop_accessibility_snapshot: "Read a focused desktop window through the Windows accessibility tree",
       system_info: "OS, host, and runtime profile",
       process_snapshot: "Bounded process inventory",
       list_directory: "Directory listing with metadata",
@@ -1517,6 +1626,15 @@ async fn dashboard() -> Html<&'static str> {
       if (!value) return "—";
       return value.length > max ? `${value.slice(0, max)}…` : value;
     };
+    const formatTimestamp = (value) => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed <= 0) return "—";
+      try {
+        return new Date(parsed).toLocaleString();
+      } catch (_error) {
+        return String(value);
+      }
+    };
     const generateUuid = () => {
       if (window.crypto?.randomUUID) return window.crypto.randomUUID();
       return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
@@ -1529,11 +1647,16 @@ async fn dashboard() -> Html<&'static str> {
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
+    const humanizeToken = (value) => String(value ?? "")
+      .split("_")
+      .filter(Boolean)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join(" ");
     const badge = (value) => {
       const normalized = String(value || "").toLowerCase();
-      const tone = /complete|authorized|connected|acknowledged|task_created/.test(normalized)
+      const tone = /complete|authorized|connected|acknowledged|task_created|configured|trusted|local|ready|approved|session_created|workspace_updated/.test(normalized)
         ? "ok"
-        : /failed|rejected|disconnected/.test(normalized)
+        : /failed|rejected|disconnected|expired|revoked/.test(normalized)
           ? "bad"
           : "warn";
       return `<span class="status ${tone}">${value}</span>`;
@@ -1649,7 +1772,7 @@ async fn dashboard() -> Html<&'static str> {
       const nodeOptions = nodes.map((node) =>
         `<option value="${node.nodeId}">${node.displayName || node.nodeId}</option>`
       ).join("");
-      nodeSelect.innerHTML = nodeOptions || `<option value="">No nodes</option>`;
+      nodeSelect.innerHTML = nodeOptions || `<option value="">暂无节点</option>`;
       if (selectedNodeId && nodes.some((node) => node.nodeId === selectedNodeId)) {
         nodeSelect.value = selectedNodeId;
       }
@@ -1659,7 +1782,7 @@ async fn dashboard() -> Html<&'static str> {
       const currentCommand = commandSelect.value;
       commandSelect.innerHTML = commandTypes.map((commandType) =>
         `<option value="${commandType}">${commandType}</option>`
-      ).join("") || `<option value="">No supported commands</option>`;
+      ).join("") || `<option value="">暂无可用命令</option>`;
       if (currentCommand && commandTypes.includes(currentCommand)) {
         commandSelect.value = currentCommand;
       }
@@ -1672,7 +1795,7 @@ async fn dashboard() -> Html<&'static str> {
       const options = nodes.map((node) =>
         `<option value="${escapeHtml(node.nodeId)}">${escapeHtml(node.displayName || node.nodeId)}</option>`
       ).join("");
-      rolloutSelect.innerHTML = options || `<option value="">No nodes</option>`;
+      rolloutSelect.innerHTML = options || `<option value="">暂无节点</option>`;
       if (selectedNodeId && nodes.some((node) => node.nodeId === selectedNodeId)) {
         rolloutSelect.value = selectedNodeId;
       }
@@ -1682,10 +1805,10 @@ async fn dashboard() -> Html<&'static str> {
       if (!cardSelect) return;
       const selectedCardId = cardSelect.value;
       const options = cards.map((card) => {
-        const label = `${card.card?.name || card.cardId} · ${card.locallyHosted ? "local" : "remote"}`;
+        const label = `${card.card?.name || card.cardId} · ${card.locallyHosted ? "本地" : "远端"}`;
         return `<option value="${escapeHtml(card.cardId)}">${escapeHtml(label)}</option>`;
       }).join("");
-      cardSelect.innerHTML = options || `<option value="">No cards</option>`;
+      cardSelect.innerHTML = options || `<option value="">暂无卡片</option>`;
       if (selectedCardId && cards.some((card) => card.cardId === selectedCardId)) {
         cardSelect.value = selectedCardId;
       }
@@ -1742,17 +1865,229 @@ async fn dashboard() -> Html<&'static str> {
       const tokenInput = document.getElementById("identity-session-token");
       return String(tokenInput?.value || currentOperatorSessionToken || "").trim();
     }
-    function syncIdentityStudio(identityStatus, identitySessions, identityClaims) {
+    function renderReadinessFeed(items, emptyMessage) {
+      if (!Array.isArray(items) || items.length === 0) {
+        return `<div class="tiny">${escapeHtml(emptyMessage)}</div>`;
+      }
+      return items.map((item) => {
+        const actionLine = item.action
+          ? `<p><strong>Next:</strong> ${escapeHtml(item.action)}</p>`
+          : "";
+        const setupButton = item.surface && item.target
+          ? `<button type="button" class="secondary" onclick='focusSetupTarget(${JSON.stringify(item.surface)}, ${JSON.stringify(item.target)})'>Open In Setup Navigator</button>`
+          : "";
+        return `
+          <article class="feed-item">
+            <strong>${escapeHtml(item.label || item.key || "step")}</strong>
+            <p>${badge(item.status || "action_required")} · ${escapeHtml(item.detail || "Action required")}</p>
+            ${actionLine}
+            ${setupButton ? `<div class="approval-actions">${setupButton}</div>` : ""}
+          </article>
+        `;
+      }).join("");
+    }
+    function focusSetupTarget(surface, target) {
+      const surfaceSelect = document.getElementById("setup-surface");
+      const targetSelect = document.getElementById("setup-target");
+      if (!surfaceSelect || !targetSelect || !surface) return;
+      surfaceSelect.value = surface;
+      updateSetupNavigator(surface, latestConnectorStatus, latestIngressStatus, latestIdentityStatus, latestSetupVerificationReceipts);
+      if (target) {
+        targetSelect.value = target;
+      }
+      updateSetupNavigator(surfaceSelect.value, latestConnectorStatus, latestIngressStatus, latestIdentityStatus, latestSetupVerificationReceipts);
+      document.getElementById("setup-navigator-status")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    function rememberNodeClaimBundle(bundle) {
+      latestNodeClaimBundle = bundle ? {
+        claimId: bundle.claim?.claimId || "",
+        nodeId: bundle.claim?.nodeId || "",
+        displayName: bundle.claim?.displayName || "",
+        claimToken: bundle.claimToken || "",
+        tokenHint: bundle.tokenHint || "",
+        sessionUrl: bundle.sessionUrl || "",
+        launchUrl: bundle.launchUrl || "",
+        reissuedFromClaimId: bundle.reissuedFromClaimId || null
+      } : null;
+      return latestNodeClaimBundle;
+    }
+    function renderNodeClaimBundle(bundle) {
+      if (!bundle) {
+        return "Issue a node claim to mint a first-connect URL.";
+      }
+      const header = bundle.reissuedFromClaimId
+        ? `${badge("claim_reissued")} Reissued claim <code>${escapeHtml(bundle.claimId)}</code> for <strong>${escapeHtml(bundle.nodeId)}</strong> from <code>${escapeHtml(bundle.reissuedFromClaimId)}</code>.`
+        : `${badge("claim_issued")} Issued claim <code>${escapeHtml(bundle.claimId)}</code> for <strong>${escapeHtml(bundle.nodeId)}</strong>.`;
+      return `${header}<br /><code>${escapeHtml(bundle.launchUrl || bundle.sessionUrl)}</code><br /><code>DAWN_NODE_CLAIM_TOKEN=${escapeHtml(bundle.claimToken)}</code><br /><span class="tiny">token hint ${escapeHtml(bundle.tokenHint || "—")}</span>`;
+    }
+    async function copyLatestNodeClaimBundle(kind) {
+      const output = document.getElementById("identity-claim-output");
+      if (!latestNodeClaimBundle) {
+        if (output) output.textContent = "Issue or reissue a node claim first.";
+        return;
+      }
+      const value = kind === "launchUrl"
+        ? latestNodeClaimBundle.launchUrl
+        : kind === "claimToken"
+          ? latestNodeClaimBundle.claimToken
+          : `DAWN_NODE_CLAIM_TOKEN=${latestNodeClaimBundle.claimToken}\nDAWN_NODE_LAUNCH_URL=${latestNodeClaimBundle.launchUrl}`;
+      try {
+        await navigator.clipboard.writeText(value);
+        if (output) {
+          output.dataset.touched = "true";
+          output.innerHTML = `${renderNodeClaimBundle(latestNodeClaimBundle)}<br /><span class="tiny">${escapeHtml(kind)} copied to clipboard.</span>`;
+        }
+      } catch (_error) {
+        if (output) {
+          output.dataset.touched = "true";
+          output.innerHTML = `${renderNodeClaimBundle(latestNodeClaimBundle)}<br /><span class="tiny">Clipboard write failed.</span>`;
+        }
+      }
+    }
+    async function verifySetupTarget() {
+      const sessionToken = readOperatorSessionToken();
+      const current = currentSetupProfile();
+      const status = document.getElementById("setup-navigator-status");
+      if (!sessionToken) {
+        window.alert("Bootstrap or paste an operator session token first.");
+        return;
+      }
+      if (!current.profile || !current.surface || !current.target) {
+        if (status) status.textContent = "Choose a surface and target before running verification.";
+        return;
+      }
+      try {
+        const response = await postJson("/api/gateway/identity/setup-verifications", {
+          sessionToken,
+          surface: current.surface,
+          target: current.target
+        });
+        if (status) {
+          status.innerHTML = `${badge(response.receipt?.status || "ready")} ${escapeHtml(response.receipt?.summary || "Verification recorded.")}`;
+        }
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+      }
+    }
+    async function revokeNodeClaim(claimId, nodeId) {
+      const sessionToken = readOperatorSessionToken();
+      const output = document.getElementById("identity-claim-output");
+      if (!sessionToken) {
+        window.alert("Bootstrap or paste an operator session token first.");
+        return;
+      }
+      try {
+        const response = await postJson(`/api/gateway/identity/node-claims/${encodeURIComponent(claimId)}/revoke`, {
+          sessionToken,
+          reason: "revoked from control center"
+        });
+        if (output) {
+          output.dataset.touched = "true";
+          output.innerHTML = `${badge("revoked")} Revoked claim <code>${escapeHtml(response.claim.claimId)}</code> for <strong>${escapeHtml(response.claim.nodeId)}</strong>.`;
+        }
+        await refresh(nodeId);
+      } catch (error) {
+        if (output) {
+          output.dataset.touched = "true";
+          output.textContent = error.message;
+        }
+      }
+    }
+    async function reissueNodeClaim(claimId, nodeId) {
+      const sessionToken = readOperatorSessionToken();
+      const output = document.getElementById("identity-claim-output");
+      if (!sessionToken) {
+        window.alert("Bootstrap or paste an operator session token first.");
+        return;
+      }
+      try {
+        const response = await postJson(`/api/gateway/identity/node-claims/${encodeURIComponent(claimId)}/reissue`, {
+          sessionToken,
+          expiresInSeconds: Number(document.getElementById("identity-claim-expiry")?.value || 1800)
+        });
+        const bundle = rememberNodeClaimBundle(response);
+        if (output) {
+          output.dataset.touched = "true";
+          output.innerHTML = renderNodeClaimBundle(bundle);
+        }
+        await refresh(nodeId);
+      } catch (error) {
+        if (output) {
+          output.dataset.touched = "true";
+          output.textContent = error.message;
+        }
+      }
+    }
+    function renderSetupReceiptFeed(surface, target, receipts) {
+      const matching = (receipts || []).filter((receipt) =>
+        receipt.surface === surface && receipt.target === target
+      ).slice(0, 3);
+      return matching.map((receipt) => `
+        <article class="feed-item">
+          <strong>${escapeHtml(receipt.label || `${surface}:${target}`)}</strong>
+          <p>${badge(receipt.status || "action_required")} · ${escapeHtml(receipt.summary || receipt.detail || "Verification recorded")}</p>
+          <p>${escapeHtml(receipt.detail || "No detail")} · ${escapeHtml(formatTimestamp(receipt.createdAtUnixMs))}</p>
+        </article>
+      `).join("") || `<div class="tiny">No verification receipts recorded for this target yet.</div>`;
+    }
+    function renderNodeClaimAuditFeed(events) {
+      return (events || []).slice(0, 6).map((event) => `
+        <article class="feed-item">
+          <strong>${escapeHtml(event.nodeId || "node claim")}</strong>
+          <p>${badge(event.eventType || "event")} · ${escapeHtml(event.detail || "audit event")}</p>
+          <p>${escapeHtml(event.actor || "system")} · ${escapeHtml(formatTimestamp(event.createdAtUnixMs))}${event.tokenHint ? ` · token ${escapeHtml(event.tokenHint)}` : ""}</p>
+        </article>
+      `).join("") || `<div class="tiny">No node-claim audit history yet.</div>`;
+    }
+    function syncIdentityStudio(identityStatus, identitySessions, identityClaims, nodes, nodeClaimAuditEvents) {
       const workspace = identityStatus?.workspace || {};
+      const readiness = identityStatus?.readiness || {};
+      const metrics = readiness.metrics || {};
       const status = document.getElementById("identity-status");
+      const readinessGrid = document.getElementById("identity-readiness-grid");
+      const nextSteps = document.getElementById("identity-next-steps");
       const claimFeed = document.getElementById("identity-claim-feed");
+      const claimHistory = document.getElementById("identity-claim-history");
       const claimOutput = document.getElementById("identity-claim-output");
+      const nodeIndex = new Map((nodes || []).map((node) => [node.nodeId, node]));
       const sessionToken = setOperatorSessionToken(readOperatorSessionToken());
       const activeSessions = Array.isArray(identitySessions)
         ? identitySessions.filter((session) => !session.revoked).length
         : 0;
       if (status) {
-        status.innerHTML = `${badge(identityStatus?.bootstrapMode || "bootstrap")} <strong>${escapeHtml(workspace.displayName || "Workspace")}</strong> · ${escapeHtml(workspace.region || "global")} · sessions <strong>${activeSessions}</strong> · pending claims <strong>${identityStatus?.pendingNodeClaims ?? 0}</strong>`;
+        status.innerHTML = `${badge(readiness.overallStatus || identityStatus?.bootstrapMode || "bootstrap")} <strong>${escapeHtml(workspace.displayName || "Workspace")}</strong> · ${escapeHtml(workspace.region || "global")} · sessions <strong>${activeSessions}</strong> · pending claims <strong>${identityStatus?.pendingNodeClaims ?? 0}</strong><br /><span class="tiny">${escapeHtml(readiness.nextStep || "Continue the onboarding checklist below.")}</span>`;
+      }
+      if (readinessGrid) {
+        readinessGrid.innerHTML = [
+          {
+            label: "Completion",
+            value: `${readiness.completionPercent ?? 0}%`,
+            note: `${readiness.readySteps ?? 0}/${readiness.totalSteps ?? 0} checklist items ready`
+          },
+          {
+            label: "Trusted Nodes",
+            value: `${metrics.trustedNodes ?? 0}/${metrics.connectedNodes ?? 0}`,
+            note: "verified / connected"
+          },
+          {
+            label: "Approval Path",
+            value: metrics.publicBaseUrlConfigured ? "public" : "local-only",
+            note: `${metrics.pendingEndUserSessions ?? 0} live end-user sessions`
+          }
+        ].map((card) => `
+          <article class="setup-card">
+            <span>${escapeHtml(card.label)}</span>
+            <strong>${escapeHtml(card.value)}</strong>
+            <p>${escapeHtml(card.note)}</p>
+          </article>
+        `).join("");
+      }
+      if (nextSteps) {
+        nextSteps.innerHTML = renderReadinessFeed(
+          (readiness.checklist || []).filter((item) => item.status !== "ready").slice(0, 4),
+          "Identity checklist is green. Bootstrap, workspace, and node onboarding all look ready."
+        );
       }
       if (claimOutput && !claimOutput.dataset.touched) {
         claimOutput.innerHTML = sessionToken
@@ -1773,13 +2108,31 @@ async fn dashboard() -> Html<&'static str> {
       assignValue("identity-workspace-status", workspace.onboardingStatus || "bootstrap_pending");
 
       if (claimFeed) {
-        claimFeed.innerHTML = (identityClaims || []).slice(0, 6).map((claim) => `
-          <article class="feed-item">
-            <strong>${escapeHtml(claim.displayName || claim.nodeId)}</strong>
-            <p><code>${escapeHtml(claim.nodeId)}</code> · ${badge(claim.status)} · expires ${escapeHtml(claim.expiresAtUnixMs)}</p>
-            <p>${escapeHtml((claim.requestedCapabilities || []).join(", ") || "no declared capabilities")}</p>
-          </article>
-        `).join("") || `<div class="tiny">No node claims issued yet.</div>`;
+        claimFeed.innerHTML = (identityClaims || []).slice(0, 6).map((claim) => {
+          const node = nodeIndex.get(claim.nodeId);
+          const nodeStatus = node
+            ? (node.attestationVerified ? badge("trusted") : badge(node.connected ? "connected" : node.status || "registered"))
+            : `<span class="tiny">awaiting first connect</span>`;
+          const actions = [];
+          if (claim.status === "pending" && sessionToken) {
+            actions.push(`<button type="button" class="secondary" onclick="revokeNodeClaim('${claim.claimId}', '${claim.nodeId}')">Revoke Claim</button>`);
+          }
+          if (claim.status !== "consumed" && sessionToken) {
+            actions.push(`<button type="button" class="secondary" onclick="reissueNodeClaim('${claim.claimId}', '${claim.nodeId}')">Reissue Claim</button>`);
+          }
+          return `
+            <article class="feed-item">
+              <strong>${escapeHtml(claim.displayName || claim.nodeId)}</strong>
+              <p><code>${escapeHtml(claim.nodeId)}</code> · ${badge(claim.status)} · ${nodeStatus}</p>
+              <p>expires ${escapeHtml(formatTimestamp(claim.expiresAtUnixMs))}</p>
+              <p>${escapeHtml((claim.requestedCapabilities || []).join(", ") || "no declared capabilities")}</p>
+              ${actions.length ? `<div class="approval-actions">${actions.join("")}</div>` : ""}
+            </article>
+          `;
+        }).join("") || `<div class="tiny">No node claims issued yet.</div>`;
+      }
+      if (claimHistory) {
+        claimHistory.innerHTML = renderNodeClaimAuditFeed(nodeClaimAuditEvents);
       }
     }
     async function bootstrapOperatorSession() {
@@ -1806,6 +2159,7 @@ async fn dashboard() -> Html<&'static str> {
     }
     function clearOperatorSession() {
       setOperatorSessionToken("");
+      latestNodeClaimBundle = null;
       const output = document.getElementById("identity-claim-output");
       if (output) {
         output.dataset.touched = "";
@@ -1863,10 +2217,10 @@ async fn dashboard() -> Html<&'static str> {
           requestedCapabilities: splitList(document.getElementById("identity-claim-capabilities")?.value),
           expiresInSeconds: Number(document.getElementById("identity-claim-expiry")?.value || 1800)
         });
-        const sessionUrl = String(response.sessionUrl || "").replace("{claimToken}", encodeURIComponent(response.claimToken));
+        const bundle = rememberNodeClaimBundle(response);
         if (output) {
           output.dataset.touched = "true";
-          output.innerHTML = `Issued claim <code>${escapeHtml(response.claim.claimId)}</code> for <strong>${escapeHtml(response.claim.nodeId)}</strong>.<br /><code>${escapeHtml(sessionUrl)}</code><br /><code>DAWN_NODE_CLAIM_TOKEN=${escapeHtml(response.claimToken)}</code>`;
+          output.innerHTML = renderNodeClaimBundle(bundle);
         }
         await refresh(response.claim.nodeId);
       } catch (error) {
@@ -1996,7 +2350,7 @@ async fn dashboard() -> Html<&'static str> {
         return `${env}=`;
       }).join("\n");
     }
-    function updateSetupNavigator(surface, connectorStatus, ingressStatus) {
+    function updateSetupNavigator(surface, connectorStatus, ingressStatus, identityStatus = latestIdentityStatus, setupReceipts = latestSetupVerificationReceipts) {
       const surfaceSelect = document.getElementById("setup-surface");
       const targetSelect = document.getElementById("setup-target");
       const summaryGrid = document.getElementById("setup-summary-grid");
@@ -2004,7 +2358,9 @@ async fn dashboard() -> Html<&'static str> {
       const status = document.getElementById("setup-navigator-status");
       const envBlock = document.getElementById("setup-env-block");
       const presetChips = document.getElementById("setup-preset-chips");
-      if (!surfaceSelect || !targetSelect || !summaryGrid || !requirements || !status || !envBlock || !presetChips) return;
+      const guidanceFeed = document.getElementById("setup-guidance-feed");
+      const receiptFeed = document.getElementById("setup-receipt-feed");
+      if (!surfaceSelect || !targetSelect || !summaryGrid || !requirements || !status || !envBlock || !presetChips || !guidanceFeed || !receiptFeed) return;
 
       if (surface && surfaceSelect.value !== surface) {
         surfaceSelect.value = surface;
@@ -2014,7 +2370,7 @@ async fn dashboard() -> Html<&'static str> {
       const previousTarget = targetSelect.value;
       targetSelect.innerHTML = options.map((option) =>
         `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)} · ${escapeHtml(option.region)}</option>`
-      ).join("") || `<option value="">No targets</option>`;
+      ).join("") || `<option value="">暂无目标</option>`;
       if (previousTarget && options.some((option) => option.key === previousTarget)) {
         targetSelect.value = previousTarget;
       }
@@ -2027,21 +2383,43 @@ async fn dashboard() -> Html<&'static str> {
       const profile = setupProfiles[surfaceSelect.value]?.[targetSelect.value] || null;
       const configuredCount = options.filter((entry) => entry.configured).length;
       const regionCount = options.filter((entry) => entry.region === "china").length;
+      const readinessItems = (identityStatus?.readiness?.checklist || []).filter((item) => {
+        if (!item?.surface) {
+          return surfaceSelect.value === "ingress" && item.key === "public_gateway_url";
+        }
+        return item.surface === surfaceSelect.value;
+      });
+      const pendingReadinessItems = readinessItems.filter((item) => item.status !== "ready");
+      const nextGap = readinessItems.find((item) => item.status !== "ready");
+      const targetReceipts = (setupReceipts || []).filter((receipt) =>
+        receipt.surface === surfaceSelect.value && receipt.target === (option?.key || targetSelect.value)
+      );
+      const latestReceipt = targetReceipts[0] || null;
       summaryGrid.innerHTML = [
         {
-          label: "Configured",
+          label: "已配置",
           value: `${configuredCount}/${options.length || 0}`,
-          note: "Surfaces ready right now"
+          note: "当前已就绪目标"
         },
         {
-          label: "China Paths",
+          label: "中国路径",
           value: `${regionCount}`,
-          note: "Domestic connectors or routes"
+          note: "国内连接器或路由"
         },
         {
-          label: "Surface",
+          label: "面向层",
           value: surfaceSelect.value,
-          note: "Current setup lens"
+          note: "当前部署视角"
+        },
+        {
+          label: "下一缺口",
+          value: nextGap ? nextGap.label : "已覆盖",
+          note: nextGap ? nextGap.status : "该面向层默认路径已接通"
+        },
+        {
+          label: "最近验证",
+          value: latestReceipt ? latestReceipt.status : "无",
+          note: latestReceipt ? formatTimestamp(latestReceipt.createdAtUnixMs) : "运行“验证目标”以保存回执"
         }
       ].map((card) => `
         <article class="setup-card">
@@ -2052,33 +2430,39 @@ async fn dashboard() -> Html<&'static str> {
       `).join("");
 
       presetChips.innerHTML = [
-        ["china", "China Go-Live"],
-        ["global", "Global MVP"],
-        ["ingress", "Ingress First"]
+        ["china", "中国上线"],
+        ["global", "全球 MVP"],
+        ["ingress", "入口优先"]
       ].map(([preset, label]) => `
         <button type="button" class="chip" onclick="loadSetupPreset('${preset}')">${escapeHtml(label)}</button>
       `).join("");
+      guidanceFeed.innerHTML = renderReadinessFeed(
+        (pendingReadinessItems.length ? pendingReadinessItems : readinessItems).slice(0, 3),
+        "当前这个面向层没有映射到新的入驻阻塞项。"
+      );
+      receiptFeed.innerHTML = renderSetupReceiptFeed(surfaceSelect.value, option?.key || targetSelect.value, setupReceipts);
 
       if (!profile || !option) {
-        requirements.innerHTML = `<div class="setup-requirement"><strong>No target selected</strong><p>Choose a surface and target to see setup instructions.</p></div>`;
-        status.textContent = "Choose a surface to see required secrets, test routes, and next steps.";
+        requirements.innerHTML = `<div class="setup-requirement"><strong>尚未选择目标</strong><p>选择面向层与目标后，这里会显示部署说明。</p></div>`;
+        status.textContent = "选择一个面向层以查看所需密钥、测试路径与下一步。";
         envBlock.value = "";
+        receiptFeed.innerHTML = `<div class="tiny">这个目标还没有验证回执。</div>`;
         return;
       }
 
-      status.innerHTML = `${option.configured ? badge("configured") : badge("missing")} <strong>${escapeHtml(profile.label)}</strong> · ${escapeHtml(profile.region)} · ${escapeHtml(profile.mode)} · test via <code>${escapeHtml(profile.endpoint)}</code>`;
+      status.innerHTML = `${option.configured ? badge("configured") : badge("missing")} <strong>${escapeHtml(profile.label)}</strong> · ${escapeHtml(profile.region)} · ${escapeHtml(profile.mode)} · test via <code>${escapeHtml(profile.endpoint)}</code>${latestReceipt ? `<br /><span class="tiny">Last verification: ${escapeHtml(formatTimestamp(latestReceipt.createdAtUnixMs))} · ${escapeHtml(latestReceipt.summary || latestReceipt.status)}</span>` : ""}${nextGap ? `<br /><span class="tiny">${escapeHtml(nextGap.action || nextGap.detail)}</span>` : ""}`;
       requirements.innerHTML = [
         {
-          title: "Secrets / Env Vars",
+          title: "密钥 / 环境变量",
           body: profile.envs.join(", ")
         },
         {
-          title: "Activation Path",
+          title: "启用路径",
           body: profile.note
         },
         {
-          title: "Verification",
-          body: `After setting the variables, confirm readiness in Connector Matrix and test ${profile.endpoint}.`
+          title: "验证方式",
+          body: `设置变量后，在连接器矩阵里确认就绪状态，并测试 ${profile.endpoint}。`
         }
       ].map((item) => `
         <article class="setup-requirement">
@@ -2100,9 +2484,9 @@ async fn dashboard() -> Html<&'static str> {
       const next = presets[preset];
       if (!next) return;
       surfaceSelect.value = next.surface;
-      updateSetupNavigator(next.surface, latestConnectorStatus, latestIngressStatus);
+      updateSetupNavigator(next.surface, latestConnectorStatus, latestIngressStatus, latestIdentityStatus, latestSetupVerificationReceipts);
       targetSelect.value = next.target;
-      updateSetupNavigator(next.surface, latestConnectorStatus, latestIngressStatus);
+      updateSetupNavigator(next.surface, latestConnectorStatus, latestIngressStatus, latestIdentityStatus, latestSetupVerificationReceipts);
     }
     async function copySetupEnvBlock() {
       const value = document.getElementById("setup-env-block")?.value || "";
@@ -2116,6 +2500,110 @@ async fn dashboard() -> Html<&'static str> {
         if (status) status.innerHTML = `${badge("copied")} Suggested environment block copied to clipboard.`;
       } catch (_error) {
         if (status) status.textContent = "Clipboard write failed. Copy directly from the environment block.";
+      }
+    }
+    function deliveryOutboxPriority(record) {
+      const normalized = String(record?.status || "");
+      if (normalized === "failed") return 0;
+      if (normalized === "retry_scheduled") return 1;
+      if (normalized === "queued") return 2;
+      return 3;
+    }
+    function renderDeliveryOutboxPanel(summary, records) {
+      const summaryGrid = document.getElementById("delivery-outbox-summary-grid");
+      const status = document.getElementById("delivery-outbox-status");
+      const rows = document.getElementById("delivery-outbox-rows");
+      if (!summaryGrid || !status || !rows) return;
+
+      const pendingCount = summary?.pendingCount ?? 0;
+      const failedCount = summary?.failedCount ?? 0;
+      const deliveredCount = summary?.deliveredCount ?? 0;
+      summaryGrid.innerHTML = renderDrawerMetrics([
+        ["待处理", pendingCount],
+        ["失败", failedCount],
+        ["已送达", deliveredCount],
+        ["回执", summary?.settlementReceiptCount ?? 0],
+        ["报价状态", summary?.quoteStateCount ?? 0],
+        ["下次重试", summary?.nextAttemptAtUnixMs ? formatTimestamp(summary.nextAttemptAtUnixMs) : "—"]
+      ]);
+      if (failedCount > 0) {
+        status.innerHTML = `${badge("failed")} 有 <strong>${failedCount}</strong> 条投递记录需要操作员处理。${summary?.lastFailureAtUnixMs ? ` 最近一次终态失败：<code>${escapeHtml(formatTimestamp(summary.lastFailureAtUnixMs))}</code>。` : ""}`;
+      } else if (pendingCount > 0) {
+        status.innerHTML = `${badge("retrying")} Outbox 当前有 <strong>${pendingCount}</strong> 条排队或重试中的投递。${summary?.oldestPendingCreatedAtUnixMs ? ` 最早待处理项创建于 <code>${escapeHtml(formatTimestamp(summary.oldestPendingCreatedAtUnixMs))}</code>。` : ""}`;
+      } else {
+        status.innerHTML = `${badge("ready")} 当前没有待处理或失败的投递记录。`;
+      }
+
+      const visible = [...(records || [])]
+        .sort((left, right) => {
+          const priorityDelta = deliveryOutboxPriority(left) - deliveryOutboxPriority(right);
+          if (priorityDelta !== 0) return priorityDelta;
+          return (Number(right.updatedAtUnixMs) || 0) - (Number(left.updatedAtUnixMs) || 0);
+        })
+        .slice(0, 8);
+      rows.innerHTML = visible.map((record) => {
+        const routeId = record.quoteId || record.settlementId || record.deliveryId;
+        const nextAction = record.status === "delivered"
+          ? (record.deliveredAtUnixMs ? `已送达 ${formatTimestamp(record.deliveredAtUnixMs)}` : "已送达")
+          : (record.nextAttemptAtUnixMs ? `重试于 ${formatTimestamp(record.nextAttemptAtUnixMs)}` : "等待中");
+        return `
+          <tr class="interactive-row" onclick="openDeliveryOutboxDetail('${record.deliveryId}')">
+            <td>
+              <strong>${escapeHtml(humanizeToken(record.deliveryKind))}</strong>
+              <div class="tiny"><code>${escapeHtml(routeId)}</code></div>
+            </td>
+            <td>${badge(record.status)}</td>
+            <td><code>${escapeHtml(`${record.attemptCount}/${record.maxAttempts}`)}</code></td>
+            <td>${escapeHtml(nextAction)}</td>
+            <td>
+              <button type="button" class="secondary" onclick="event.stopPropagation(); openDeliveryOutboxDetail('${record.deliveryId}')">查看</button>
+              ${record.status !== "delivered"
+                ? `<button type="button" onclick="event.stopPropagation(); retryDeliveryOutbox('${record.deliveryId}', false)">重试</button>`
+                : ""}
+            </td>
+          </tr>`;
+      }).join("") || `<tr><td colspan="5" class="tiny">当前还没有 delivery outbox 记录。</td></tr>`;
+    }
+    async function openDeliveryOutboxDetail(deliveryId) {
+      try {
+        const delivery = await fetchJson(`/api/gateway/agent-cards/delivery-outbox/${encodeURIComponent(deliveryId)}`);
+        openDetailDrawer({
+          kind: "deliveryOutbox",
+          delivery
+        });
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    async function retryDeliveryOutbox(deliveryId, reopen = true) {
+      const panelStatus = document.getElementById("delivery-outbox-status");
+      try {
+        const delivery = await postJson(`/api/gateway/agent-cards/delivery-outbox/${encodeURIComponent(deliveryId)}/retry`, {});
+        await refresh();
+        if (panelStatus) {
+          panelStatus.innerHTML = `${badge("queued")} 投递 <code>${escapeHtml(delivery.deliveryId)}</code> 已重新入队并立即处理。`;
+        }
+        if (reopen) {
+          openDetailDrawer({
+            kind: "deliveryOutbox",
+            delivery
+          });
+        }
+      } catch (error) {
+        if (panelStatus) panelStatus.textContent = error.message;
+        if (reopen) setDrawerStatus(error.message, true);
+      }
+    }
+    async function replayDeliveryOutboxDeadLetters() {
+      const panelStatus = document.getElementById("delivery-outbox-status");
+      try {
+        const response = await postJson("/api/gateway/agent-cards/delivery-outbox-dead-letter/replay", { limit: 12 });
+        await refresh();
+        if (panelStatus) {
+          panelStatus.innerHTML = `${badge("queued")} 已重放 <strong>${escapeHtml(response.replayedCount ?? 0)}</strong> / <strong>${escapeHtml(response.matchedCount ?? 0)}</strong> 条死信记录。`;
+        }
+      } catch (error) {
+        if (panelStatus) panelStatus.textContent = error.message;
       }
     }
     function selectCommand(commandId) {
@@ -2226,13 +2714,13 @@ async fn dashboard() -> Html<&'static str> {
           </div>
         ` : ""}
         <div class="field">
-          <label for="approval-reason">Reason</label>
-          <textarea id="approval-reason" placeholder="Record why this action should proceed or be rejected.">${escapeHtml(defaultReason)}</textarea>
+          <label for="approval-reason">原因说明</label>
+          <textarea id="approval-reason" placeholder="记录这次操作应当放行或拒绝的原因。">${escapeHtml(defaultReason)}</textarea>
         </div>
         <div class="toolbar">
-          <button type="button" onclick="submitDrawerApproval('approve')">Approve</button>
-          <button type="button" class="secondary" onclick="submitDrawerApproval('reject')">Reject</button>
-          <button type="button" class="secondary" onclick="openApprovalDetail('${approval.approvalId}')">Reload</button>
+          <button type="button" onclick="submitDrawerApproval('approve')">批准</button>
+          <button type="button" class="secondary" onclick="submitDrawerApproval('reject')">拒绝</button>
+          <button type="button" class="secondary" onclick="openApprovalDetail('${approval.approvalId}')">重新加载</button>
         </div>
       `;
     }
@@ -2324,12 +2812,12 @@ async fn dashboard() -> Html<&'static str> {
         </article>
       `);
       grid.innerHTML = [...skillCards, ...agentCardsMarkup].join("")
-        || `<article class="catalog-card"><strong>No marketplace matches</strong><div class="catalog-meta">Broaden the search or switch the catalog kind filter.</div></article>`;
+        || `<article class="catalog-card"><strong>没有匹配的市场结果</strong><div class="catalog-meta">请放宽搜索条件，或切换目录类型筛选。</div></article>`;
     }
     async function loadMarketplaceCatalog() {
       const status = document.getElementById("marketplace-catalog-status");
       try {
-        if (status) status.textContent = "Refreshing marketplace catalog…";
+        if (status) status.textContent = "正在刷新市场目录…";
         const catalog = await fetchJson(`/api/gateway/marketplace/catalog?${currentMarketplaceCatalogQuery()}`);
         renderMarketplaceCatalog(catalog);
       } catch (error) {
@@ -2351,9 +2839,9 @@ async fn dashboard() -> Html<&'static str> {
       setDrawerStatus("");
 
       if (!state) {
-        eyebrow.textContent = "Inspector";
-        title.textContent = "Detail Drawer";
-        subtitle.textContent = "Select an approval, command, settlement, or reconciliation record.";
+        eyebrow.textContent = "检查器";
+        title.textContent = "详情抽屉";
+        subtitle.textContent = "选择一条审批、命令、结算、对账或投递记录。";
         meta.innerHTML = "";
         actions.innerHTML = "";
         pre.textContent = "Nothing selected.";
@@ -2475,6 +2963,58 @@ async fn dashboard() -> Html<&'static str> {
             : [])
         ]);
         pre.textContent = formatJsonBlock(reconciliation);
+        return;
+      }
+
+      if (state.kind === "deliveryOutbox") {
+        const delivery = state.delivery;
+        eyebrow.textContent = "投递 Outbox";
+        title.textContent = delivery.quoteId || delivery.settlementId || delivery.deliveryId;
+        subtitle.textContent = `${humanizeToken(delivery.deliveryKind)} · ${delivery.cardId}`;
+        meta.innerHTML = renderDrawerMetrics([
+          ["状态", delivery.status],
+          ["尝试次数", `${delivery.attemptCount}/${delivery.maxAttempts}`],
+          ["目标", delivery.targetUrl],
+          ["HTTP", delivery.lastHttpStatus || "—"],
+          ["下次重试", delivery.status === "delivered"
+            ? (delivery.deliveredAtUnixMs ? formatTimestamp(delivery.deliveredAtUnixMs) : "—")
+            : (delivery.nextAttemptAtUnixMs ? formatTimestamp(delivery.nextAttemptAtUnixMs) : "—")]
+        ]);
+        actions.innerHTML = renderDrawerActions([
+          {
+            label: "刷新",
+            onclick: `openDeliveryOutboxDetail('${delivery.deliveryId}')`,
+            secondary: true
+          },
+          ...(delivery.status !== "delivered"
+            ? [{
+                label: "立即重试",
+                onclick: `retryDeliveryOutbox('${delivery.deliveryId}')`
+              }]
+            : []),
+          ...(delivery.reconciliationId
+            ? [{
+                label: "回执账本",
+                onclick: `openReconciliationDetail('${delivery.reconciliationId}')`,
+                secondary: true
+              }]
+            : []),
+          ...(delivery.settlementId
+            ? [{
+                label: "结算",
+                onclick: `openSettlementDetail('${delivery.settlementId}')`,
+                secondary: true
+              }]
+            : []),
+          ...(delivery.quoteId
+            ? [{
+                label: "报价账本",
+                onclick: `openQuoteDetail(decodeURIComponent('${encodeURIComponent(delivery.quoteId)}'))`,
+                secondary: true
+              }]
+            : [])
+        ]);
+        pre.textContent = formatJsonBlock(delivery);
         return;
       }
 
@@ -2890,9 +3430,9 @@ async fn dashboard() -> Html<&'static str> {
       if (!grid || !pre || !hint) return;
 
       if (!command) {
-        hint.textContent = "Select a command row to inspect the full result.";
+        hint.textContent = "选择一条命令记录以查看完整结果。";
         grid.innerHTML = "";
-        pre.textContent = "No command selected.";
+        pre.textContent = "尚未选择命令。";
         return;
       }
 
@@ -2970,7 +3510,7 @@ async fn dashboard() -> Html<&'static str> {
       }
     }
     async function refresh(preferredNodeId) {
-      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, reconciliation, marketplaceCatalog, connectorStatus, ingressStatus, identityStatus, identitySessions, identityClaims] = await Promise.all([
+      const [tasks, nodes, settlements, cards, ingress, approvals, invocations, quotes, reconciliation, deliveryOutboxSummary, deliveryOutbox, marketplaceCatalog, connectorStatus, ingressStatus, identityStatus, identitySessions, identityClaims, setupVerificationReceipts, nodeClaimAuditEvents] = await Promise.all([
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJson("/api/gateway/agent-cards/settlements"),
@@ -2980,15 +3520,24 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/gateway/agent-cards/invocations"),
         fetchJson("/api/gateway/agent-cards/quotes"),
         fetchJson("/api/gateway/agent-cards/reconciliation"),
+        fetchJson("/api/gateway/agent-cards/delivery-outbox-summary"),
+        fetchJson("/api/gateway/agent-cards/delivery-outbox?limit=24"),
         fetchJson(`/api/gateway/marketplace/catalog?${currentMarketplaceCatalogQuery()}`),
         fetchJson("/api/gateway/connectors/status"),
         fetchJson("/api/gateway/ingress/status"),
         fetchJson("/api/gateway/identity/status"),
         fetchJson("/api/gateway/identity/sessions"),
-        fetchJson("/api/gateway/identity/node-claims")
+        fetchJson("/api/gateway/identity/node-claims"),
+        fetchJson("/api/gateway/identity/setup-verifications?limit=12"),
+        fetchJson("/api/gateway/identity/node-claim-events?limit=12")
       ]);
       latestConnectorStatus = connectorStatus;
       latestIngressStatus = ingressStatus;
+      latestIdentityStatus = identityStatus;
+      latestDeliveryOutboxSummary = deliveryOutboxSummary;
+      latestDeliveryOutbox.splice(0, latestDeliveryOutbox.length, ...(deliveryOutbox || []));
+      latestSetupVerificationReceipts.splice(0, latestSetupVerificationReceipts.length, ...(setupVerificationReceipts || []));
+      latestNodeClaimAuditEvents.splice(0, latestNodeClaimAuditEvents.length, ...(nodeClaimAuditEvents || []));
       const rollouts = await Promise.all(
         nodes.slice(0, 8).map(async (node) => ({
           nodeId: node.nodeId,
@@ -3013,6 +3562,7 @@ async fn dashboard() -> Html<&'static str> {
         ["Quotes", quotes.length],
         ["Invocations", invocations.length],
         ["Reconciliation", reconciliation.length],
+        ["Outbox Failures", deliveryOutboxSummary.failedCount ?? 0],
         ["Sessions", identityStatus.activeSessions ?? identitySessions.length],
         ["Node Claims", identityClaims.length]
       ].map(([label, value]) => `
@@ -3025,8 +3575,8 @@ async fn dashboard() -> Html<&'static str> {
         <article class="feed-item">
           <strong>${event.platform} · ${fmt(event.senderDisplay || event.senderId || event.chatId)}</strong>
           <p>${ellipsis(event.text, 120)}</p>
-          <p><code>${event.eventType}</code> · ${event.linkedTaskId ? `task ${event.linkedTaskId}` : "no task yet"} · ${event.status}</p>
-        </article>`).join("") || `<div class="tiny">No inbound events yet.</div>`;
+          <p><code>${event.eventType}</code> · ${event.linkedTaskId ? `任务 ${event.linkedTaskId}` : "尚未关联任务"} · ${event.status}</p>
+        </article>`).join("") || `<div class="tiny">当前还没有入站事件。</div>`;
 
       document.getElementById("approval-feed").innerHTML = approvals.map((approval) => `
         <article class="feed-item clickable-card" onclick="openApprovalDetail('${approval.approvalId}')">
@@ -3034,10 +3584,10 @@ async fn dashboard() -> Html<&'static str> {
           <p>${ellipsis(approval.summary, 120)}</p>
           <p><code>${approval.kind}</code> · ${approval.referenceId}</p>
           <div class="approval-actions">
-            <button type="button" onclick="event.stopPropagation(); openApprovalDetail('${approval.approvalId}')">Open Workflow</button>
-            <button type="button" class="secondary" onclick="event.stopPropagation(); openApprovalDetail('${approval.approvalId}')">Inspect</button>
+            <button type="button" onclick="event.stopPropagation(); openApprovalDetail('${approval.approvalId}')">打开流程</button>
+            <button type="button" class="secondary" onclick="event.stopPropagation(); openApprovalDetail('${approval.approvalId}')">查看</button>
           </div>
-        </article>`).join("") || `<div class="tiny">No pending approvals.</div>`;
+        </article>`).join("") || `<div class="tiny">当前没有待处理审批。</div>`;
 
       document.getElementById("task-rows").innerHTML = tasks.slice(0, 8).map((task) => `
         <tr>
@@ -3063,9 +3613,10 @@ async fn dashboard() -> Html<&'static str> {
       syncNodeCommandForm(nodes, selectedNodeId);
       syncRolloutConsole(nodes, selectedNodeId);
       syncAgentDelegationForm(cards);
-      syncIdentityStudio(identityStatus, identitySessions, identityClaims);
+      syncIdentityStudio(identityStatus, identitySessions, identityClaims, nodes, latestNodeClaimAuditEvents);
       renderConnectorMatrix(connectorStatus, ingressStatus);
-      updateSetupNavigator(document.getElementById("setup-surface")?.value || "model", connectorStatus, ingressStatus);
+      renderDeliveryOutboxPanel(deliveryOutboxSummary, deliveryOutbox);
+      updateSetupNavigator(document.getElementById("setup-surface")?.value || "model", connectorStatus, ingressStatus, identityStatus, latestSetupVerificationReceipts);
 
       const marketplaceSignal = document.getElementById("marketplace-signal");
       if (marketplaceSignal) {
@@ -3188,32 +3739,37 @@ mod tests {
     #[tokio::test]
     async fn dashboard_includes_operator_action_studios() {
         let Html(markup) = dashboard().await;
-        assert!(markup.contains("Agent Delegation Studio"));
+        assert!(markup.contains("Agent 委托工作台"));
         assert!(markup.contains("delegate-card-id"));
         assert!(markup.contains("previewSettlementQuote"));
-        assert!(markup.contains("Rollout Console"));
+        assert!(markup.contains("发布控制台"));
         assert!(markup.contains("rollout-node-id"));
         assert!(markup.contains("dispatchManualRollout"));
-        assert!(markup.contains("Marketplace Studio"));
+        assert!(markup.contains("市场工作台"));
         assert!(markup.contains("installSkillPackage"));
         assert!(markup.contains("publishAgentCard"));
-        assert!(markup.contains("Marketplace Catalog"));
+        assert!(markup.contains("市场目录"));
         assert!(markup.contains("marketplace-catalog-grid"));
         assert!(markup.contains("loadMarketplaceCatalog"));
-        assert!(markup.contains("Connector Matrix"));
+        assert!(markup.contains("连接器矩阵"));
         assert!(markup.contains("connector-matrix"));
-        assert!(markup.contains("Setup Navigator"));
+        assert!(markup.contains("部署导航"));
         assert!(markup.contains("setup-navigator-status"));
         assert!(markup.contains("copySetupEnvBlock"));
-        assert!(markup.contains("Identity &amp; Onboarding"));
+        assert!(markup.contains("身份与入驻"));
         assert!(markup.contains("bootstrapOperatorSession"));
         assert!(markup.contains("saveWorkspaceProfile"));
         assert!(markup.contains("issueNodeClaim"));
         assert!(markup.contains("identity-session-token"));
-        assert!(markup.contains("Reconciliation Fabric"));
+        assert!(markup.contains("对账链路"));
         assert!(markup.contains("reconciliation-rows"));
         assert!(markup.contains("openReconciliationDetail"));
         assert!(markup.contains("reconcileSettlement"));
+        assert!(markup.contains("投递 Outbox"));
+        assert!(markup.contains("delivery-outbox-rows"));
+        assert!(markup.contains("openDeliveryOutboxDetail"));
+        assert!(markup.contains("retryDeliveryOutbox"));
+        assert!(markup.contains("replayDeliveryOutboxDeadLetters"));
         assert!(markup.contains("detail-drawer-form"));
         assert!(markup.contains("submitDrawerApproval"));
         assert!(markup.contains("console-stream-pill"));

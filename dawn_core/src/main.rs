@@ -11,6 +11,7 @@ mod chat_ingress;
 mod connectors;
 mod control_center;
 mod control_plane;
+mod end_user_approvals;
 mod gateway;
 mod identity;
 mod marketplace;
@@ -54,6 +55,7 @@ pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .nest("/console", control_center::router())
+        .nest("/end-user", end_user_approvals::page_router())
         .route(
             "/.well-known/agent-card.json",
             get(agent_cards::well_known_agent_card_json),
@@ -126,6 +128,12 @@ mod tests {
         let response = client.get(url).send().await?;
         let response = response.error_for_status()?;
         Ok(response.json().await?)
+    }
+
+    async fn get_text(client: &Client, url: &str) -> anyhow::Result<String> {
+        let response = client.get(url).send().await?;
+        let response = response.error_for_status()?;
+        Ok(response.text().await?)
     }
 
     async fn next_text<S>(reader: &mut S, label: &str) -> anyhow::Result<String>
@@ -610,6 +618,125 @@ mod tests {
         )
         .await?;
         assert_eq!(payment_record["status"], "rejected");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_process_end_user_approval_portal_authorizes_pending_payment() -> anyhow::Result<()>
+    {
+        let (base_url, handle, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+
+        let ingress_response = post_json(
+            &client,
+            &format!("{base_url}/api/gateway/ingress/telegram/webhook/end-user-flow"),
+            json!({
+                "update_id": 42,
+                "message": {
+                    "message_id": 9,
+                    "text": "Book a train to Shanghai",
+                    "chat": { "id": 7788, "title": "Alice" },
+                    "from": { "id": 5566, "first_name": "Alice", "username": "alice" }
+                }
+            }),
+        )
+        .await?;
+        let task_id = ingress_response["taskId"]
+            .as_str()
+            .context("missing task id from ingress")?
+            .to_string();
+
+        let mandate_id = Uuid::new_v4();
+        let authorize_response = post_json(
+            &client,
+            &format!("{base_url}/api/ap2/authorize"),
+            json!({
+                "taskId": task_id,
+                "mandateId": mandate_id,
+                "amount": 11.5,
+                "description": "Book train to Shanghai"
+            }),
+        )
+        .await?;
+        assert_eq!(authorize_response["status"], "pending_physical_auth");
+        let approval_url = authorize_response["endUserApprovalUrl"]
+            .as_str()
+            .context("missing end-user approval url")?;
+        assert!(approval_url.starts_with("/end-user/approvals/"));
+        let approval_token = approval_url
+            .rsplit('/')
+            .next()
+            .context("missing approval token")?;
+
+        let approval_detail = get_json(
+            &client,
+            &format!("{base_url}/api/gateway/end-user/approvals/{approval_token}"),
+        )
+        .await?;
+        assert_eq!(approval_detail["session"]["status"], "pending");
+        assert_eq!(
+            approval_detail["payment"]["status"],
+            "pending_physical_auth"
+        );
+        assert_eq!(approval_detail["task"]["taskId"], task_id);
+        let signature_payload = approval_detail["signaturePayload"]
+            .as_str()
+            .context("missing signature payload")?;
+
+        let page_html = get_text(&client, &format!("{base_url}{approval_url}")).await?;
+        assert!(
+            page_html.contains("Dawn End-User Approval") || page_html.contains("Dawn 终端用户审批")
+        );
+
+        let ingress_events = get_json(
+            &client,
+            &format!("{base_url}/api/gateway/ingress/events?limit=5"),
+        )
+        .await?;
+        let latest_reply = ingress_events[0]["replyText"]
+            .as_str()
+            .context("missing ingress reply text")?;
+        assert!(latest_reply.contains(approval_url));
+
+        let signing_key = SigningKey::from_bytes(&[51_u8; 32]);
+        let mcu_public_did = format!(
+            "did:dawn:mcu:{}",
+            hex::encode(signing_key.verifying_key().as_bytes())
+        );
+        let mcu_signature = hex::encode(signing_key.sign(signature_payload.as_bytes()).to_bytes());
+        let decision = post_json(
+            &client,
+            &format!("{base_url}/api/gateway/end-user/approvals/{approval_token}/decision"),
+            json!({
+                "actor": "Alice",
+                "decision": "approve",
+                "reason": "Looks correct",
+                "mcuPublicDid": mcu_public_did,
+                "mcuSignature": mcu_signature
+            }),
+        )
+        .await?;
+        assert_eq!(decision["session"]["status"], "approved");
+        assert_eq!(decision["approval"]["status"], "approved");
+        assert_eq!(decision["paymentResponse"]["status"], "authorized");
+
+        let payment_record = get_json(
+            &client,
+            &format!(
+                "{base_url}/api/ap2/transactions/{}",
+                authorize_response["transactionId"]
+                    .as_str()
+                    .context("missing transaction id")?
+            ),
+        )
+        .await?;
+        assert_eq!(payment_record["status"], "authorized");
+
+        let task_record = get_json(&client, &format!("{base_url}/api/a2a/task/{task_id}")).await?;
+        assert_eq!(task_record["task"]["status"], "queued");
 
         handle.abort();
         fs::remove_file(db_path).ok();

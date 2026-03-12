@@ -24,6 +24,8 @@ use crate::{
 const AP2_EXTENSION_URI: &str = "https://github.com/google-agentic-commerce/ap2/tree/v0.1";
 const QUOTE_ISSUER_DID_PREFIX: &str = "did:dawn:quote:";
 const DEFAULT_QUOTE_TTL_SECONDS: u64 = 300;
+const DELIVERY_OUTBOX_MAX_ATTEMPTS: u32 = 8;
+const DELIVERY_OUTBOX_POLL_MS: u64 = 250;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -470,6 +472,7 @@ struct SettlementQuoteQuery {
     allow_metadata_fallback: Option<bool>,
     quote_id: Option<String>,
     counter_offer_amount: Option<f64>,
+    state_inbox_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +508,17 @@ struct QuoteListQuery {
     status: Option<QuoteLedgerStatus>,
     source_kind: Option<String>,
     transaction_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryOutboxListQuery {
+    kind: Option<DeliveryOutboxKind>,
+    status: Option<DeliveryOutboxStatus>,
+    card_id: Option<String>,
+    settlement_id: Option<Uuid>,
+    quote_id: Option<String>,
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -669,6 +683,60 @@ impl QuoteLedgerStatus {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DeliveryOutboxKind {
+    SettlementReceipt,
+    QuoteState,
+}
+
+impl DeliveryOutboxKind {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::SettlementReceipt => "settlement_receipt",
+            Self::QuoteState => "quote_state",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "settlement_receipt" => Ok(Self::SettlementReceipt),
+            "quote_state" => Ok(Self::QuoteState),
+            _ => Err(anyhow!("unknown delivery outbox kind '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DeliveryOutboxStatus {
+    Queued,
+    RetryScheduled,
+    Delivered,
+    Failed,
+}
+
+impl DeliveryOutboxStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::Delivered => "delivered",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "queued" => Ok(Self::Queued),
+            "retry_scheduled" => Ok(Self::RetryScheduled),
+            "delivered" => Ok(Self::Delivered),
+            "failed" => Ok(Self::Failed),
+            _ => Err(anyhow!("unknown delivery outbox status '{raw}'")),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct QuoteLedgerRecord {
@@ -676,6 +744,8 @@ struct QuoteLedgerRecord {
     card_id: String,
     source_kind: String,
     quote_url: Option<String>,
+    #[serde(skip_serializing, skip_deserializing)]
+    state_subscriber_url: Option<String>,
     previous_quote_id: Option<String>,
     superseded_by_quote_id: Option<String>,
     negotiation_round: u32,
@@ -700,12 +770,72 @@ struct QuoteLedgerRecord {
     updated_at_unix_ms: u128,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryOutboxRecord {
+    delivery_id: Uuid,
+    delivery_key: String,
+    delivery_kind: DeliveryOutboxKind,
+    card_id: String,
+    settlement_id: Option<Uuid>,
+    reconciliation_id: Option<Uuid>,
+    quote_id: Option<String>,
+    target_url: String,
+    payload_json: Value,
+    status: DeliveryOutboxStatus,
+    attempt_count: u32,
+    max_attempts: u32,
+    next_attempt_at_unix_ms: u128,
+    last_attempt_at_unix_ms: Option<u128>,
+    delivered_at_unix_ms: Option<u128>,
+    last_http_status: Option<u16>,
+    last_error: Option<String>,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryOutboxSummary {
+    total_count: u32,
+    pending_count: u32,
+    queued_count: u32,
+    retry_scheduled_count: u32,
+    failed_count: u32,
+    delivered_count: u32,
+    settlement_receipt_count: u32,
+    quote_state_count: u32,
+    next_attempt_at_unix_ms: Option<u128>,
+    oldest_pending_created_at_unix_ms: Option<u128>,
+    last_failure_at_unix_ms: Option<u128>,
+    latest_update_at_unix_ms: Option<u128>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryOutboxReplayRequest {
+    kind: Option<DeliveryOutboxKind>,
+    card_id: Option<String>,
+    settlement_id: Option<Uuid>,
+    quote_id: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryOutboxReplayResponse {
+    matched_count: u32,
+    replayed_count: u32,
+    deliveries: Vec<DeliveryOutboxRecord>,
+}
+
 #[derive(Debug, FromRow)]
 struct QuoteLedgerRow {
     quote_id: String,
     card_id: String,
     source_kind: String,
     quote_url: Option<String>,
+    state_subscriber_url: Option<String>,
     previous_quote_id: Option<String>,
     superseded_by_quote_id: Option<String>,
     negotiation_round: i64,
@@ -730,6 +860,29 @@ struct QuoteLedgerRow {
     updated_at_unix_ms: i64,
 }
 
+#[derive(Debug, FromRow)]
+struct DeliveryOutboxRow {
+    delivery_id: String,
+    delivery_key: String,
+    delivery_kind: String,
+    card_id: String,
+    settlement_id: Option<String>,
+    reconciliation_id: Option<String>,
+    quote_id: Option<String>,
+    target_url: String,
+    payload_json: String,
+    status: String,
+    attempt_count: i64,
+    max_attempts: i64,
+    next_attempt_at_unix_ms: i64,
+    last_attempt_at_unix_ms: Option<i64>,
+    delivered_at_unix_ms: Option<i64>,
+    last_http_status: Option<i64>,
+    last_error: Option<String>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
@@ -737,20 +890,48 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/search", get(search_cards))
         .route("/:card_id/quote", get(get_settlement_quote))
         .route("/reconciliation", get(list_reconciliation))
-        .route("/reconciliation/receipts", post(receive_reconciliation_receipt))
-        .route("/reconciliation/:reconciliation_id", get(get_reconciliation))
+        .route("/delivery-outbox-summary", get(get_delivery_outbox_summary))
+        .route(
+            "/delivery-outbox-dead-letter",
+            get(list_delivery_outbox_dead_letter),
+        )
+        .route(
+            "/delivery-outbox-dead-letter/replay",
+            post(replay_delivery_outbox_dead_letter),
+        )
+        .route(
+            "/reconciliation/receipts",
+            post(receive_reconciliation_receipt),
+        )
+        .route(
+            "/reconciliation/:reconciliation_id",
+            get(get_reconciliation),
+        )
+        .route("/delivery-outbox", get(list_delivery_outbox))
+        .route("/delivery-outbox/:delivery_id", get(get_delivery_outbox))
+        .route(
+            "/delivery-outbox/:delivery_id/retry",
+            post(retry_delivery_outbox),
+        )
         .route("/quotes", get(list_quotes))
+        .route("/quotes/state-sync", post(receive_quote_state_sync))
         .route("/quotes/:quote_id/state", get(get_quote_state))
         .route("/quotes/:quote_id", get(get_quote))
         .route("/quotes/:quote_id/revoke", post(revoke_quote))
         .route("/invocations", get(list_invocations))
         .route("/settlements", get(list_settlements))
-        .route("/settlements/:settlement_id/receipt", get(get_settlement_receipt))
+        .route(
+            "/settlements/:settlement_id/receipt",
+            get(get_settlement_receipt),
+        )
         .route(
             "/settlements/:settlement_id/reconciliation",
             get(get_settlement_reconciliation),
         )
-        .route("/settlements/:settlement_id/reconcile", post(reconcile_settlement))
+        .route(
+            "/settlements/:settlement_id/reconcile",
+            post(reconcile_settlement),
+        )
         .route("/invocations/:invocation_id", get(get_invocation))
         .route(
             "/invocations/:invocation_id/settlement",
@@ -839,6 +1020,7 @@ async fn get_settlement_quote(
             query.allow_metadata_fallback.unwrap_or(true),
             query.quote_id.as_deref(),
             query.counter_offer_amount,
+            quote_state_inbox_url().as_deref(),
         )
         .await
         .map_err(service_error)?
@@ -870,6 +1052,15 @@ async fn get_settlement_quote(
         record_quote_offer(&state, &card, &quote, source_kind)
             .await
             .map_err(service_error)?;
+        if source_kind == "local" {
+            attach_quote_state_subscriber(
+                &state,
+                quote.quote_id.as_deref(),
+                query.state_inbox_url.as_deref(),
+            )
+            .await
+            .map_err(service_error)?;
+        }
     }
     Ok(Json(quote))
 }
@@ -899,6 +1090,115 @@ async fn get_reconciliation(
         .map_err(internal_error)?
         .map(Json)
         .ok_or_else(|| not_found("reconciliation record not found"))
+}
+
+async fn list_delivery_outbox(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DeliveryOutboxListQuery>,
+) -> Result<Json<Vec<DeliveryOutboxRecord>>, (StatusCode, Json<Value>)> {
+    let mut records = list_delivery_outbox_records(
+        &state,
+        query.kind,
+        query.status,
+        query.card_id.as_deref(),
+        query.settlement_id,
+        query.quote_id.as_deref(),
+    )
+    .await
+    .map_err(internal_error)?;
+    if let Some(limit) = query.limit {
+        records.truncate(limit as usize);
+    }
+    Ok(Json(records))
+}
+
+async fn get_delivery_outbox_summary(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DeliveryOutboxSummary>, (StatusCode, Json<Value>)> {
+    build_delivery_outbox_summary(&state)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn list_delivery_outbox_dead_letter(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DeliveryOutboxListQuery>,
+) -> Result<Json<Vec<DeliveryOutboxRecord>>, (StatusCode, Json<Value>)> {
+    let mut records = list_delivery_outbox_records(
+        &state,
+        query.kind,
+        Some(DeliveryOutboxStatus::Failed),
+        query.card_id.as_deref(),
+        query.settlement_id,
+        query.quote_id.as_deref(),
+    )
+    .await
+    .map_err(internal_error)?;
+    if let Some(limit) = query.limit {
+        records.truncate(limit as usize);
+    }
+    Ok(Json(records))
+}
+
+async fn replay_delivery_outbox_dead_letter(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DeliveryOutboxReplayRequest>,
+) -> Result<Json<DeliveryOutboxReplayResponse>, (StatusCode, Json<Value>)> {
+    let matched = list_delivery_outbox_records(
+        &state,
+        request.kind,
+        Some(DeliveryOutboxStatus::Failed),
+        request.card_id.as_deref(),
+        request.settlement_id,
+        request.quote_id.as_deref(),
+    )
+    .await
+    .map_err(internal_error)?;
+    let matched_count = matched.len() as u32;
+    let deliveries = replay_dead_letter_delivery_outbox_records(&state, &request)
+        .await
+        .map_err(service_error)?;
+    Ok(Json(DeliveryOutboxReplayResponse {
+        matched_count,
+        replayed_count: deliveries.len() as u32,
+        deliveries,
+    }))
+}
+
+async fn get_delivery_outbox(
+    State(state): State<Arc<AppState>>,
+    AxumPath(delivery_id): AxumPath<Uuid>,
+) -> Result<Json<DeliveryOutboxRecord>, (StatusCode, Json<Value>)> {
+    get_delivery_outbox_record(&state, delivery_id)
+        .await
+        .map_err(internal_error)?
+        .map(Json)
+        .ok_or_else(|| not_found("delivery outbox record not found"))
+}
+
+async fn retry_delivery_outbox(
+    State(state): State<Arc<AppState>>,
+    AxumPath(delivery_id): AxumPath<Uuid>,
+) -> Result<Json<DeliveryOutboxRecord>, (StatusCode, Json<Value>)> {
+    if get_delivery_outbox_record(&state, delivery_id)
+        .await
+        .map_err(internal_error)?
+        .is_none()
+    {
+        return Err(not_found("delivery outbox record not found"));
+    }
+    retry_delivery_outbox_record(&state, delivery_id)
+        .await
+        .map_err(service_error)?;
+    process_delivery_outbox_record(&state, delivery_id)
+        .await
+        .map_err(internal_error)?;
+    get_delivery_outbox_record(&state, delivery_id)
+        .await
+        .map_err(internal_error)?
+        .map(Json)
+        .ok_or_else(|| not_found("delivery outbox record not found"))
 }
 
 async fn get_settlement_receipt(
@@ -937,10 +1237,23 @@ async fn reconcile_settlement(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| not_found("agent card not found for settlement"))?;
-    reconcile_outbound_settlement(&state, &card, &settlement)
+    let reconciliation = reconcile_outbound_settlement(&state, &card, &settlement)
         .await
+        .map_err(internal_error)?;
+    if let Some(delivery) =
+        get_delivery_outbox_by_key(&state, &delivery_key_for_settlement_receipt(settlement_id))
+            .await
+            .map_err(internal_error)?
+    {
+        process_delivery_outbox_record(&state, delivery.delivery_id)
+            .await
+            .map_err(internal_error)?;
+    }
+    get_reconciliation_record(&state, reconciliation.reconciliation_id)
+        .await
+        .map_err(internal_error)?
         .map(Json)
-        .map_err(internal_error)
+        .ok_or_else(|| not_found("reconciliation record not found"))
 }
 
 async fn receive_reconciliation_receipt(
@@ -952,6 +1265,33 @@ async fn receive_reconciliation_receipt(
         .context("receipt payload was not a valid SettlementReceiptSnapshot")
         .map_err(service_error)?;
     accept_inbound_receipt(&state, &receipt)
+        .await
+        .map(Json)
+        .map_err(service_error)
+}
+
+async fn receive_quote_state_sync(
+    State(state): State<Arc<AppState>>,
+    Json(raw_value): Json<Value>,
+) -> Result<Json<QuoteLedgerRecord>, (StatusCode, Json<Value>)> {
+    let body = raw_value.get("state").cloned().unwrap_or(raw_value);
+    let remote_state = serde_json::from_value::<QuoteStateSnapshot>(body)
+        .context("quote state payload was not a valid QuoteStateSnapshot")
+        .map_err(service_error)?;
+    let record = get_quote_record(&state, &remote_state.quote_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("quote not found"))?;
+    if record.source_kind != "remote" {
+        return Err(service_error(anyhow!(
+            "quote state sync only applies to remotely issued quotes"
+        )));
+    }
+    let card = find_card_record(&state, &record.card_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("agent card not found for quote"))?;
+    apply_remote_quote_state(&state, &card, record, remote_state)
         .await
         .map(Json)
         .map_err(service_error)
@@ -1499,6 +1839,7 @@ async fn validate_remote_settlement_request(
         true,
         settlement.quote_id.as_deref(),
         settlement.counter_offer_amount,
+        quote_state_inbox_url().as_deref(),
     )
     .await
     .with_context(|| {
@@ -1601,9 +1942,12 @@ async fn accept_inbound_receipt(
 ) -> anyhow::Result<SettlementReceiptAck> {
     verify_signed_settlement_receipt(receipt)?;
     let now = unix_timestamp_ms();
-    let existing =
-        get_reconciliation_by_settlement(state, ReconciliationDirection::Inbound, receipt.settlement_id)
-            .await?;
+    let existing = get_reconciliation_by_settlement(
+        state,
+        ReconciliationDirection::Inbound,
+        receipt.settlement_id,
+    )
+    .await?;
     let record = SettlementReconciliationRecord {
         reconciliation_id: existing
             .as_ref()
@@ -1655,9 +1999,12 @@ async fn reconcile_outbound_settlement(
 ) -> anyhow::Result<SettlementReconciliationRecord> {
     let receipt = build_settlement_receipt(settlement)?;
     let now = unix_timestamp_ms();
-    let existing =
-        get_reconciliation_by_settlement(state, ReconciliationDirection::Outbound, settlement.settlement_id)
-            .await?;
+    let existing = get_reconciliation_by_settlement(
+        state,
+        ReconciliationDirection::Outbound,
+        settlement.settlement_id,
+    )
+    .await?;
     let mut record = SettlementReconciliationRecord {
         reconciliation_id: existing
             .as_ref()
@@ -1696,77 +2043,27 @@ async fn reconcile_outbound_settlement(
             Some("counterparty agent card does not expose a receiptInboxUrl".to_string());
         record.last_sync_at_unix_ms = Some(now);
         save_reconciliation_record(state, &record).await?;
+        fail_delivery_outbox_by_key(
+            state,
+            &delivery_key_for_settlement_receipt(settlement.settlement_id),
+            "counterparty agent card does not expose a receiptInboxUrl",
+        )
+        .await?;
         return Ok(record);
     };
-
-    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
-    match client
-        .post(&receipt_inbox_url)
-        .json(&json!({ "receipt": receipt }))
-        .send()
-        .await
-    {
-        Ok(response) => {
-            let status = response.status();
-            let raw_body = response.text().await.unwrap_or_default();
-            if !status.is_success() {
-                record.reconciliation_status = ReconciliationStatus::DeliveryFailed;
-                record.last_error = Some(format!(
-                    "counterparty receipt inbox returned status {}: {}",
-                    status, raw_body
-                ));
-            } else {
-                let raw_value = if raw_body.trim().is_empty() {
-                    Value::Null
-                } else {
-                    serde_json::from_str::<Value>(&raw_body).with_context(|| {
-                        format!(
-                            "counterparty receipt inbox {} returned non-JSON body",
-                            receipt_inbox_url
-                        )
-                    })?
-                };
-                let body = raw_value.get("ack").cloned().unwrap_or(raw_value);
-                let ack = serde_json::from_value::<SettlementReceiptAck>(body)
-                    .context("counterparty receipt ack was not valid")?;
-                verify_settlement_receipt_ack(card, &ack)?;
-                if ack.settlement_id != settlement.settlement_id {
-                    anyhow::bail!(
-                        "counterparty receipt ack settlementId '{}' does not match '{}'",
-                        ack.settlement_id,
-                        settlement.settlement_id
-                    );
-                }
-                record.reconciliation_status = if ack.accepted {
-                    ReconciliationStatus::Acknowledged
-                } else {
-                    ReconciliationStatus::DeliveryFailed
-                };
-                record.last_error = if ack.accepted {
-                    None
-                } else {
-                    Some(ack.message.clone())
-                };
-                record.acknowledgment_issuer_did = Some(ack.issuer_did.clone());
-                record.acknowledgment_signature_hex = Some(ack.signature_hex.clone());
-                record.acknowledgment_json = Some(
-                    serde_json::to_value(&ack)
-                        .context("failed to serialize settlement reconciliation ack")?,
-                );
-            }
-        }
-        Err(error) => {
-            record.reconciliation_status = ReconciliationStatus::DeliveryFailed;
-            record.last_error = Some(format!(
-                "failed delivering settlement receipt to {}: {}",
-                receipt_inbox_url, error
-            ));
-        }
-    }
-
-    record.last_sync_at_unix_ms = Some(unix_timestamp_ms());
-    record.updated_at_unix_ms = unix_timestamp_ms();
     save_reconciliation_record(state, &record).await?;
+    enqueue_delivery_outbox(
+        state,
+        delivery_key_for_settlement_receipt(settlement.settlement_id),
+        DeliveryOutboxKind::SettlementReceipt,
+        settlement.card_id.clone(),
+        Some(settlement.settlement_id),
+        Some(record.reconciliation_id),
+        settlement.quote_id.clone(),
+        receipt_inbox_url,
+        json!({ "receipt": receipt }),
+    )
+    .await?;
     Ok(record)
 }
 
@@ -1787,6 +2084,477 @@ pub async fn sync_remote_settlement_from_payment(
         reconcile_outbound_settlement(state, &card, &settlement).await?;
     }
     Ok(Some(settlement))
+}
+
+#[derive(Debug, Clone)]
+enum DeliveryAttemptResult {
+    Delivered {
+        http_status: Option<u16>,
+        acknowledgment: Option<SettlementReceiptAck>,
+    },
+    RetryableFailure {
+        http_status: Option<u16>,
+        error: String,
+    },
+    PermanentFailure {
+        http_status: Option<u16>,
+        error: String,
+        acknowledgment: Option<SettlementReceiptAck>,
+    },
+}
+
+fn delivery_key_for_settlement_receipt(settlement_id: Uuid) -> String {
+    format!("settlement_receipt:{settlement_id}")
+}
+
+fn delivery_key_for_quote_state(quote_id: &str) -> String {
+    format!("quote_state:{quote_id}")
+}
+
+fn delivery_retry_backoff_ms(attempt_count: u32) -> u128 {
+    let exponent = attempt_count.saturating_sub(1).min(6);
+    let base_ms = 500_u128 << exponent;
+    base_ms.min(30_000)
+}
+
+fn is_retryable_delivery_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
+        )
+}
+
+async fn enqueue_delivery_outbox(
+    state: &AppState,
+    delivery_key: String,
+    delivery_kind: DeliveryOutboxKind,
+    card_id: String,
+    settlement_id: Option<Uuid>,
+    reconciliation_id: Option<Uuid>,
+    quote_id: Option<String>,
+    target_url: String,
+    payload_json: Value,
+) -> anyhow::Result<DeliveryOutboxRecord> {
+    let existing = get_delivery_outbox_by_key(state, &delivery_key).await?;
+    if let Some(existing) = existing.as_ref() {
+        if existing.target_url == target_url
+            && existing.payload_json == payload_json
+            && matches!(
+                existing.status,
+                DeliveryOutboxStatus::Queued
+                    | DeliveryOutboxStatus::RetryScheduled
+                    | DeliveryOutboxStatus::Delivered
+            )
+        {
+            return Ok(existing.clone());
+        }
+    }
+
+    let now = unix_timestamp_ms();
+    let record = DeliveryOutboxRecord {
+        delivery_id: existing
+            .as_ref()
+            .map(|value| value.delivery_id)
+            .unwrap_or_else(Uuid::new_v4),
+        delivery_key,
+        delivery_kind,
+        card_id,
+        settlement_id,
+        reconciliation_id,
+        quote_id,
+        target_url,
+        payload_json,
+        status: DeliveryOutboxStatus::Queued,
+        attempt_count: 0,
+        max_attempts: DELIVERY_OUTBOX_MAX_ATTEMPTS,
+        next_attempt_at_unix_ms: now,
+        last_attempt_at_unix_ms: None,
+        delivered_at_unix_ms: None,
+        last_http_status: None,
+        last_error: None,
+        created_at_unix_ms: existing
+            .as_ref()
+            .map(|value| value.created_at_unix_ms)
+            .unwrap_or(now),
+        updated_at_unix_ms: now,
+    };
+    save_delivery_outbox_record(state, &record).await?;
+    state.wake_delivery_outbox();
+    Ok(record)
+}
+
+async fn fail_delivery_outbox_by_key(
+    state: &AppState,
+    delivery_key: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let Some(mut existing) = get_delivery_outbox_by_key(state, delivery_key).await? else {
+        return Ok(());
+    };
+    let now = unix_timestamp_ms();
+    existing.status = DeliveryOutboxStatus::Failed;
+    existing.next_attempt_at_unix_ms = now;
+    existing.last_error = Some(error.to_string());
+    existing.updated_at_unix_ms = now;
+    save_delivery_outbox_record(state, &existing).await
+}
+
+pub fn spawn_delivery_outbox_worker(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            match process_delivery_outbox_once(state.as_ref()).await {
+                Ok(count) if count > 0 => continue,
+                Ok(_) => {}
+                Err(error) => state.emit_console_event(
+                    "delivery_outbox",
+                    None,
+                    Some("worker_failed".to_string()),
+                    format!("delivery outbox worker failed: {error}"),
+                ),
+            }
+
+            tokio::select! {
+                _ = sleep(Duration::from_millis(DELIVERY_OUTBOX_POLL_MS)) => {}
+                _ = state.wait_for_delivery_outbox() => {}
+            }
+        }
+    });
+}
+
+async fn process_delivery_outbox_once(state: &AppState) -> anyhow::Result<usize> {
+    let due = list_due_delivery_outbox_records(state, 16).await?;
+    let count = due.len();
+    for record in due {
+        process_delivery_outbox_attempt(state, record).await?;
+    }
+    Ok(count)
+}
+
+async fn process_delivery_outbox_record(
+    state: &AppState,
+    delivery_id: Uuid,
+) -> anyhow::Result<Option<DeliveryOutboxRecord>> {
+    let Some(record) = get_delivery_outbox_record(state, delivery_id).await? else {
+        return Ok(None);
+    };
+    if matches!(record.status, DeliveryOutboxStatus::Delivered) {
+        return Ok(Some(record));
+    }
+    process_delivery_outbox_attempt(state, record)
+        .await
+        .map(Some)
+}
+
+async fn process_delivery_outbox_attempt(
+    state: &AppState,
+    mut record: DeliveryOutboxRecord,
+) -> anyhow::Result<DeliveryOutboxRecord> {
+    let now = unix_timestamp_ms();
+    let outcome = match record.delivery_kind {
+        DeliveryOutboxKind::SettlementReceipt => {
+            attempt_settlement_receipt_delivery(state, &record).await
+        }
+        DeliveryOutboxKind::QuoteState => attempt_quote_state_delivery(&record).await,
+    };
+
+    record.attempt_count = record.attempt_count.saturating_add(1);
+    record.last_attempt_at_unix_ms = Some(now);
+    record.updated_at_unix_ms = now;
+
+    match &outcome {
+        DeliveryAttemptResult::Delivered { http_status, .. } => {
+            record.status = DeliveryOutboxStatus::Delivered;
+            record.next_attempt_at_unix_ms = now;
+            record.delivered_at_unix_ms = Some(now);
+            record.last_http_status = *http_status;
+            record.last_error = None;
+        }
+        DeliveryAttemptResult::RetryableFailure { http_status, error } => {
+            record.last_http_status = *http_status;
+            record.delivered_at_unix_ms = None;
+            record.last_error = Some(error.clone());
+            if record.attempt_count >= record.max_attempts {
+                record.status = DeliveryOutboxStatus::Failed;
+                record.next_attempt_at_unix_ms = now;
+            } else {
+                record.status = DeliveryOutboxStatus::RetryScheduled;
+                record.next_attempt_at_unix_ms =
+                    now + delivery_retry_backoff_ms(record.attempt_count);
+            }
+        }
+        DeliveryAttemptResult::PermanentFailure {
+            http_status, error, ..
+        } => {
+            record.status = DeliveryOutboxStatus::Failed;
+            record.next_attempt_at_unix_ms = now;
+            record.delivered_at_unix_ms = None;
+            record.last_http_status = *http_status;
+            record.last_error = Some(error.clone());
+        }
+    }
+
+    if record.delivery_kind == DeliveryOutboxKind::SettlementReceipt {
+        apply_settlement_receipt_delivery_outcome(state, &record, &outcome).await?;
+    }
+
+    save_delivery_outbox_record(state, &record).await?;
+    Ok(record)
+}
+
+async fn attempt_settlement_receipt_delivery(
+    state: &AppState,
+    record: &DeliveryOutboxRecord,
+) -> DeliveryAttemptResult {
+    let payload = record
+        .payload_json
+        .get("receipt")
+        .cloned()
+        .unwrap_or_else(|| record.payload_json.clone());
+    let receipt = match serde_json::from_value::<SettlementReceiptSnapshot>(payload) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return DeliveryAttemptResult::PermanentFailure {
+                http_status: None,
+                error: format!("stored settlement receipt payload was invalid: {error}"),
+                acknowledgment: None,
+            };
+        }
+    };
+    let card = match find_card_record(state, &record.card_id).await {
+        Ok(Some(card)) => card,
+        Ok(None) => {
+            return DeliveryAttemptResult::PermanentFailure {
+                http_status: None,
+                error: format!(
+                    "agent card '{}' was not found for receipt delivery",
+                    record.card_id
+                ),
+                acknowledgment: None,
+            };
+        }
+        Err(error) => {
+            return DeliveryAttemptResult::RetryableFailure {
+                http_status: None,
+                error: format!(
+                    "failed to load agent card '{}' for receipt delivery: {}",
+                    record.card_id, error
+                ),
+            };
+        }
+    };
+    let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
+        Ok(client) => client,
+        Err(error) => {
+            return DeliveryAttemptResult::PermanentFailure {
+                http_status: None,
+                error: format!("failed to prepare receipt delivery client: {error}"),
+                acknowledgment: None,
+            };
+        }
+    };
+    match client
+        .post(&record.target_url)
+        .json(&record.payload_json)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+            let http_status = Some(status.as_u16());
+            let raw_body = response.text().await.unwrap_or_default();
+            if !status.is_success() {
+                let error = format!(
+                    "counterparty receipt inbox returned status {}: {}",
+                    status, raw_body
+                );
+                return if is_retryable_delivery_status(status) {
+                    DeliveryAttemptResult::RetryableFailure { http_status, error }
+                } else {
+                    DeliveryAttemptResult::PermanentFailure {
+                        http_status,
+                        error,
+                        acknowledgment: None,
+                    }
+                };
+            }
+            let raw_value = if raw_body.trim().is_empty() {
+                Value::Null
+            } else {
+                match serde_json::from_str::<Value>(&raw_body) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return DeliveryAttemptResult::PermanentFailure {
+                            http_status,
+                            error: format!(
+                                "counterparty receipt inbox {} returned non-JSON body: {error}",
+                                record.target_url
+                            ),
+                            acknowledgment: None,
+                        };
+                    }
+                }
+            };
+            let body = raw_value.get("ack").cloned().unwrap_or(raw_value);
+            let ack = match serde_json::from_value::<SettlementReceiptAck>(body) {
+                Ok(ack) => ack,
+                Err(error) => {
+                    return DeliveryAttemptResult::PermanentFailure {
+                        http_status,
+                        error: format!("counterparty receipt ack was not valid: {error}"),
+                        acknowledgment: None,
+                    };
+                }
+            };
+            if let Err(error) = verify_settlement_receipt_ack(&card, &ack) {
+                return DeliveryAttemptResult::PermanentFailure {
+                    http_status,
+                    error: format!("counterparty receipt ack verification failed: {error}"),
+                    acknowledgment: Some(ack),
+                };
+            }
+            if ack.settlement_id != receipt.settlement_id {
+                return DeliveryAttemptResult::PermanentFailure {
+                    http_status,
+                    error: format!(
+                        "counterparty receipt ack settlementId '{}' does not match '{}'",
+                        ack.settlement_id, receipt.settlement_id
+                    ),
+                    acknowledgment: Some(ack),
+                };
+            }
+            if ack.accepted {
+                DeliveryAttemptResult::Delivered {
+                    http_status,
+                    acknowledgment: Some(ack),
+                }
+            } else {
+                DeliveryAttemptResult::PermanentFailure {
+                    http_status,
+                    error: ack.message.clone(),
+                    acknowledgment: Some(ack),
+                }
+            }
+        }
+        Err(error) => DeliveryAttemptResult::RetryableFailure {
+            http_status: None,
+            error: format!(
+                "failed delivering settlement receipt to {}: {}",
+                record.target_url, error
+            ),
+        },
+    }
+}
+
+async fn attempt_quote_state_delivery(record: &DeliveryOutboxRecord) -> DeliveryAttemptResult {
+    let client = match Client::builder().timeout(Duration::from_secs(5)).build() {
+        Ok(client) => client,
+        Err(error) => {
+            return DeliveryAttemptResult::PermanentFailure {
+                http_status: None,
+                error: format!("failed to prepare quote-state delivery client: {error}"),
+                acknowledgment: None,
+            };
+        }
+    };
+    match client
+        .post(&record.target_url)
+        .json(&record.payload_json)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+            let http_status = Some(status.as_u16());
+            if status.is_success() {
+                DeliveryAttemptResult::Delivered {
+                    http_status,
+                    acknowledgment: None,
+                }
+            } else {
+                let raw_body = response.text().await.unwrap_or_default();
+                let error = format!(
+                    "quote-state push returned status {} from {}: {}",
+                    status, record.target_url, raw_body
+                );
+                if is_retryable_delivery_status(status) {
+                    DeliveryAttemptResult::RetryableFailure { http_status, error }
+                } else {
+                    DeliveryAttemptResult::PermanentFailure {
+                        http_status,
+                        error,
+                        acknowledgment: None,
+                    }
+                }
+            }
+        }
+        Err(error) => DeliveryAttemptResult::RetryableFailure {
+            http_status: None,
+            error: format!(
+                "quote-state push for '{}' failed against {}: {}",
+                record.quote_id.as_deref().unwrap_or("unknown-quote"),
+                record.target_url,
+                error
+            ),
+        },
+    }
+}
+
+async fn apply_settlement_receipt_delivery_outcome(
+    state: &AppState,
+    record: &DeliveryOutboxRecord,
+    outcome: &DeliveryAttemptResult,
+) -> anyhow::Result<()> {
+    let mut reconciliation = if let Some(reconciliation_id) = record.reconciliation_id {
+        get_reconciliation_record(state, reconciliation_id).await?
+    } else if let Some(settlement_id) = record.settlement_id {
+        get_reconciliation_by_settlement(state, ReconciliationDirection::Outbound, settlement_id)
+            .await?
+    } else {
+        None
+    };
+    let Some(mut reconciliation) = reconciliation.take() else {
+        return Ok(());
+    };
+
+    let now = unix_timestamp_ms();
+    reconciliation.last_sync_at_unix_ms = Some(now);
+    reconciliation.updated_at_unix_ms = now;
+    match outcome {
+        DeliveryAttemptResult::Delivered { acknowledgment, .. } => {
+            reconciliation.reconciliation_status = ReconciliationStatus::Acknowledged;
+            reconciliation.last_error = None;
+            if let Some(ack) = acknowledgment.as_ref() {
+                reconciliation.acknowledgment_issuer_did = Some(ack.issuer_did.clone());
+                reconciliation.acknowledgment_signature_hex = Some(ack.signature_hex.clone());
+                reconciliation.acknowledgment_json = Some(
+                    serde_json::to_value(ack)
+                        .context("failed to serialize settlement reconciliation ack")?,
+                );
+            }
+        }
+        DeliveryAttemptResult::RetryableFailure { error, .. } => {
+            reconciliation.reconciliation_status = ReconciliationStatus::DeliveryFailed;
+            reconciliation.last_error = Some(error.clone());
+        }
+        DeliveryAttemptResult::PermanentFailure {
+            error,
+            acknowledgment,
+            ..
+        } => {
+            reconciliation.reconciliation_status = ReconciliationStatus::DeliveryFailed;
+            reconciliation.last_error = Some(error.clone());
+            if let Some(ack) = acknowledgment.as_ref() {
+                reconciliation.acknowledgment_issuer_did = Some(ack.issuer_did.clone());
+                reconciliation.acknowledgment_signature_hex = Some(ack.signature_hex.clone());
+                reconciliation.acknowledgment_json = Some(
+                    serde_json::to_value(ack)
+                        .context("failed to serialize settlement reconciliation ack")?,
+                );
+            }
+        }
+    }
+    save_reconciliation_record(state, &reconciliation).await
 }
 
 async fn fetch_remote_agent_card(raw_url: &str) -> anyhow::Result<(String, AgentCard)> {
@@ -2131,6 +2899,7 @@ async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyh
             card_id,
             source_kind,
             quote_url,
+            state_subscriber_url,
             previous_quote_id,
             superseded_by_quote_id,
             negotiation_round,
@@ -2155,12 +2924,13 @@ async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyh
             updated_at_unix_ms
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
         )
         ON CONFLICT(quote_id) DO UPDATE SET
             card_id = excluded.card_id,
             source_kind = excluded.source_kind,
             quote_url = excluded.quote_url,
+            state_subscriber_url = excluded.state_subscriber_url,
             previous_quote_id = excluded.previous_quote_id,
             superseded_by_quote_id = excluded.superseded_by_quote_id,
             negotiation_round = excluded.negotiation_round,
@@ -2189,6 +2959,7 @@ async fn save_quote_record(state: &AppState, record: &QuoteLedgerRecord) -> anyh
     .bind(&record.card_id)
     .bind(&record.source_kind)
     .bind(&record.quote_url)
+    .bind(&record.state_subscriber_url)
     .bind(&record.previous_quote_id)
     .bind(&record.superseded_by_quote_id)
     .bind(i64::from(record.negotiation_round))
@@ -2314,7 +3085,103 @@ async fn save_reconciliation_record(
         "reconciliation",
         Some(record.reconciliation_id.to_string()),
         Some(record.reconciliation_status.as_db().to_string()),
-        format!("{} receipt for {}", record.direction.as_db(), record.card_id),
+        format!(
+            "{} receipt for {}",
+            record.direction.as_db(),
+            record.card_id
+        ),
+    );
+
+    Ok(())
+}
+
+async fn save_delivery_outbox_record(
+    state: &AppState,
+    record: &DeliveryOutboxRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agent_delivery_outbox (
+            delivery_id,
+            delivery_key,
+            delivery_kind,
+            card_id,
+            settlement_id,
+            reconciliation_id,
+            quote_id,
+            target_url,
+            payload_json,
+            status,
+            attempt_count,
+            max_attempts,
+            next_attempt_at_unix_ms,
+            last_attempt_at_unix_ms,
+            delivered_at_unix_ms,
+            last_http_status,
+            last_error,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+        )
+        ON CONFLICT(delivery_id) DO UPDATE SET
+            delivery_key = excluded.delivery_key,
+            delivery_kind = excluded.delivery_kind,
+            card_id = excluded.card_id,
+            settlement_id = excluded.settlement_id,
+            reconciliation_id = excluded.reconciliation_id,
+            quote_id = excluded.quote_id,
+            target_url = excluded.target_url,
+            payload_json = excluded.payload_json,
+            status = excluded.status,
+            attempt_count = excluded.attempt_count,
+            max_attempts = excluded.max_attempts,
+            next_attempt_at_unix_ms = excluded.next_attempt_at_unix_ms,
+            last_attempt_at_unix_ms = excluded.last_attempt_at_unix_ms,
+            delivered_at_unix_ms = excluded.delivered_at_unix_ms,
+            last_http_status = excluded.last_http_status,
+            last_error = excluded.last_error,
+            created_at_unix_ms = agent_delivery_outbox.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(record.delivery_id.to_string())
+    .bind(&record.delivery_key)
+    .bind(record.delivery_kind.as_db())
+    .bind(&record.card_id)
+    .bind(record.settlement_id.map(|value| value.to_string()))
+    .bind(record.reconciliation_id.map(|value| value.to_string()))
+    .bind(&record.quote_id)
+    .bind(&record.target_url)
+    .bind(serde_json::to_string(&record.payload_json)?)
+    .bind(record.status.as_db())
+    .bind(i64::from(record.attempt_count))
+    .bind(i64::from(record.max_attempts))
+    .bind(record.next_attempt_at_unix_ms as i64)
+    .bind(record.last_attempt_at_unix_ms.map(|value| value as i64))
+    .bind(record.delivered_at_unix_ms.map(|value| value as i64))
+    .bind(record.last_http_status.map(i64::from))
+    .bind(&record.last_error)
+    .bind(record.created_at_unix_ms as i64)
+    .bind(record.updated_at_unix_ms as i64)
+    .execute(state.pool())
+    .await
+    .with_context(|| {
+        format!(
+            "failed to save delivery outbox record {}",
+            record.delivery_id
+        )
+    })?;
+
+    state.emit_console_event(
+        "delivery_outbox",
+        Some(record.delivery_id.to_string()),
+        Some(record.status.as_db().to_string()),
+        format!(
+            "{} delivery for {}",
+            record.delivery_kind.as_db(),
+            record.card_id
+        ),
     );
 
     Ok(())
@@ -2480,6 +3347,7 @@ async fn get_quote_record(
             card_id,
             source_kind,
             quote_url,
+            state_subscriber_url,
             previous_quote_id,
             superseded_by_quote_id,
             negotiation_round,
@@ -2512,6 +3380,326 @@ async fn get_quote_record(
     .with_context(|| format!("failed to fetch quote ledger record {quote_id}"))?;
 
     row.map(row_to_quote_record).transpose()
+}
+
+async fn get_delivery_outbox_record(
+    state: &AppState,
+    delivery_id: Uuid,
+) -> anyhow::Result<Option<DeliveryOutboxRecord>> {
+    let row = sqlx::query_as::<_, DeliveryOutboxRow>(
+        r#"
+        SELECT
+            delivery_id,
+            delivery_key,
+            delivery_kind,
+            card_id,
+            settlement_id,
+            reconciliation_id,
+            quote_id,
+            target_url,
+            payload_json,
+            status,
+            attempt_count,
+            max_attempts,
+            next_attempt_at_unix_ms,
+            last_attempt_at_unix_ms,
+            delivered_at_unix_ms,
+            last_http_status,
+            last_error,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_delivery_outbox
+        WHERE delivery_id = ?1
+        "#,
+    )
+    .bind(delivery_id.to_string())
+    .fetch_optional(state.pool())
+    .await
+    .with_context(|| format!("failed to fetch delivery outbox record {delivery_id}"))?;
+
+    row.map(row_to_delivery_outbox_record).transpose()
+}
+
+async fn get_delivery_outbox_by_key(
+    state: &AppState,
+    delivery_key: &str,
+) -> anyhow::Result<Option<DeliveryOutboxRecord>> {
+    let row = sqlx::query_as::<_, DeliveryOutboxRow>(
+        r#"
+        SELECT
+            delivery_id,
+            delivery_key,
+            delivery_kind,
+            card_id,
+            settlement_id,
+            reconciliation_id,
+            quote_id,
+            target_url,
+            payload_json,
+            status,
+            attempt_count,
+            max_attempts,
+            next_attempt_at_unix_ms,
+            last_attempt_at_unix_ms,
+            delivered_at_unix_ms,
+            last_http_status,
+            last_error,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_delivery_outbox
+        WHERE delivery_key = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(delivery_key)
+    .fetch_optional(state.pool())
+    .await
+    .with_context(|| format!("failed to fetch delivery outbox record '{delivery_key}'"))?;
+
+    row.map(row_to_delivery_outbox_record).transpose()
+}
+
+async fn list_delivery_outbox_records(
+    state: &AppState,
+    kind: Option<DeliveryOutboxKind>,
+    status: Option<DeliveryOutboxStatus>,
+    card_id: Option<&str>,
+    settlement_id: Option<Uuid>,
+    quote_id: Option<&str>,
+) -> anyhow::Result<Vec<DeliveryOutboxRecord>> {
+    let rows = sqlx::query_as::<_, DeliveryOutboxRow>(
+        r#"
+        SELECT
+            delivery_id,
+            delivery_key,
+            delivery_kind,
+            card_id,
+            settlement_id,
+            reconciliation_id,
+            quote_id,
+            target_url,
+            payload_json,
+            status,
+            attempt_count,
+            max_attempts,
+            next_attempt_at_unix_ms,
+            last_attempt_at_unix_ms,
+            delivered_at_unix_ms,
+            last_http_status,
+            last_error,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_delivery_outbox
+        WHERE (?1 IS NULL OR delivery_kind = ?1)
+          AND (?2 IS NULL OR status = ?2)
+          AND (?3 IS NULL OR card_id = ?3)
+          AND (?4 IS NULL OR settlement_id = ?4)
+          AND (?5 IS NULL OR quote_id = ?5)
+        ORDER BY created_at_unix_ms DESC
+        "#,
+    )
+    .bind(kind.map(DeliveryOutboxKind::as_db))
+    .bind(status.map(DeliveryOutboxStatus::as_db))
+    .bind(card_id)
+    .bind(settlement_id.map(|value| value.to_string()))
+    .bind(quote_id)
+    .fetch_all(state.pool())
+    .await
+    .context("failed to list delivery outbox records")?;
+
+    rows.into_iter()
+        .map(row_to_delivery_outbox_record)
+        .collect()
+}
+
+async fn build_delivery_outbox_summary(state: &AppState) -> anyhow::Result<DeliveryOutboxSummary> {
+    let records = list_delivery_outbox_records(state, None, None, None, None, None).await?;
+    let mut summary = DeliveryOutboxSummary {
+        total_count: records.len() as u32,
+        pending_count: 0,
+        queued_count: 0,
+        retry_scheduled_count: 0,
+        failed_count: 0,
+        delivered_count: 0,
+        settlement_receipt_count: 0,
+        quote_state_count: 0,
+        next_attempt_at_unix_ms: None,
+        oldest_pending_created_at_unix_ms: None,
+        last_failure_at_unix_ms: None,
+        latest_update_at_unix_ms: None,
+    };
+
+    for record in records {
+        match record.delivery_kind {
+            DeliveryOutboxKind::SettlementReceipt => summary.settlement_receipt_count += 1,
+            DeliveryOutboxKind::QuoteState => summary.quote_state_count += 1,
+        }
+
+        summary.latest_update_at_unix_ms = Some(
+            summary
+                .latest_update_at_unix_ms
+                .map_or(record.updated_at_unix_ms, |current| {
+                    current.max(record.updated_at_unix_ms)
+                }),
+        );
+
+        match record.status {
+            DeliveryOutboxStatus::Queued => {
+                summary.pending_count += 1;
+                summary.queued_count += 1;
+                summary.next_attempt_at_unix_ms = Some(
+                    summary
+                        .next_attempt_at_unix_ms
+                        .map_or(record.next_attempt_at_unix_ms, |current| {
+                            current.min(record.next_attempt_at_unix_ms)
+                        }),
+                );
+                summary.oldest_pending_created_at_unix_ms = Some(
+                    summary
+                        .oldest_pending_created_at_unix_ms
+                        .map_or(record.created_at_unix_ms, |current| {
+                            current.min(record.created_at_unix_ms)
+                        }),
+                );
+            }
+            DeliveryOutboxStatus::RetryScheduled => {
+                summary.pending_count += 1;
+                summary.retry_scheduled_count += 1;
+                summary.next_attempt_at_unix_ms = Some(
+                    summary
+                        .next_attempt_at_unix_ms
+                        .map_or(record.next_attempt_at_unix_ms, |current| {
+                            current.min(record.next_attempt_at_unix_ms)
+                        }),
+                );
+                summary.oldest_pending_created_at_unix_ms = Some(
+                    summary
+                        .oldest_pending_created_at_unix_ms
+                        .map_or(record.created_at_unix_ms, |current| {
+                            current.min(record.created_at_unix_ms)
+                        }),
+                );
+            }
+            DeliveryOutboxStatus::Failed => {
+                summary.failed_count += 1;
+                summary.last_failure_at_unix_ms = Some(
+                    summary
+                        .last_failure_at_unix_ms
+                        .map_or(record.updated_at_unix_ms, |current| {
+                            current.max(record.updated_at_unix_ms)
+                        }),
+                );
+            }
+            DeliveryOutboxStatus::Delivered => {
+                summary.delivered_count += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+async fn replay_dead_letter_delivery_outbox_records(
+    state: &AppState,
+    request: &DeliveryOutboxReplayRequest,
+) -> anyhow::Result<Vec<DeliveryOutboxRecord>> {
+    let mut records = list_delivery_outbox_records(
+        state,
+        request.kind,
+        Some(DeliveryOutboxStatus::Failed),
+        request.card_id.as_deref(),
+        request.settlement_id,
+        request.quote_id.as_deref(),
+    )
+    .await?;
+    let limit = request.limit.unwrap_or(12).min(100) as usize;
+    records.truncate(limit);
+
+    let mut replayed = Vec::with_capacity(records.len());
+    for record in records {
+        reset_delivery_outbox_record(state, record.delivery_id, false).await?;
+        process_delivery_outbox_record(state, record.delivery_id).await?;
+        if let Some(updated) = get_delivery_outbox_record(state, record.delivery_id).await? {
+            replayed.push(updated);
+        }
+    }
+    Ok(replayed)
+}
+
+async fn list_due_delivery_outbox_records(
+    state: &AppState,
+    limit: i64,
+) -> anyhow::Result<Vec<DeliveryOutboxRecord>> {
+    let rows = sqlx::query_as::<_, DeliveryOutboxRow>(
+        r#"
+        SELECT
+            delivery_id,
+            delivery_key,
+            delivery_kind,
+            card_id,
+            settlement_id,
+            reconciliation_id,
+            quote_id,
+            target_url,
+            payload_json,
+            status,
+            attempt_count,
+            max_attempts,
+            next_attempt_at_unix_ms,
+            last_attempt_at_unix_ms,
+            delivered_at_unix_ms,
+            last_http_status,
+            last_error,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM agent_delivery_outbox
+        WHERE status IN (?1, ?2) AND next_attempt_at_unix_ms <= ?3
+        ORDER BY next_attempt_at_unix_ms ASC, created_at_unix_ms ASC
+        LIMIT ?4
+        "#,
+    )
+    .bind(DeliveryOutboxStatus::Queued.as_db())
+    .bind(DeliveryOutboxStatus::RetryScheduled.as_db())
+    .bind(unix_timestamp_ms() as i64)
+    .bind(limit)
+    .fetch_all(state.pool())
+    .await
+    .context("failed to list due delivery outbox records")?;
+
+    rows.into_iter()
+        .map(row_to_delivery_outbox_record)
+        .collect()
+}
+
+async fn retry_delivery_outbox_record(
+    state: &AppState,
+    delivery_id: Uuid,
+) -> anyhow::Result<DeliveryOutboxRecord> {
+    reset_delivery_outbox_record(state, delivery_id, true).await
+}
+
+async fn reset_delivery_outbox_record(
+    state: &AppState,
+    delivery_id: Uuid,
+    wake_worker: bool,
+) -> anyhow::Result<DeliveryOutboxRecord> {
+    let mut record = get_delivery_outbox_record(state, delivery_id)
+        .await?
+        .ok_or_else(|| anyhow!("delivery outbox record '{delivery_id}' was not found"))?;
+    let now = unix_timestamp_ms();
+    record.status = DeliveryOutboxStatus::Queued;
+    record.attempt_count = 0;
+    record.next_attempt_at_unix_ms = now;
+    record.last_attempt_at_unix_ms = None;
+    record.delivered_at_unix_ms = None;
+    record.last_http_status = None;
+    record.last_error = None;
+    record.updated_at_unix_ms = now;
+    save_delivery_outbox_record(state, &record).await?;
+    if wake_worker {
+        state.wake_delivery_outbox();
+    }
+    Ok(record)
 }
 
 async fn get_remote_settlement_by_invocation(
@@ -2581,6 +3769,42 @@ async fn get_remote_settlement_by_transaction(
     .fetch_optional(state.pool())
     .await
     .with_context(|| format!("failed to fetch settlement for transaction {transaction_id}"))?;
+
+    row.map(row_to_remote_settlement).transpose()
+}
+
+async fn get_remote_settlement_by_quote_id(
+    state: &AppState,
+    quote_id: &str,
+) -> anyhow::Result<Option<RemoteAgentSettlementRecord>> {
+    let row = sqlx::query_as::<_, RemoteAgentSettlementRow>(
+        r#"
+        SELECT
+            settlement_id,
+            invocation_id,
+            card_id,
+            remote_agent_url,
+            local_task_id,
+            remote_task_id,
+            transaction_id,
+            mandate_id,
+            quote_id,
+            amount,
+            description,
+            status,
+            verification_message,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        FROM remote_agent_settlements
+        WHERE quote_id = ?1
+        ORDER BY created_at_unix_ms DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(quote_id)
+    .fetch_optional(state.pool())
+    .await
+    .with_context(|| format!("failed to fetch settlement for quote '{quote_id}'"))?;
 
     row.map(row_to_remote_settlement).transpose()
 }
@@ -3048,6 +4272,7 @@ async fn list_quote_records(
                     card_id,
                     source_kind,
                     quote_url,
+                    state_subscriber_url,
                     previous_quote_id,
                     superseded_by_quote_id,
                     negotiation_round,
@@ -3086,6 +4311,7 @@ async fn list_quote_records(
                     card_id,
                     source_kind,
                     quote_url,
+                    state_subscriber_url,
                     previous_quote_id,
                     superseded_by_quote_id,
                     negotiation_round,
@@ -3124,6 +4350,7 @@ async fn list_quote_records(
                     card_id,
                     source_kind,
                     quote_url,
+                    state_subscriber_url,
                     previous_quote_id,
                     superseded_by_quote_id,
                     negotiation_round,
@@ -3162,6 +4389,7 @@ async fn list_quote_records(
                     card_id,
                     source_kind,
                     quote_url,
+                    state_subscriber_url,
                     previous_quote_id,
                     superseded_by_quote_id,
                     negotiation_round,
@@ -3200,6 +4428,7 @@ async fn list_quote_records(
                     card_id,
                     source_kind,
                     quote_url,
+                    state_subscriber_url,
                     previous_quote_id,
                     superseded_by_quote_id,
                     negotiation_round,
@@ -3263,6 +4492,7 @@ async fn revoke_quote_record(
         .or_else(|| Some("manually revoked".to_string()));
     record.updated_at_unix_ms = unix_timestamp_ms();
     save_quote_record(state, &record).await?;
+    propagate_quote_state_update(state, &record).await;
     Ok(record)
 }
 
@@ -3388,6 +4618,7 @@ fn row_to_quote_record(row: QuoteLedgerRow) -> anyhow::Result<QuoteLedgerRecord>
         card_id: row.card_id,
         source_kind: row.source_kind,
         quote_url: row.quote_url,
+        state_subscriber_url: row.state_subscriber_url,
         previous_quote_id: row.previous_quote_id,
         superseded_by_quote_id: row.superseded_by_quote_id,
         negotiation_round: u32::try_from(row.negotiation_round)
@@ -3440,7 +4671,9 @@ fn row_to_reconciliation_record(
         card_id: row.card_id,
         invocation_id: row
             .invocation_id
-            .map(|value| Uuid::parse_str(&value).with_context(|| format!("invalid invocation_id '{value}'")))
+            .map(|value| {
+                Uuid::parse_str(&value).with_context(|| format!("invalid invocation_id '{value}'"))
+            })
             .transpose()?,
         transaction_id: Uuid::parse_str(&row.transaction_id)
             .with_context(|| format!("invalid transaction_id '{}'", row.transaction_id))?,
@@ -3472,6 +4705,65 @@ fn row_to_reconciliation_record(
             .context("negative created_at_unix_ms in agent_settlement_reconciliation")?,
         updated_at_unix_ms: u128::try_from(row.updated_at_unix_ms)
             .context("negative updated_at_unix_ms in agent_settlement_reconciliation")?,
+    })
+}
+
+fn row_to_delivery_outbox_record(row: DeliveryOutboxRow) -> anyhow::Result<DeliveryOutboxRecord> {
+    Ok(DeliveryOutboxRecord {
+        delivery_id: Uuid::parse_str(&row.delivery_id)
+            .with_context(|| format!("invalid delivery_id '{}'", row.delivery_id))?,
+        delivery_key: row.delivery_key,
+        delivery_kind: DeliveryOutboxKind::from_db(&row.delivery_kind)?,
+        card_id: row.card_id,
+        settlement_id: row
+            .settlement_id
+            .map(|value| {
+                Uuid::parse_str(&value).with_context(|| format!("invalid settlement_id '{value}'"))
+            })
+            .transpose()?,
+        reconciliation_id: row
+            .reconciliation_id
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .with_context(|| format!("invalid reconciliation_id '{value}'"))
+            })
+            .transpose()?,
+        quote_id: row.quote_id,
+        target_url: row.target_url,
+        payload_json: serde_json::from_str(&row.payload_json)
+            .context("failed to parse delivery outbox payload_json")?,
+        status: DeliveryOutboxStatus::from_db(&row.status)?,
+        attempt_count: u32::try_from(row.attempt_count)
+            .context("negative attempt_count in agent_delivery_outbox")?,
+        max_attempts: u32::try_from(row.max_attempts)
+            .context("negative max_attempts in agent_delivery_outbox")?,
+        next_attempt_at_unix_ms: u128::try_from(row.next_attempt_at_unix_ms)
+            .context("negative next_attempt_at_unix_ms in agent_delivery_outbox")?,
+        last_attempt_at_unix_ms: row
+            .last_attempt_at_unix_ms
+            .map(|value| {
+                u128::try_from(value)
+                    .context("negative last_attempt_at_unix_ms in agent_delivery_outbox")
+            })
+            .transpose()?,
+        delivered_at_unix_ms: row
+            .delivered_at_unix_ms
+            .map(|value| {
+                u128::try_from(value)
+                    .context("negative delivered_at_unix_ms in agent_delivery_outbox")
+            })
+            .transpose()?,
+        last_http_status: row
+            .last_http_status
+            .map(|value| {
+                u16::try_from(value).context("invalid last_http_status in agent_delivery_outbox")
+            })
+            .transpose()?,
+        last_error: row.last_error,
+        created_at_unix_ms: u128::try_from(row.created_at_unix_ms)
+            .context("negative created_at_unix_ms in agent_delivery_outbox")?,
+        updated_at_unix_ms: u128::try_from(row.updated_at_unix_ms)
+            .context("negative updated_at_unix_ms in agent_delivery_outbox")?,
     })
 }
 
@@ -4331,6 +5623,7 @@ async fn record_quote_offer(
                     previous.superseded_by_quote_id = Some(quote_id.clone());
                     previous.updated_at_unix_ms = now;
                     save_quote_record(state, &previous).await?;
+                    propagate_quote_state_update(state, &previous).await;
                 }
             }
             Some(previous)
@@ -4343,6 +5636,9 @@ async fn record_quote_offer(
         card_id: card.card_id.clone(),
         source_kind: source_kind.to_string(),
         quote_url: quote.quote_url.clone(),
+        state_subscriber_url: existing
+            .as_ref()
+            .and_then(|record| record.state_subscriber_url.clone()),
         previous_quote_id: quote.previous_quote_id.clone(),
         superseded_by_quote_id: existing
             .as_ref()
@@ -4414,6 +5710,7 @@ async fn consume_quote_record(
     record.consumed_by_transaction_id = Some(transaction_id);
     record.updated_at_unix_ms = unix_timestamp_ms();
     save_quote_record(state, &record).await?;
+    propagate_quote_state_update(state, &record).await;
     Ok(Some(record))
 }
 
@@ -4423,7 +5720,7 @@ async fn sync_remote_quote_state(
     quote_id: &str,
     timeout_seconds: u64,
 ) -> anyhow::Result<QuoteLedgerRecord> {
-    let mut record = get_quote_record(state, quote_id)
+    let record = get_quote_record(state, quote_id)
         .await?
         .ok_or_else(|| anyhow!("quote '{}' was not found in the ledger", quote_id))?;
     if record.card_id != card.card_id {
@@ -4438,7 +5735,71 @@ async fn sync_remote_quote_state(
     else {
         return Ok(record);
     };
+    apply_remote_quote_state(state, card, record, remote_state).await
+}
 
+async fn attach_quote_state_subscriber(
+    state: &AppState,
+    quote_id: Option<&str>,
+    state_inbox_url: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(quote_id) = quote_id else {
+        return Ok(());
+    };
+    let normalized = normalize_quote_state_inbox_url(state_inbox_url)?;
+    let Some(mut record) = get_quote_record(state, quote_id).await? else {
+        return Ok(());
+    };
+    if record.state_subscriber_url == normalized {
+        return Ok(());
+    }
+    record.state_subscriber_url = normalized;
+    record.updated_at_unix_ms = unix_timestamp_ms();
+    save_quote_record(state, &record).await
+}
+
+fn normalize_quote_state_inbox_url(raw: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let url = Url::parse(trimmed).context("stateInboxUrl must be an absolute http(s) URL")?;
+    match url.scheme() {
+        "http" | "https" => Ok(Some(trimmed.trim_end_matches('/').to_string())),
+        scheme => anyhow::bail!("stateInboxUrl must use http or https, got '{scheme}'"),
+    }
+}
+
+fn quote_state_inbox_url() -> Option<String> {
+    std::env::var("DAWN_PUBLIC_BASE_URL")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .map(|base| format!("{base}/api/gateway/agent-cards/quotes/state-sync"))
+}
+
+async fn apply_remote_quote_state(
+    state: &AppState,
+    card: &PublishedAgentCard,
+    mut record: QuoteLedgerRecord,
+    remote_state: QuoteStateSnapshot,
+) -> anyhow::Result<QuoteLedgerRecord> {
+    if remote_state.card_id != card.card_id {
+        anyhow::bail!(
+            "remote quote state cardId '{}' does not match card '{}'",
+            remote_state.card_id,
+            card.card_id
+        );
+    }
+    verify_signed_quote_state(card, &remote_state)?;
+    if remote_state.updated_at_unix_ms < record.updated_at_unix_ms
+        && record.status != QuoteLedgerStatus::Offered
+    {
+        return Ok(record);
+    }
     record.previous_quote_id = remote_state.previous_quote_id;
     record.superseded_by_quote_id = remote_state.superseded_by_quote_id;
     record.negotiation_round = remote_state.negotiation_round;
@@ -4452,7 +5813,110 @@ async fn sync_remote_quote_state(
         .updated_at_unix_ms
         .max(record.updated_at_unix_ms);
     save_quote_record(state, &record).await?;
+    note_quote_state_divergence(state, &record).await?;
     Ok(record)
+}
+
+async fn note_quote_state_divergence(
+    state: &AppState,
+    record: &QuoteLedgerRecord,
+) -> anyhow::Result<()> {
+    let Some(settlement) = get_remote_settlement_by_quote_id(state, &record.quote_id).await? else {
+        return Ok(());
+    };
+    let conflict_message = match record.status {
+        QuoteLedgerStatus::Consumed => {
+            let Some(remote_transaction_id) = record.consumed_by_transaction_id else {
+                return Ok(());
+            };
+            if remote_transaction_id == settlement.transaction_id {
+                None
+            } else {
+                Some(format!(
+                    "remote quote state for '{}' was consumed by transaction {} but local settlement uses {}",
+                    record.quote_id, remote_transaction_id, settlement.transaction_id
+                ))
+            }
+        }
+        QuoteLedgerStatus::Revoked if settlement.status != PaymentStatus::Rejected => {
+            Some(format!(
+                "remote quote state for '{}' is revoked while linked settlement {} is {}",
+                record.quote_id,
+                settlement.settlement_id,
+                settlement.status.as_db()
+            ))
+        }
+        _ => None,
+    };
+    let Some(conflict_message) = conflict_message else {
+        return Ok(());
+    };
+    if let Some(mut reconciliation) = get_reconciliation_by_settlement(
+        state,
+        ReconciliationDirection::Outbound,
+        settlement.settlement_id,
+    )
+    .await?
+    {
+        reconciliation.last_error = Some(conflict_message.clone());
+        reconciliation.last_sync_at_unix_ms = Some(unix_timestamp_ms());
+        reconciliation.updated_at_unix_ms = unix_timestamp_ms();
+        save_reconciliation_record(state, &reconciliation).await?;
+    }
+    state.emit_console_event(
+        "quote_state_divergence",
+        Some(record.quote_id.clone()),
+        Some(record.status.as_db().to_string()),
+        conflict_message,
+    );
+    Ok(())
+}
+
+async fn propagate_quote_state_update(state: &AppState, record: &QuoteLedgerRecord) {
+    if record.source_kind != "local" {
+        return;
+    }
+    let Some(state_subscriber_url) = record.state_subscriber_url.as_deref() else {
+        return;
+    };
+    let snapshot = match sign_quote_state(record) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            state.emit_console_event(
+                "quote_state_propagation",
+                Some(record.quote_id.clone()),
+                Some("sign_failed".to_string()),
+                format!(
+                    "failed to sign quote-state update for '{}': {error}",
+                    record.quote_id
+                ),
+            );
+            return;
+        }
+    };
+    if let Err(error) = enqueue_delivery_outbox(
+        state,
+        delivery_key_for_quote_state(&record.quote_id),
+        DeliveryOutboxKind::QuoteState,
+        record.card_id.clone(),
+        None,
+        None,
+        Some(record.quote_id.clone()),
+        state_subscriber_url.to_string(),
+        json!({ "state": snapshot }),
+    )
+    .await
+    {
+        state.emit_console_event(
+            "quote_state_propagation",
+            Some(record.quote_id.clone()),
+            Some("queue_failed".to_string()),
+            format!(
+                "failed to enqueue quote-state push for '{}' to {}: {}",
+                record.quote_id, state_subscriber_url, error
+            ),
+        );
+    }
 }
 
 fn decode_fixed_hex<const N: usize>(raw: &str, label: &str) -> anyhow::Result<[u8; N]> {
@@ -4492,7 +5956,10 @@ fn resolve_quote_state_url(
     absolutize_against_card(card, &expanded)
 }
 
-fn resolve_receipt_inbox_url(card: &PublishedAgentCard, terms: &AgentPaymentTerms) -> Option<String> {
+fn resolve_receipt_inbox_url(
+    card: &PublishedAgentCard,
+    terms: &AgentPaymentTerms,
+) -> Option<String> {
     if let Some(receipt_inbox_url) = terms.receipt_inbox_url.as_deref() {
         return absolutize_against_card(card, receipt_inbox_url);
     }
@@ -4622,6 +6089,7 @@ async fn fetch_remote_settlement_quote(
     allow_metadata_fallback: bool,
     quote_id: Option<&str>,
     counter_offer_amount: Option<f64>,
+    state_inbox_url: Option<&str>,
 ) -> anyhow::Result<AgentSettlementQuote> {
     let metadata_quote = build_settlement_quote(card, requested_amount, description);
     let terms = extract_ap2_terms(&card.card);
@@ -4651,6 +6119,7 @@ async fn fetch_remote_settlement_quote(
                 "description": description,
                 "quoteId": quote_id,
                 "counterOfferAmount": counter_offer_amount,
+                "stateInboxUrl": state_inbox_url,
             }))
             .send()
             .await
@@ -4668,6 +6137,7 @@ async fn fetch_remote_settlement_quote(
                     "counterOfferAmount",
                     counter_offer_amount.map(|value| value.to_string()),
                 ),
+                ("stateInboxUrl", state_inbox_url.map(ToString::to_string)),
             ])
             .send()
             .await
@@ -5020,11 +6490,20 @@ fn not_found(message: impl Into<String>) -> (StatusCode, Json<Value>) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Arc};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use axum::{
         Json, Router,
         extract::Path as AxumPath,
+        http::StatusCode,
+        response::IntoResponse,
         routing::{get, post},
     };
     use reqwest::Client;
@@ -5035,20 +6514,24 @@ mod tests {
 
     use super::{
         AP2_EXTENSION_URI, AgentAuthentication, AgentCapabilities, AgentCard, AgentExtension,
-        AgentSkill, AppState, InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest,
-        PublishedAgentCard, QuoteLedgerRecord, QuoteLedgerStatus, ReconciliationDirection,
-        ReconciliationStatus, RemoteInvocationStatus, RemoteSettlementRequest,
-        SearchAgentCardsRequest, accept_inbound_receipt, apply_counter_offer_to_quote,
-        build_search_haystack, build_settlement_quote, build_settlement_receipt,
-        consume_quote_record, derive_card_id, enrich_local_card_with_quote_url,
-        extract_ap2_roles, extract_ap2_terms, extract_remote_task_id,
-        extract_remote_task_status, fetch_remote_settlement_quote, get_quote_record,
-        get_reconciliation_by_settlement, get_remote_settlement_by_invocation,
+        AgentSkill, AppState, DeliveryOutboxKind, DeliveryOutboxRecord,
+        DeliveryOutboxReplayRequest, DeliveryOutboxStatus, ImportAgentCardRequest,
+        InvokeAgentCardRequest, PaymentStatus, PublishAgentCardRequest, PublishedAgentCard,
+        QuoteLedgerRecord, QuoteLedgerStatus, ReconciliationDirection, ReconciliationStatus,
+        RemoteInvocationStatus, RemoteSettlementRequest, SearchAgentCardsRequest,
+        SettlementReconciliationRecord, accept_inbound_receipt, apply_counter_offer_to_quote,
+        build_delivery_outbox_summary, build_search_haystack, build_settlement_quote,
+        build_settlement_receipt, consume_quote_record, delivery_key_for_quote_state,
+        delivery_key_for_settlement_receipt, derive_card_id, enrich_local_card_with_quote_url,
+        extract_ap2_roles, extract_ap2_terms, extract_remote_task_id, extract_remote_task_status,
+        fetch_remote_settlement_quote, get_delivery_outbox_by_key, get_quote_record,
+        get_reconciliation_by_settlement, get_remote_settlement_by_invocation, import_card_inner,
         invoke_remote_agent_card, matches_search, merge_unique_metadata, publish_card_inner,
         quote_issuer_did_from_signing_key, quote_signing_key, record_quote_offer,
-        remote_task_create_url, remote_task_detail_url, revoke_quote_record,
-        sign_local_settlement_quote, sign_quote_state, sign_settlement_receipt_ack,
-        validate_remote_settlement_request, verify_signed_quote,
+        remote_task_create_url, remote_task_detail_url, replay_dead_letter_delivery_outbox_records,
+        revoke_quote_record, router, save_delivery_outbox_record, sign_local_settlement_quote,
+        sign_quote_state, sign_settlement_receipt_ack, validate_remote_settlement_request,
+        verify_signed_quote, well_known_agent_card_json,
     };
     use crate::{
         app_state::{StoredTask, TaskStatus, unix_timestamp_ms},
@@ -5066,6 +6549,70 @@ mod tests {
         let engine: Engine = sandbox::init_engine()?;
         let state = AppState::new_with_database_url(engine, &database_url).await?;
         Ok((state, path))
+    }
+
+    async fn spawn_agent_card_gateway(
+        state: Arc<AppState>,
+    ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+        let app = Router::new()
+            .route(
+                "/.well-known/agent-card.json",
+                get(well_known_agent_card_json),
+            )
+            .nest("/api/gateway/agent-cards", router())
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((format!("http://{addr}"), handle))
+    }
+
+    async fn wait_for_reconciliation_status(
+        state: &AppState,
+        settlement_id: Uuid,
+        expected: ReconciliationStatus,
+    ) -> anyhow::Result<SettlementReconciliationRecord> {
+        for _ in 0..40 {
+            if let Some(record) = get_reconciliation_by_settlement(
+                state,
+                ReconciliationDirection::Outbound,
+                settlement_id,
+            )
+            .await?
+            {
+                if record.reconciliation_status == expected {
+                    return Ok(record);
+                }
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        anyhow::bail!(
+            "timed out waiting for reconciliation {} to become {}",
+            settlement_id,
+            expected.as_db()
+        )
+    }
+
+    async fn wait_for_outbox_status(
+        state: &AppState,
+        delivery_key: &str,
+        expected: DeliveryOutboxStatus,
+    ) -> anyhow::Result<DeliveryOutboxRecord> {
+        for _ in 0..40 {
+            if let Some(record) = get_delivery_outbox_by_key(state, delivery_key).await? {
+                if record.status == expected {
+                    return Ok(record);
+                }
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        anyhow::bail!(
+            "timed out waiting for delivery outbox '{}' to become {}",
+            delivery_key,
+            expected.as_db()
+        )
     }
 
     fn sample_card() -> PublishedAgentCard {
@@ -5526,6 +7073,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -5587,6 +7135,7 @@ mod tests {
             false,
             Some("quote-prev"),
             Some(13.2),
+            None,
         )
         .await
         .unwrap();
@@ -5629,6 +7178,7 @@ mod tests {
             card_id: card.card_id.clone(),
             source_kind: "local".to_string(),
             quote_url: signed_quote.quote_url.clone(),
+            state_subscriber_url: None,
             previous_quote_id: signed_quote.previous_quote_id.clone(),
             superseded_by_quote_id: None,
             negotiation_round: 1,
@@ -5697,6 +7247,155 @@ mod tests {
         server.abort();
         drop(state);
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn pushes_revoked_quote_state_to_subscriber_inbox() {
+        let (issuer_state, issuer_db_path) = test_state().await.unwrap();
+        let (consumer_state, consumer_db_path) = test_state().await.unwrap();
+        let (consumer_base_url, consumer_handle) = spawn_agent_card_gateway(consumer_state.clone())
+            .await
+            .unwrap();
+        let (issuer_base_url, issuer_handle) = spawn_agent_card_gateway(issuer_state.clone())
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(50)).await;
+
+        publish_card_inner(
+            issuer_state.as_ref(),
+            PublishAgentCardRequest {
+                card_id: Some("quote-bus-agent".to_string()),
+                card: AgentCard {
+                    name: "Quote Bus Agent".to_string(),
+                    description: "Pushes quote-state changes".to_string(),
+                    url: format!("{issuer_base_url}/a2a"),
+                    provider: None,
+                    version: "1.0.0".to_string(),
+                    documentation_url: None,
+                    capabilities: AgentCapabilities {
+                        streaming: None,
+                        push_notifications: None,
+                        state_transition_history: None,
+                        extensions: vec![AgentExtension {
+                            uri: AP2_EXTENSION_URI.to_string(),
+                            description: Some("AP2 pricing".to_string()),
+                            required: Some(false),
+                            params: Some(json!({
+                                "roles": ["payee"],
+                                "pricing": {
+                                    "currency": "CNY",
+                                    "quoteMode": "negotiated",
+                                    "minAmount": 10.0,
+                                    "maxAmount": 20.0
+                                }
+                            })),
+                        }],
+                    },
+                    authentication: AgentAuthentication::default(),
+                    default_input_modes: vec!["text".to_string()],
+                    default_output_modes: vec!["text".to_string()],
+                    skills: Vec::new(),
+                },
+                regions: Some(vec!["global".to_string()]),
+                languages: Some(vec!["en".to_string()]),
+                model_providers: Some(vec!["openai".to_string()]),
+                chat_platforms: Some(vec!["telegram".to_string()]),
+                payment_roles: Some(vec!["payee".to_string()]),
+                locally_hosted: Some(true),
+                published: Some(true),
+                issuer_did: None,
+                signature_hex: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let imported = import_card_inner(
+            consumer_state.as_ref(),
+            ImportAgentCardRequest {
+                card_id: Some("quote-bus-agent".to_string()),
+                card_url: format!("{issuer_base_url}/.well-known/agent-card.json"),
+                published: Some(true),
+                regions: None,
+                languages: None,
+                model_providers: None,
+                chat_platforms: None,
+                payment_roles: None,
+                issuer_did: None,
+                signature_hex: None,
+            },
+        )
+        .await
+        .unwrap()
+        .record;
+
+        let subscriber_inbox_url =
+            format!("{consumer_base_url}/api/gateway/agent-cards/quotes/state-sync");
+        let quote = fetch_remote_settlement_quote(
+            &imported,
+            Some(12.0),
+            Some("Book train"),
+            5,
+            false,
+            None,
+            None,
+            Some(subscriber_inbox_url.as_str()),
+        )
+        .await
+        .unwrap();
+        let quote_id = quote.quote_id.clone().unwrap();
+        record_quote_offer(consumer_state.as_ref(), &imported, &quote, "remote")
+            .await
+            .unwrap();
+
+        let issuer_quote = get_quote_record(issuer_state.as_ref(), &quote_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            issuer_quote.state_subscriber_url.as_deref(),
+            Some(subscriber_inbox_url.as_str())
+        );
+
+        let consumer_quote = get_quote_record(consumer_state.as_ref(), &quote_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(consumer_quote.status, QuoteLedgerStatus::Offered);
+
+        revoke_quote_record(
+            issuer_state.as_ref(),
+            &quote_id,
+            Some("merchant cancelled quote"),
+        )
+        .await
+        .unwrap();
+        sleep(Duration::from_millis(120)).await;
+
+        let pushed_record = get_quote_record(consumer_state.as_ref(), &quote_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pushed_record.status, QuoteLedgerStatus::Revoked);
+        assert_eq!(
+            pushed_record.revoked_reason.as_deref(),
+            Some("merchant cancelled quote")
+        );
+        let outbox = wait_for_outbox_status(
+            issuer_state.as_ref(),
+            &delivery_key_for_quote_state(&quote_id),
+            DeliveryOutboxStatus::Delivered,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outbox.quote_id.as_deref(), Some(quote_id.as_str()));
+
+        issuer_handle.abort();
+        consumer_handle.abort();
+        drop(issuer_state);
+        drop(consumer_state);
+        fs::remove_file(issuer_db_path).ok();
+        fs::remove_file(consumer_db_path).ok();
     }
 
     #[tokio::test]
@@ -5825,8 +7524,7 @@ mod tests {
         let (state, db_path) = test_state().await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let receipt_issuer_did =
-            quote_issuer_did_from_signing_key(&quote_signing_key().unwrap());
+        let receipt_issuer_did = quote_issuer_did_from_signing_key(&quote_signing_key().unwrap());
         let server = tokio::spawn(async move {
             let app = Router::new()
                 .route(
@@ -5844,8 +7542,9 @@ mod tests {
                     "/reconciliation/receipts",
                     post(|Json(value): Json<Value>| async move {
                         let body = value.get("receipt").cloned().unwrap_or(value);
-                        let receipt = serde_json::from_value::<super::SettlementReceiptSnapshot>(body)
-                            .unwrap();
+                        let receipt =
+                            serde_json::from_value::<super::SettlementReceiptSnapshot>(body)
+                                .unwrap();
                         let ack = sign_settlement_receipt_ack(
                             receipt.settlement_id,
                             &receipt.card_id,
@@ -5918,13 +7617,12 @@ mod tests {
         .unwrap();
 
         let settlement = response.settlement.unwrap();
-        let reconciliation = get_reconciliation_by_settlement(
+        let reconciliation = wait_for_reconciliation_status(
             state.as_ref(),
-            ReconciliationDirection::Outbound,
             settlement.settlement_id,
+            ReconciliationStatus::Acknowledged,
         )
         .await
-        .unwrap()
         .unwrap();
         assert_eq!(
             reconciliation.reconciliation_status,
@@ -5932,6 +7630,323 @@ mod tests {
         );
         assert!(reconciliation.acknowledgment_json.is_some());
         assert!(reconciliation.last_error.is_none());
+
+        server.abort();
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn retries_failed_receipt_delivery_from_outbox() {
+        let (state, db_path) = test_state().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receipt_issuer_did = quote_issuer_did_from_signing_key(&quote_signing_key().unwrap());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = attempts.clone();
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/task",
+                    post(|| async {
+                        Json(json!({
+                            "task": {
+                                "taskId": "remote-retry-123",
+                                "status": "completed"
+                            }
+                        }))
+                    }),
+                )
+                .route(
+                    "/reconciliation/receipts",
+                    post(move |Json(value): Json<Value>| {
+                        let attempts = server_attempts.clone();
+                        async move {
+                            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                            if attempt == 1 {
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "counterparty retry later",
+                                )
+                                    .into_response();
+                            }
+                            let body = value.get("receipt").cloned().unwrap_or(value);
+                            let receipt =
+                                serde_json::from_value::<super::SettlementReceiptSnapshot>(body)
+                                    .unwrap();
+                            let ack = sign_settlement_receipt_ack(
+                                receipt.settlement_id,
+                                &receipt.card_id,
+                                receipt.transaction_id,
+                                true,
+                                "counterparty acknowledged receipt after retry",
+                            )
+                            .unwrap();
+                            Json(json!({ "ack": ack })).into_response()
+                        }
+                    }),
+                );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let mut card = sample_card();
+        card.card.url = format!("http://{address}");
+        card.card.capabilities.extensions[0].params = Some(json!({
+            "roles": ["payee"],
+            "pricing": {
+                "currency": "CNY",
+                "quoteMode": "flat",
+                "flatAmount": 18.5,
+                "minAmount": 10.0,
+                "maxAmount": 20.0,
+                "receiptInboxUrl": format!("http://{address}/reconciliation/receipts"),
+                "receiptIssuerDid": receipt_issuer_did
+            }
+        }));
+        publish_card_inner(
+            &state,
+            PublishAgentCardRequest {
+                card_id: Some(card.card_id.clone()),
+                card: card.card.clone(),
+                regions: Some(card.regions.clone()),
+                languages: Some(card.languages.clone()),
+                model_providers: Some(card.model_providers.clone()),
+                chat_platforms: Some(card.chat_platforms.clone()),
+                payment_roles: Some(card.payment_roles.clone()),
+                locally_hosted: Some(false),
+                published: Some(true),
+                issuer_did: None,
+                signature_hex: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = invoke_remote_agent_card(
+            &state,
+            &card.card_id,
+            InvokeAgentCardRequest {
+                name: "delegate with receipt retry".to_string(),
+                instruction: "Book train".to_string(),
+                parent_task_id: None,
+                await_completion: Some(true),
+                timeout_seconds: Some(5),
+                poll_interval_ms: Some(50),
+                settlement: Some(RemoteSettlementRequest {
+                    mandate_id: Uuid::new_v4(),
+                    amount: 18.5,
+                    description: "Settle remote booking".to_string(),
+                    quote_id: None,
+                    counter_offer_amount: None,
+                }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let settlement = response.settlement.unwrap();
+        let outbox = wait_for_outbox_status(
+            state.as_ref(),
+            &delivery_key_for_settlement_receipt(settlement.settlement_id),
+            DeliveryOutboxStatus::Delivered,
+        )
+        .await
+        .unwrap();
+        assert!(outbox.attempt_count >= 2);
+        let reconciliation = wait_for_reconciliation_status(
+            state.as_ref(),
+            settlement.settlement_id,
+            ReconciliationStatus::Acknowledged,
+        )
+        .await
+        .unwrap();
+        assert!(reconciliation.acknowledgment_json.is_some());
+        assert!(attempts.load(Ordering::SeqCst) >= 2);
+
+        server.abort();
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn summarizes_delivery_outbox_health_for_monitoring() {
+        let (state, db_path) = test_state().await.unwrap();
+        let now = unix_timestamp_ms();
+        let records = vec![
+            DeliveryOutboxRecord {
+                delivery_id: Uuid::new_v4(),
+                delivery_key: "receipt-pending".to_string(),
+                delivery_kind: DeliveryOutboxKind::SettlementReceipt,
+                card_id: "card-receipt".to_string(),
+                settlement_id: Some(Uuid::new_v4()),
+                reconciliation_id: Some(Uuid::new_v4()),
+                quote_id: None,
+                target_url: "https://peer.example/receipts".to_string(),
+                payload_json: json!({"kind":"receipt"}),
+                status: DeliveryOutboxStatus::Queued,
+                attempt_count: 0,
+                max_attempts: 8,
+                next_attempt_at_unix_ms: now + 25,
+                last_attempt_at_unix_ms: None,
+                delivered_at_unix_ms: None,
+                last_http_status: None,
+                last_error: None,
+                created_at_unix_ms: now - 400,
+                updated_at_unix_ms: now - 300,
+            },
+            DeliveryOutboxRecord {
+                delivery_id: Uuid::new_v4(),
+                delivery_key: "quote-retry".to_string(),
+                delivery_kind: DeliveryOutboxKind::QuoteState,
+                card_id: "card-quote".to_string(),
+                settlement_id: None,
+                reconciliation_id: None,
+                quote_id: Some("quote-123".to_string()),
+                target_url: "https://peer.example/quote-state".to_string(),
+                payload_json: json!({"kind":"quote_state"}),
+                status: DeliveryOutboxStatus::RetryScheduled,
+                attempt_count: 2,
+                max_attempts: 8,
+                next_attempt_at_unix_ms: now + 10,
+                last_attempt_at_unix_ms: Some(now - 100),
+                delivered_at_unix_ms: None,
+                last_http_status: Some(503),
+                last_error: Some("gateway busy".to_string()),
+                created_at_unix_ms: now - 200,
+                updated_at_unix_ms: now - 80,
+            },
+            DeliveryOutboxRecord {
+                delivery_id: Uuid::new_v4(),
+                delivery_key: "receipt-failed".to_string(),
+                delivery_kind: DeliveryOutboxKind::SettlementReceipt,
+                card_id: "card-receipt".to_string(),
+                settlement_id: Some(Uuid::new_v4()),
+                reconciliation_id: Some(Uuid::new_v4()),
+                quote_id: None,
+                target_url: "https://peer.example/receipts".to_string(),
+                payload_json: json!({"kind":"receipt"}),
+                status: DeliveryOutboxStatus::Failed,
+                attempt_count: 8,
+                max_attempts: 8,
+                next_attempt_at_unix_ms: now + 500,
+                last_attempt_at_unix_ms: Some(now - 30),
+                delivered_at_unix_ms: None,
+                last_http_status: Some(500),
+                last_error: Some("terminal receipt failure".to_string()),
+                created_at_unix_ms: now - 100,
+                updated_at_unix_ms: now - 20,
+            },
+            DeliveryOutboxRecord {
+                delivery_id: Uuid::new_v4(),
+                delivery_key: "quote-delivered".to_string(),
+                delivery_kind: DeliveryOutboxKind::QuoteState,
+                card_id: "card-quote".to_string(),
+                settlement_id: None,
+                reconciliation_id: None,
+                quote_id: Some("quote-456".to_string()),
+                target_url: "https://peer.example/quote-state".to_string(),
+                payload_json: json!({"kind":"quote_state"}),
+                status: DeliveryOutboxStatus::Delivered,
+                attempt_count: 1,
+                max_attempts: 8,
+                next_attempt_at_unix_ms: now,
+                last_attempt_at_unix_ms: Some(now - 60),
+                delivered_at_unix_ms: Some(now - 55),
+                last_http_status: Some(202),
+                last_error: None,
+                created_at_unix_ms: now - 300,
+                updated_at_unix_ms: now - 55,
+            },
+        ];
+
+        for record in &records {
+            save_delivery_outbox_record(&state, record).await.unwrap();
+        }
+
+        let summary = build_delivery_outbox_summary(&state).await.unwrap();
+        assert_eq!(summary.total_count, 4);
+        assert_eq!(summary.pending_count, 2);
+        assert_eq!(summary.queued_count, 1);
+        assert_eq!(summary.retry_scheduled_count, 1);
+        assert_eq!(summary.failed_count, 1);
+        assert_eq!(summary.delivered_count, 1);
+        assert_eq!(summary.settlement_receipt_count, 2);
+        assert_eq!(summary.quote_state_count, 2);
+        assert_eq!(summary.next_attempt_at_unix_ms, Some(now + 10));
+        assert_eq!(summary.oldest_pending_created_at_unix_ms, Some(now - 400));
+        assert_eq!(summary.last_failure_at_unix_ms, Some(now - 20));
+        assert_eq!(summary.latest_update_at_unix_ms, Some(now - 20));
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn replays_failed_quote_state_dead_letters() {
+        let (state, db_path) = test_state().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/quote-state",
+                post(move |Json(_value): Json<Value>| {
+                    let hits = server_hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (StatusCode::ACCEPTED, Json(json!({ "accepted": true })))
+                    }
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let now = unix_timestamp_ms();
+        let failed = DeliveryOutboxRecord {
+            delivery_id: Uuid::new_v4(),
+            delivery_key: "dead-letter-quote".to_string(),
+            delivery_kind: DeliveryOutboxKind::QuoteState,
+            card_id: "card-quote".to_string(),
+            settlement_id: None,
+            reconciliation_id: None,
+            quote_id: Some("quote-dead".to_string()),
+            target_url: format!("http://{address}/quote-state"),
+            payload_json: json!({
+                "quoteId": "quote-dead",
+                "cardId": "card-quote",
+                "status": "revoked"
+            }),
+            status: DeliveryOutboxStatus::Failed,
+            attempt_count: 8,
+            max_attempts: 8,
+            next_attempt_at_unix_ms: now,
+            last_attempt_at_unix_ms: Some(now - 100),
+            delivered_at_unix_ms: None,
+            last_http_status: Some(503),
+            last_error: Some("terminal dead-letter failure".to_string()),
+            created_at_unix_ms: now - 200,
+            updated_at_unix_ms: now - 50,
+        };
+        save_delivery_outbox_record(&state, &failed).await.unwrap();
+
+        let replayed = replay_dead_letter_delivery_outbox_records(
+            state.as_ref(),
+            &DeliveryOutboxReplayRequest {
+                kind: Some(DeliveryOutboxKind::QuoteState),
+                card_id: Some("card-quote".to_string()),
+                settlement_id: None,
+                quote_id: Some("quote-dead".to_string()),
+                limit: Some(4),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].delivery_id, failed.delivery_id);
+        assert_eq!(replayed[0].status, DeliveryOutboxStatus::Delivered);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         server.abort();
         fs::remove_file(db_path).ok();
@@ -5958,7 +7973,9 @@ mod tests {
             updated_at_unix_ms: unix_timestamp_ms(),
         };
         let receipt = build_settlement_receipt(&settlement).unwrap();
-        let ack = accept_inbound_receipt(state.as_ref(), &receipt).await.unwrap();
+        let ack = accept_inbound_receipt(state.as_ref(), &receipt)
+            .await
+            .unwrap();
         assert!(ack.accepted);
 
         let record = get_reconciliation_by_settlement(

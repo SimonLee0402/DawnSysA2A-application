@@ -24,12 +24,16 @@ struct ConnectorStatusReport {
 #[serde(rename_all = "camelCase")]
 struct ConfiguredConnectors {
     openai: bool,
+    anthropic: bool,
     deepseek: bool,
     qwen: bool,
     zhipu: bool,
     moonshot: bool,
     doubao: bool,
+    ollama: bool,
     telegram: bool,
+    slack: bool,
+    discord: bool,
     feishu: bool,
     dingtalk: bool,
     wecom_bot: bool,
@@ -135,11 +139,13 @@ pub async fn execute_model_connector(
 ) -> anyhow::Result<ModelResponseResult> {
     match provider {
         "openai" => execute_openai_response(request).await,
+        "anthropic" => execute_anthropic_response(request).await,
         "deepseek" => execute_deepseek_response(request).await,
         "qwen" => execute_qwen_response(request).await,
         "zhipu" => execute_zhipu_response(request).await,
         "moonshot" => execute_moonshot_response(request).await,
         "doubao" => execute_doubao_response(request).await,
+        "ollama" => execute_ollama_response(request).await,
         other => Err(anyhow::anyhow!("unsupported model provider: {other}")),
     }
 }
@@ -159,6 +165,10 @@ pub async fn execute_chat_connector(
                 disable_notification: request.disable_notification,
             })
             .await
+        }
+        "slack" => send_webhook_connector("slack", "SLACK_BOT_WEBHOOK_URL", request.text).await,
+        "discord" => {
+            send_webhook_connector("discord", "DISCORD_BOT_WEBHOOK_URL", request.text).await
         }
         "feishu" => send_webhook_connector("feishu", "FEISHU_BOT_WEBHOOK_URL", request.text).await,
         "dingtalk" => {
@@ -200,12 +210,16 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
         .route("/model/openai/respond", post(openai_respond))
+        .route("/model/anthropic/respond", post(anthropic_respond))
         .route("/model/deepseek/respond", post(deepseek_respond))
         .route("/model/qwen/respond", post(qwen_respond))
         .route("/model/zhipu/respond", post(zhipu_respond))
         .route("/model/moonshot/respond", post(moonshot_respond))
         .route("/model/doubao/respond", post(doubao_respond))
+        .route("/model/ollama/respond", post(ollama_respond))
         .route("/chat/telegram/send", post(send_telegram_message))
+        .route("/chat/slack/send", post(send_slack_message))
+        .route("/chat/discord/send", post(send_discord_message))
         .route("/chat/feishu/send", post(send_feishu_message))
         .route("/chat/dingtalk/send", post(send_dingtalk_message))
         .route("/chat/wecom/send", post(send_wecom_message))
@@ -220,12 +234,17 @@ async fn status() -> Json<ConnectorStatusReport> {
     Json(ConnectorStatusReport {
         configured: ConfiguredConnectors {
             openai: std::env::var("OPENAI_API_KEY").is_ok(),
+            anthropic: std::env::var("ANTHROPIC_API_KEY").is_ok(),
             deepseek: std::env::var("DEEPSEEK_API_KEY").is_ok(),
             qwen: resolve_first_present_env(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]).is_some(),
             zhipu: std::env::var("ZHIPU_API_KEY").is_ok(),
             moonshot: std::env::var("MOONSHOT_API_KEY").is_ok(),
             doubao: resolve_first_present_env(&["DOUBAO_API_KEY", "ARK_API_KEY"]).is_some(),
+            ollama: std::env::var("OLLAMA_CHAT_URL").is_ok()
+                || std::env::var("OLLAMA_BASE_URL").is_ok(),
             telegram: std::env::var("TELEGRAM_BOT_TOKEN").is_ok(),
+            slack: std::env::var("SLACK_BOT_WEBHOOK_URL").is_ok(),
+            discord: std::env::var("DISCORD_BOT_WEBHOOK_URL").is_ok(),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
             wecom_bot: std::env::var("WECOM_BOT_WEBHOOK_URL").is_ok(),
@@ -237,6 +256,11 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "openai",
                 region: "global",
                 integration_mode: "live",
+            },
+            ModelProviderSupport {
+                provider: "anthropic",
+                region: "global",
+                integration_mode: "live_messages",
             },
             ModelProviderSupport {
                 provider: "deepseek",
@@ -263,12 +287,27 @@ async fn status() -> Json<ConnectorStatusReport> {
                 region: "china",
                 integration_mode: "live_ark_chat_compatible",
             },
+            ModelProviderSupport {
+                provider: "ollama",
+                region: "local",
+                integration_mode: "live_local_chat",
+            },
         ],
         supported_chat_platforms: vec![
             ChatPlatformSupport {
                 platform: "telegram",
                 region: "global",
                 integration_mode: "live",
+            },
+            ChatPlatformSupport {
+                platform: "slack",
+                region: "global",
+                integration_mode: "live_webhook",
+            },
+            ChatPlatformSupport {
+                platform: "discord",
+                region: "global",
+                integration_mode: "live_webhook",
             },
             ChatPlatformSupport {
                 platform: "feishu",
@@ -304,6 +343,16 @@ async fn openai_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_openai_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn anthropic_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_anthropic_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -359,11 +408,41 @@ async fn doubao_respond(
         .map_err(connector_anyhow_error)
 }
 
+async fn ollama_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_ollama_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
 async fn send_telegram_message(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<TelegramSendRequest>,
 ) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
     send_telegram_connector(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_slack_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<WebhookTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_webhook_connector("slack", "SLACK_BOT_WEBHOOK_URL", request.text)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_discord_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<WebhookTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_webhook_connector("discord", "DISCORD_BOT_WEBHOOK_URL", request.text)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -464,6 +543,68 @@ async fn execute_openai_response(
     })
 }
 
+async fn execute_anthropic_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model.unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string());
+    let Some(api_key) = std::env::var("ANTHROPIC_API_KEY").ok() else {
+        return Ok(ModelResponseResult {
+            mode: "dry_run",
+            provider: "anthropic",
+            model,
+            output_text: format!(
+                "ANTHROPIC_API_KEY is not configured. Dry-run request would send input: {input}"
+            ),
+            raw_response: None,
+        });
+    };
+    let endpoint = resolve_endpoint(
+        Some("ANTHROPIC_MESSAGES_URL"),
+        "https://api.anthropic.com/v1/messages",
+    );
+    let anthropic_version =
+        std::env::var("ANTHROPIC_VERSION").unwrap_or_else(|_| "2023-06-01".to_string());
+    let body = json!({
+        "model": model,
+        "max_tokens": 1024,
+        "system": instructions,
+        "messages": [
+            {
+                "role": "user",
+                "content": input
+            }
+        ]
+    });
+
+    info!("Dispatching live Anthropic messages request through gateway connector");
+    let response = Client::new()
+        .post(&endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", anthropic_version)
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = response.json::<Value>().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("anthropic connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "anthropic",
+        model: body["model"].as_str().unwrap_or("unknown").to_string(),
+        output_text: extract_anthropic_text(&raw_response),
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn execute_deepseek_response(
     request: OpenAIResponseRequest,
 ) -> anyhow::Result<ModelResponseResult> {
@@ -536,6 +677,45 @@ async fn execute_doubao_response(
     .await
 }
 
+async fn execute_ollama_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model.unwrap_or_else(|| "llama3.1".to_string());
+    let base_url = std::env::var("OLLAMA_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let endpoint =
+        std::env::var("OLLAMA_CHAT_URL").unwrap_or_else(|_| format!("{base_url}/api/chat"));
+    let body = json!({
+        "model": model,
+        "messages": build_chat_completion_messages(&input, instructions.as_deref()),
+        "stream": false
+    });
+
+    info!("Dispatching live Ollama chat request through gateway connector");
+    let response = Client::new().post(&endpoint).json(&body).send().await?;
+    let status = response.status();
+    let raw_response = response.json::<Value>().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("ollama connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "ollama",
+        model: body["model"].as_str().unwrap_or("unknown").to_string(),
+        output_text: extract_ollama_text(&raw_response),
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn send_telegram_connector(request: TelegramSendRequest) -> anyhow::Result<ChatSendResult> {
     let Some(bot_token) = std::env::var("TELEGRAM_BOT_TOKEN").ok() else {
         return Ok(ChatSendResult {
@@ -588,6 +768,12 @@ async fn send_webhook_connector(
     text: String,
 ) -> anyhow::Result<ChatSendResult> {
     let payload = match platform {
+        "slack" => json!({
+            "text": text
+        }),
+        "discord" => json!({
+            "content": text
+        }),
         "feishu" => json!({
             "msg_type": "text",
             "content": {
@@ -987,6 +1173,29 @@ fn extract_chat_completion_text(raw_response: &Value) -> String {
         .unwrap_or_else(|| raw_response.to_string())
 }
 
+fn extract_anthropic_text(raw_response: &Value) -> String {
+    raw_response
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("text")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+        })
+        .unwrap_or_else(|| raw_response.to_string())
+}
+
+fn extract_ollama_text(raw_response: &Value) -> String {
+    raw_response
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| raw_response.to_string())
+}
+
 fn connector_anyhow_error(error: anyhow::Error) -> (axum::http::StatusCode, Json<Value>) {
     (
         axum::http::StatusCode::BAD_GATEWAY,
@@ -1002,7 +1211,8 @@ mod tests {
 
     use super::{
         QQSendRequest, build_chat_completion_messages, build_qq_message_payload,
-        build_wechat_official_account_payload, extract_chat_completion_text, extract_openai_text,
+        build_wechat_official_account_payload, extract_anthropic_text,
+        extract_chat_completion_text, extract_ollama_text, extract_openai_text,
         normalize_qq_target_type,
     };
 
@@ -1060,6 +1270,31 @@ mod tests {
         });
 
         assert_eq!(extract_chat_completion_text(&raw), "china provider reply");
+    }
+
+    #[test]
+    fn extracts_anthropic_content_text() {
+        let raw = json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "anthropic reply"
+                }
+            ]
+        });
+
+        assert_eq!(extract_anthropic_text(&raw), "anthropic reply");
+    }
+
+    #[test]
+    fn extracts_ollama_message_content() {
+        let raw = json!({
+            "message": {
+                "content": "ollama reply"
+            }
+        });
+
+        assert_eq!(extract_ollama_text(&raw), "ollama reply");
     }
 
     #[test]

@@ -1,23 +1,26 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Html,
     routing::{get, post},
 };
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::error;
+use uuid::Uuid;
 
 use crate::{
     agent_cards::{self, ImportAgentCardRequest, PublishedAgentCard},
-    app_state::AppState,
+    app_state::{AppState, MarketplacePeerRecord, MarketplacePeerSyncStatus, unix_timestamp_ms},
     skill_registry::{self, InstallSkillPackageRequest, SkillRecord},
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceSkillEntry {
     pub skill_id: String,
@@ -32,7 +35,7 @@ pub struct MarketplaceSkillEntry {
     pub install_url: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceAgentEntry {
     pub card_id: String,
@@ -49,7 +52,7 @@ pub struct MarketplaceAgentEntry {
     pub install_url: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceCatalog {
     pub generated_at_unix_ms: u128,
@@ -58,13 +61,61 @@ pub struct MarketplaceCatalog {
     pub agent_cards: Vec<MarketplaceAgentEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct CatalogQuery {
     q: Option<String>,
     kind: Option<String>,
     signed_only: Option<bool>,
     published_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertMarketplacePeerRequest {
+    peer_id: Option<String>,
+    display_name: String,
+    base_url: String,
+    catalog_url: Option<String>,
+    enabled: Option<bool>,
+    trust_enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FederatedMarketplaceSkillEntry {
+    source_kind: String,
+    source_peer_id: String,
+    source_display_name: String,
+    source_catalog_url: String,
+    entry: MarketplaceSkillEntry,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FederatedMarketplaceAgentEntry {
+    source_kind: String,
+    source_peer_id: String,
+    source_display_name: String,
+    source_catalog_url: String,
+    entry: MarketplaceAgentEntry,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FederatedMarketplacePeerSnapshot {
+    peer: MarketplacePeerRecord,
+    skill_count: usize,
+    agent_card_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FederatedMarketplaceCatalog {
+    generated_at_unix_ms: u128,
+    peers: Vec<FederatedMarketplacePeerSnapshot>,
+    skills: Vec<FederatedMarketplaceSkillEntry>,
+    agent_cards: Vec<FederatedMarketplaceAgentEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,8 +134,11 @@ struct InstallAgentCardRequest {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/catalog", get(get_catalog))
+        .route("/catalog/federated", get(get_federated_catalog))
         .route("/install/skill", post(install_skill))
         .route("/install/agent-card", post(install_agent_card))
+        .route("/peers", get(list_peers).post(upsert_peer))
+        .route("/peers/:peer_id", get(get_peer))
 }
 
 pub fn page_router() -> Router<Arc<AppState>> {
@@ -96,6 +150,16 @@ async fn get_catalog(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<MarketplaceCatalog>, (StatusCode, Json<Value>)> {
     build_catalog(&state, query)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn get_federated_catalog(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CatalogQuery>,
+) -> Result<Json<FederatedMarketplaceCatalog>, (StatusCode, Json<Value>)> {
+    build_federated_catalog(&state, query)
         .await
         .map(Json)
         .map_err(internal_error)
@@ -135,6 +199,82 @@ async fn install_agent_card(
     .map_err(internal_error)
 }
 
+async fn list_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<MarketplacePeerRecord>>, (StatusCode, Json<Value>)> {
+    state
+        .list_marketplace_peers()
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn get_peer(
+    State(state): State<Arc<AppState>>,
+    Path(peer_id): Path<String>,
+) -> Result<Json<MarketplacePeerRecord>, (StatusCode, Json<Value>)> {
+    state
+        .get_marketplace_peer(&peer_id)
+        .await
+        .map_err(internal_error)?
+        .map(Json)
+        .ok_or_else(|| not_found("marketplace peer not found"))
+}
+
+async fn upsert_peer(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UpsertMarketplacePeerRequest>,
+) -> Result<Json<MarketplacePeerRecord>, (StatusCode, Json<Value>)> {
+    let display_name = request.display_name.trim();
+    if display_name.is_empty() {
+        return Err(bad_request("displayName must not be empty"));
+    }
+    let base_url = normalize_base_url(&request.base_url)?;
+    let catalog_url = request
+        .catalog_url
+        .as_deref()
+        .map(normalize_absolute_url)
+        .transpose()?
+        .unwrap_or_else(|| default_peer_catalog_url(&base_url));
+    let now = unix_timestamp_ms();
+    let peer_id = request
+        .peer_id
+        .as_deref()
+        .and_then(normalize_peer_id)
+        .unwrap_or_else(|| derive_peer_id(&base_url));
+    let existing = state
+        .get_marketplace_peer(&peer_id)
+        .await
+        .map_err(internal_error)?;
+    let peer = state
+        .upsert_marketplace_peer(MarketplacePeerRecord {
+            peer_id,
+            display_name: display_name.to_string(),
+            base_url,
+            catalog_url,
+            enabled: request.enabled.unwrap_or(true),
+            trust_enabled: request.trust_enabled.unwrap_or(true),
+            sync_status: existing
+                .as_ref()
+                .map(|peer| peer.sync_status)
+                .unwrap_or(MarketplacePeerSyncStatus::Pending),
+            last_sync_error: existing
+                .as_ref()
+                .and_then(|peer| peer.last_sync_error.clone()),
+            last_synced_at_unix_ms: existing
+                .as_ref()
+                .and_then(|peer| peer.last_synced_at_unix_ms),
+            created_at_unix_ms: existing
+                .as_ref()
+                .map(|peer| peer.created_at_unix_ms)
+                .unwrap_or(now),
+            updated_at_unix_ms: now,
+        })
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(peer))
+}
+
 pub async fn well_known_catalog(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MarketplaceCatalog>, (StatusCode, Json<Value>)> {
@@ -155,11 +295,11 @@ pub async fn well_known_catalog(
 async fn page() -> Html<&'static str> {
     Html(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Dawn Marketplace</title>
+  <title>Dawn 市场</title>
   <style>
     :root {
       --bg: #081018;
@@ -230,34 +370,116 @@ async fn page() -> Html<&'static str> {
 <body>
   <div class="shell">
     <section class="hero">
-      <div class="eyebrow">Dawn Marketplace</div>
-      <h1>Public Skills And Agents</h1>
-      <div class="copy">
-        Browse published agent cards and signed Wasm skills from this gateway. Installable entries expose direct package or card URLs for cross-gateway discovery.
+      <div class="eyebrow" id="marketplace-eyebrow">Dawn 市场</div>
+      <h1 id="marketplace-title">公开技能与 Agents</h1>
+      <div class="copy" id="marketplace-copy">
+        浏览当前网关发布的 Agent Cards 与已签名 Wasm 技能。可安装条目会直接暴露包地址或卡片地址，便于跨网关发现。
       </div>
       <div class="controls">
-        <input id="q" type="search" placeholder="Search skills, agents, tags, platforms" />
+        <input id="q" type="search" placeholder="搜索技能、Agent、标签或平台" />
         <select id="kind">
-          <option value="">All</option>
-          <option value="skill">Skills</option>
+          <option value="">全部</option>
+          <option value="skill">技能</option>
           <option value="agent">Agents</option>
         </select>
-        <button type="button" onclick="refresh()">Refresh</button>
+        <button type="button" id="lang-toggle" onclick="toggleLanguage()">EN</button>
+        <button type="button" onclick="refresh()">刷新</button>
       </div>
     </section>
     <section class="grid">
       <section class="panel">
-        <h2>Skills</h2>
+        <h2 id="skills-title">技能</h2>
         <div id="skills" class="cards"></div>
       </section>
       <section class="panel">
-        <h2>Agent Cards</h2>
+        <h2 id="agents-title">Agent Cards</h2>
         <div id="agents" class="cards"></div>
       </section>
     </section>
   </div>
   <script>
     const ellipsis = (value, max = 88) => value && value.length > max ? `${value.slice(0, max)}…` : (value || "—");
+    const localeKey = "dawnUiLanguage";
+    const translations = {
+      zh: {
+        title: "Dawn 市场",
+        eyebrow: "Dawn 市场",
+        hero: "公开技能与 Agents",
+        copy: "浏览当前网关发布的 Agent Cards 与已签名 Wasm 技能。可安装条目会直接暴露包地址或卡片地址，便于跨网关发现。",
+        searchPlaceholder: "搜索技能、Agent、标签或平台",
+        all: "全部",
+        skill: "技能",
+        agent: "Agents",
+        skillsTitle: "技能",
+        agentsTitle: "Agent Cards",
+        refresh: "刷新",
+        toggle: "EN",
+        signed: "已签名发布方",
+        unsigned: "未签名",
+        active: "启用中",
+        inactive: "未启用",
+        package: "安装包",
+        noSkills: "没有匹配的技能。",
+        local: "本地",
+        remote: "远端",
+        noChat: "没有聊天元数据",
+        card: "卡片",
+        noAgents: "没有匹配的 Agent Card。"
+      },
+      en: {
+        title: "Dawn Marketplace",
+        eyebrow: "Dawn Marketplace",
+        hero: "Public Skills And Agents",
+        copy: "Browse published agent cards and signed Wasm skills from this gateway. Installable entries expose direct package or card URLs for cross-gateway discovery.",
+        searchPlaceholder: "Search skills, agents, tags, platforms",
+        all: "All",
+        skill: "Skills",
+        agent: "Agents",
+        skillsTitle: "Skills",
+        agentsTitle: "Agent Cards",
+        refresh: "Refresh",
+        toggle: "中文",
+        signed: "Signed publisher",
+        unsigned: "Unsigned",
+        active: "active",
+        inactive: "inactive",
+        package: "Package",
+        noSkills: "No skills matched.",
+        local: "local",
+        remote: "remote",
+        noChat: "no chat metadata",
+        card: "Card",
+        noAgents: "No agent cards matched."
+      }
+    };
+    let currentLanguage = window.localStorage?.getItem(localeKey) || "zh";
+    function t(key) {
+      return translations[currentLanguage]?.[key] || translations.zh[key] || key;
+    }
+    function applyLanguage() {
+      document.documentElement.lang = currentLanguage === "zh" ? "zh-CN" : "en";
+      document.title = t("title");
+      document.getElementById("marketplace-eyebrow").textContent = t("eyebrow");
+      document.getElementById("marketplace-title").textContent = t("hero");
+      document.getElementById("marketplace-copy").textContent = t("copy");
+      document.getElementById("q").placeholder = t("searchPlaceholder");
+      const kind = document.getElementById("kind");
+      kind.options[0].textContent = t("all");
+      kind.options[1].textContent = t("skill");
+      kind.options[2].textContent = t("agent");
+      document.getElementById("skills-title").textContent = t("skillsTitle");
+      document.getElementById("agents-title").textContent = t("agentsTitle");
+      document.getElementById("lang-toggle").textContent = t("toggle");
+      document.querySelector("button[onclick='refresh()']").textContent = t("refresh");
+    }
+    function toggleLanguage() {
+      currentLanguage = currentLanguage === "zh" ? "en" : "zh";
+      try {
+        window.localStorage?.setItem(localeKey, currentLanguage);
+      } catch (_error) {}
+      applyLanguage();
+      refresh();
+    }
     async function refresh() {
       const q = document.getElementById("q").value;
       const kind = document.getElementById("kind").value;
@@ -272,19 +494,20 @@ async fn page() -> Html<&'static str> {
         <article class="item">
           <strong>${skill.displayName} <small>${skill.skillId}@${skill.version}</small></strong>
           <div class="meta">${ellipsis(skill.description)}</div>
-          <div class="meta">${skill.signed ? "Signed publisher" : "Unsigned"} · ${skill.active ? "active" : "inactive"}</div>
+          <div class="meta">${skill.signed ? t("signed") : t("unsigned")} · ${skill.active ? t("active") : t("inactive")}</div>
           <div class="tags">${(skill.capabilities || []).map((tag) => `<span class="tag">${tag}</span>`).join("")}</div>
-          <div class="meta">Package: ${ellipsis(skill.packageUrl, 110)}</div>
-        </article>`).join("") || `<div class="meta">No skills matched.</div>`;
+          <div class="meta">${t("package")}：${ellipsis(skill.packageUrl, 110)}</div>
+        </article>`).join("") || `<div class="meta">${t("noSkills")}</div>`;
       document.getElementById("agents").innerHTML = (catalog.agentCards || []).map((agent) => `
         <article class="item">
           <strong>${agent.name} <small>${agent.cardId}</small></strong>
           <div class="meta">${ellipsis(agent.description)}</div>
-          <div class="meta">${agent.locallyHosted ? "local" : "remote"} · ${(agent.chatPlatforms || []).join(", ") || "no chat metadata"}</div>
+          <div class="meta">${agent.locallyHosted ? t("local") : t("remote")} · ${(agent.chatPlatforms || []).join(", ") || t("noChat")}</div>
           <div class="tags">${(agent.paymentRoles || []).map((tag) => `<span class="tag">${tag}</span>`).join("")}</div>
-          <div class="meta">Card: ${ellipsis(agent.cardUrl || agent.url, 110)}</div>
-        </article>`).join("") || `<div class="meta">No agent cards matched.</div>`;
+          <div class="meta">${t("card")}：${ellipsis(agent.cardUrl || agent.url, 110)}</div>
+        </article>`).join("") || `<div class="meta">${t("noAgents")}</div>`;
     }
+    applyLanguage();
     refresh();
   </script>
 </body>
@@ -330,11 +553,185 @@ async fn build_catalog(
     };
 
     Ok(MarketplaceCatalog {
-        generated_at_unix_ms: crate::app_state::unix_timestamp_ms(),
+        generated_at_unix_ms: unix_timestamp_ms(),
         public_base_url,
         skills,
         agent_cards,
     })
+}
+
+async fn build_federated_catalog(
+    state: &Arc<AppState>,
+    query: CatalogQuery,
+) -> anyhow::Result<FederatedMarketplaceCatalog> {
+    let local_catalog = build_catalog(state, query.clone()).await?;
+    let local_catalog_url = join_public_url(
+        local_catalog.public_base_url.as_deref(),
+        "/api/gateway/marketplace/catalog",
+    );
+    let mut skills = local_catalog
+        .skills
+        .into_iter()
+        .map(|entry| FederatedMarketplaceSkillEntry {
+            source_kind: "local".to_string(),
+            source_peer_id: "local".to_string(),
+            source_display_name: "Local Gateway".to_string(),
+            source_catalog_url: local_catalog_url.clone(),
+            entry,
+        })
+        .collect::<Vec<_>>();
+    let mut agent_cards = local_catalog
+        .agent_cards
+        .into_iter()
+        .map(|entry| FederatedMarketplaceAgentEntry {
+            source_kind: "local".to_string(),
+            source_peer_id: "local".to_string(),
+            source_display_name: "Local Gateway".to_string(),
+            source_catalog_url: local_catalog_url.clone(),
+            entry,
+        })
+        .collect::<Vec<_>>();
+    let mut snapshots = Vec::new();
+    let client = Client::builder().timeout(Duration::from_secs(8)).build()?;
+
+    for peer in state.list_marketplace_peers().await? {
+        let mut peer_for_snapshot = peer.clone();
+        if !peer.enabled || !peer.trust_enabled {
+            snapshots.push(FederatedMarketplacePeerSnapshot {
+                peer: peer_for_snapshot,
+                skill_count: 0,
+                agent_card_count: 0,
+            });
+            continue;
+        }
+
+        match fetch_peer_catalog(&client, &peer, &query).await {
+            Ok(remote_catalog) => {
+                let remote_catalog = normalize_remote_catalog(&peer, remote_catalog)?;
+                let skill_count = remote_catalog.skills.len();
+                let agent_card_count = remote_catalog.agent_cards.len();
+                peer_for_snapshot.sync_status = MarketplacePeerSyncStatus::Healthy;
+                peer_for_snapshot.last_sync_error = None;
+                peer_for_snapshot.last_synced_at_unix_ms = Some(unix_timestamp_ms());
+                peer_for_snapshot.updated_at_unix_ms = unix_timestamp_ms();
+                let peer_for_snapshot = state.upsert_marketplace_peer(peer_for_snapshot).await?;
+
+                skills.extend(remote_catalog.skills.into_iter().map(|entry| {
+                    FederatedMarketplaceSkillEntry {
+                        source_kind: "peer".to_string(),
+                        source_peer_id: peer_for_snapshot.peer_id.clone(),
+                        source_display_name: peer_for_snapshot.display_name.clone(),
+                        source_catalog_url: peer_for_snapshot.catalog_url.clone(),
+                        entry,
+                    }
+                }));
+                agent_cards.extend(remote_catalog.agent_cards.into_iter().map(|entry| {
+                    FederatedMarketplaceAgentEntry {
+                        source_kind: "peer".to_string(),
+                        source_peer_id: peer_for_snapshot.peer_id.clone(),
+                        source_display_name: peer_for_snapshot.display_name.clone(),
+                        source_catalog_url: peer_for_snapshot.catalog_url.clone(),
+                        entry,
+                    }
+                }));
+                snapshots.push(FederatedMarketplacePeerSnapshot {
+                    peer: peer_for_snapshot,
+                    skill_count,
+                    agent_card_count,
+                });
+            }
+            Err(error) => {
+                peer_for_snapshot.sync_status = classify_peer_sync_error(&error);
+                peer_for_snapshot.last_sync_error = Some(error.to_string());
+                peer_for_snapshot.last_synced_at_unix_ms = Some(unix_timestamp_ms());
+                peer_for_snapshot.updated_at_unix_ms = unix_timestamp_ms();
+                let peer_for_snapshot = state.upsert_marketplace_peer(peer_for_snapshot).await?;
+                snapshots.push(FederatedMarketplacePeerSnapshot {
+                    peer: peer_for_snapshot,
+                    skill_count: 0,
+                    agent_card_count: 0,
+                });
+            }
+        }
+    }
+
+    Ok(FederatedMarketplaceCatalog {
+        generated_at_unix_ms: unix_timestamp_ms(),
+        peers: snapshots,
+        skills,
+        agent_cards,
+    })
+}
+
+async fn fetch_peer_catalog(
+    client: &Client,
+    peer: &MarketplacePeerRecord,
+    query: &CatalogQuery,
+) -> anyhow::Result<MarketplaceCatalog> {
+    let mut url = Url::parse(&peer.catalog_url)
+        .with_context(|| format!("invalid peer catalog url '{}'", peer.catalog_url))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        if let Some(q) = query.q.as_deref() {
+            pairs.append_pair("q", q);
+        }
+        if let Some(kind) = query.kind.as_deref() {
+            pairs.append_pair("kind", kind);
+        }
+        if let Some(signed_only) = query.signed_only {
+            pairs.append_pair("signedOnly", if signed_only { "true" } else { "false" });
+        }
+        if let Some(published_only) = query.published_only {
+            pairs.append_pair(
+                "publishedOnly",
+                if published_only { "true" } else { "false" },
+            );
+        }
+    }
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("failed to reach peer '{}'", peer.display_name))?;
+    let response = response.error_for_status().with_context(|| {
+        format!(
+            "peer '{}' returned a non-success federated catalog response",
+            peer.display_name
+        )
+    })?;
+    response
+        .json::<MarketplaceCatalog>()
+        .await
+        .with_context(|| {
+            format!(
+                "peer '{}' returned an invalid marketplace catalog",
+                peer.display_name
+            )
+        })
+}
+
+fn normalize_remote_catalog(
+    peer: &MarketplacePeerRecord,
+    mut catalog: MarketplaceCatalog,
+) -> anyhow::Result<MarketplaceCatalog> {
+    for skill in &mut catalog.skills {
+        skill.package_url = normalize_remote_url(&peer.base_url, &skill.package_url)?;
+        skill.install_url = normalize_remote_url(&peer.base_url, &skill.install_url)?;
+    }
+    for agent in &mut catalog.agent_cards {
+        agent.url = normalize_remote_url(&peer.base_url, &agent.url)?;
+        agent.card_url = agent
+            .card_url
+            .as_deref()
+            .map(|value| normalize_remote_url(&peer.base_url, value))
+            .transpose()?;
+        agent.install_url = agent
+            .install_url
+            .as_deref()
+            .map(|value| normalize_remote_url(&peer.base_url, value))
+            .transpose()?;
+    }
+    Ok(catalog)
 }
 
 fn skill_to_marketplace_entry(
@@ -433,11 +830,138 @@ fn public_base_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_base_url(raw: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    normalize_http_url(raw, "baseUrl").map_err(|error| bad_request(error.to_string()))
+}
+
+fn normalize_absolute_url(raw: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    normalize_http_url(raw, "catalogUrl").map_err(|error| bad_request(error.to_string()))
+}
+
+fn normalize_http_url(raw: &str, field_name: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{field_name} must not be empty");
+    }
+    let url = Url::parse(trimmed)
+        .with_context(|| format!("{field_name} must be an absolute http(s) URL"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => anyhow::bail!("{field_name} must use http or https, got '{scheme}'"),
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn default_peer_catalog_url(base_url: &str) -> String {
+    format!(
+        "{}/api/gateway/marketplace/catalog",
+        base_url.trim_end_matches('/')
+    )
+}
+
+fn normalize_peer_id(raw: &str) -> Option<String> {
+    let normalized = raw
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn derive_peer_id(base_url: &str) -> String {
+    let Some(url) = Url::parse(base_url).ok() else {
+        return Uuid::new_v4().to_string();
+    };
+    let mut parts = Vec::new();
+    if let Some(host) = url.host_str().and_then(normalize_peer_id) {
+        parts.push(host);
+    }
+    if let Some(port) = url.port() {
+        parts.push(port.to_string());
+    }
+    if let Some(path) = normalize_peer_id(url.path()) {
+        parts.push(path);
+    }
+    if parts.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        parts.join("-")
+    }
+}
+
+fn normalize_remote_url(base_url: &str, raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("marketplace entry URL must not be empty");
+    }
+    if Url::parse(trimmed).is_ok() {
+        return normalize_http_url(trimmed, "remoteUrl");
+    }
+    let base = if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    };
+    let base =
+        Url::parse(&base).with_context(|| format!("invalid peer base URL '{}'", base_url))?;
+    let joined = base.join(trimmed).with_context(|| {
+        format!(
+            "failed to join peer URL '{}' against '{}'",
+            trimmed, base_url
+        )
+    })?;
+    normalize_http_url(joined.as_str(), "remoteUrl")
+}
+
+fn classify_peer_sync_error(error: &anyhow::Error) -> MarketplacePeerSyncStatus {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("invalid marketplace catalog")
+        || message.contains("invalid peer catalog url")
+        || message.contains("non-success federated catalog response")
+        || message.contains("failed to join peer url")
+        || message.contains("remoteurl")
+    {
+        MarketplacePeerSyncStatus::InvalidCatalog
+    } else {
+        MarketplacePeerSyncStatus::Unreachable
+    }
+}
+
 fn join_public_url(base: Option<&str>, path: &str) -> String {
     match base {
         Some(base) => format!("{base}{path}"),
         None => path.to_string(),
     }
+}
+
+fn bad_request(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": message.into()
+        })),
+    )
+}
+
+fn not_found(message: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": message
+        })),
+    )
 }
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
@@ -452,16 +976,22 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Arc};
+    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
+    use axum::{Json, Router, routing::get};
     use base64::Engine as _;
+    use tokio::time::sleep;
     use wasmtime::Engine;
 
-    use super::{CatalogQuery, build_catalog};
+    use super::{
+        CatalogQuery, MarketplaceAgentEntry, MarketplaceCatalog, MarketplacePeerSyncStatus,
+        MarketplaceSkillEntry, build_catalog, build_federated_catalog, default_peer_catalog_url,
+        derive_peer_id,
+    };
     use crate::{
         agent_cards,
         agent_cards::{AgentAuthentication, AgentCapabilities, AgentCard, PublishAgentCardRequest},
-        app_state::AppState,
+        app_state::{AppState, MarketplacePeerRecord, unix_timestamp_ms},
         sandbox,
         skill_registry::{
             RegisterSignedSkillRequest, SignedSkillDocument, SignedSkillEnvelope,
@@ -585,6 +1115,138 @@ mod tests {
         assert_eq!(catalog.agent_cards.len(), 1);
         assert_eq!(catalog.agent_cards[0].card_id, "market-agent");
 
+        drop(state);
+        fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn federated_catalog_merges_trusted_peer_and_normalizes_remote_urls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/api/gateway/marketplace/catalog",
+                get(|| async {
+                    Json(MarketplaceCatalog {
+                        generated_at_unix_ms: 1_700_000_000_000,
+                        public_base_url: None,
+                        skills: vec![MarketplaceSkillEntry {
+                            skill_id: "remote-skill".to_string(),
+                            version: "1.0.0".to_string(),
+                            display_name: "Remote Skill".to_string(),
+                            description: Some("Signed remote skill".to_string()),
+                            capabilities: vec!["search".to_string()],
+                            signed: true,
+                            active: true,
+                            issuer_did: Some("did:dawn:skill-publisher:remote".to_string()),
+                            package_url: "packages/remote-skill-1.0.0.wasm".to_string(),
+                            install_url: "/api/gateway/marketplace/install/skill".to_string(),
+                        }],
+                        agent_cards: vec![MarketplaceAgentEntry {
+                            card_id: "remote-agent".to_string(),
+                            name: "Remote Agent".to_string(),
+                            description: "Federated agent".to_string(),
+                            url: "a2a/remote-agent".to_string(),
+                            published: true,
+                            locally_hosted: false,
+                            chat_platforms: vec!["telegram".to_string()],
+                            model_providers: vec!["openai".to_string()],
+                            payment_roles: vec!["payee".to_string()],
+                            issuer_did: Some("did:dawn:agent:remote".to_string()),
+                            card_url: Some(".well-known/agent-card/remote-agent.json".to_string()),
+                            install_url: Some(
+                                "/api/gateway/marketplace/install/agent-card".to_string(),
+                            ),
+                        }],
+                    })
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let (state, db_path) = test_state().await.unwrap();
+        let now = unix_timestamp_ms();
+        let base_url = format!("http://{address}");
+        let peer_id = derive_peer_id(&base_url);
+        state
+            .upsert_marketplace_peer(MarketplacePeerRecord {
+                peer_id: peer_id.clone(),
+                display_name: "Remote Peer".to_string(),
+                base_url: base_url.clone(),
+                catalog_url: default_peer_catalog_url(&base_url),
+                enabled: true,
+                trust_enabled: true,
+                sync_status: MarketplacePeerSyncStatus::Pending,
+                last_sync_error: None,
+                last_synced_at_unix_ms: None,
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+
+        let catalog = build_federated_catalog(
+            &state,
+            CatalogQuery {
+                q: None,
+                kind: None,
+                signed_only: Some(true),
+                published_only: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.peers.len(), 1);
+        assert_eq!(catalog.peers[0].peer.peer_id, peer_id);
+        assert_eq!(
+            catalog.peers[0].peer.sync_status,
+            MarketplacePeerSyncStatus::Healthy
+        );
+        assert!(catalog.peers[0].peer.last_synced_at_unix_ms.is_some());
+        assert_eq!(catalog.peers[0].skill_count, 1);
+        assert_eq!(catalog.peers[0].agent_card_count, 1);
+
+        let remote_skill = catalog
+            .skills
+            .iter()
+            .find(|entry| entry.source_peer_id == peer_id)
+            .unwrap();
+        assert_eq!(remote_skill.source_kind, "peer");
+        assert_eq!(
+            remote_skill.entry.package_url,
+            format!("{base_url}/packages/remote-skill-1.0.0.wasm")
+        );
+        assert_eq!(
+            remote_skill.entry.install_url,
+            format!("{base_url}/api/gateway/marketplace/install/skill")
+        );
+
+        let remote_agent = catalog
+            .agent_cards
+            .iter()
+            .find(|entry| entry.source_peer_id == peer_id)
+            .unwrap();
+        assert_eq!(
+            remote_agent.entry.url,
+            format!("{base_url}/a2a/remote-agent")
+        );
+        assert_eq!(
+            remote_agent.entry.card_url.as_deref(),
+            Some(format!("{base_url}/.well-known/agent-card/remote-agent.json").as_str())
+        );
+        assert_eq!(
+            remote_agent.entry.install_url.as_deref(),
+            Some(format!("{base_url}/api/gateway/marketplace/install/agent-card").as_str())
+        );
+
+        let persisted = state.get_marketplace_peer(&peer_id).await.unwrap().unwrap();
+        assert_eq!(persisted.sync_status, MarketplacePeerSyncStatus::Healthy);
+        assert!(persisted.last_sync_error.is_none());
+        assert!(persisted.last_synced_at_unix_ms.is_some());
+
+        server.abort();
         drop(state);
         fs::remove_file(db_path).ok();
     }

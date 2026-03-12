@@ -7,11 +7,12 @@ use std::{
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{
     FromRow, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{Notify, RwLock, broadcast, mpsc};
 use uuid::Uuid;
 use wasmtime::Engine;
 
@@ -183,6 +184,104 @@ pub struct ApprovalRequestRecord {
     pub actor: Option<String>,
     pub decision_reason: Option<String>,
     pub decision_payload: Option<Value>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EndUserApprovalStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+impl EndUserApprovalStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Expired => "expired",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            "expired" => Ok(Self::Expired),
+            _ => Err(anyhow!("unknown end-user approval status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EndUserApprovalSessionRecord {
+    pub session_id: Uuid,
+    pub approval_id: Uuid,
+    pub approval_kind: ApprovalRequestKind,
+    pub task_id: Option<Uuid>,
+    pub transaction_id: Option<Uuid>,
+    pub platform: Option<String>,
+    pub chat_id: Option<String>,
+    pub sender_id: Option<String>,
+    pub sender_display: Option<String>,
+    pub token_hint: String,
+    pub status: EndUserApprovalStatus,
+    pub expires_at_unix_ms: Option<u128>,
+    pub decided_at_unix_ms: Option<u128>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub approval_token_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketplacePeerSyncStatus {
+    Pending,
+    Healthy,
+    Unreachable,
+    InvalidCatalog,
+}
+
+impl MarketplacePeerSyncStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Healthy => "healthy",
+            Self::Unreachable => "unreachable",
+            Self::InvalidCatalog => "invalid_catalog",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "healthy" => Ok(Self::Healthy),
+            "unreachable" => Ok(Self::Unreachable),
+            "invalid_catalog" => Ok(Self::InvalidCatalog),
+            _ => Err(anyhow!("unknown marketplace peer sync status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplacePeerRecord {
+    pub peer_id: String,
+    pub display_name: String,
+    pub base_url: String,
+    pub catalog_url: String,
+    pub enabled: bool,
+    pub trust_enabled: bool,
+    pub sync_status: MarketplacePeerSyncStatus,
+    pub last_sync_error: Option<String>,
+    pub last_synced_at_unix_ms: Option<u128>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
 }
@@ -524,6 +623,7 @@ pub struct AppState {
     pool: SqlitePool,
     node_sessions: RwLock<HashMap<String, NodeSessionSender>>,
     console_events: broadcast::Sender<ConsoleStreamEvent>,
+    delivery_outbox_wakeup: Notify,
 }
 
 impl AppState {
@@ -555,12 +655,15 @@ impl AppState {
         ensure_default_policy_profile(&pool).await?;
         let (console_events, _) = broadcast::channel(512);
 
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             engine,
             pool,
             node_sessions: RwLock::new(HashMap::new()),
             console_events,
-        }))
+            delivery_outbox_wakeup: Notify::new(),
+        });
+        crate::agent_cards::spawn_delivery_outbox_worker(state.clone());
+        Ok(state)
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -585,6 +688,14 @@ impl AppState {
             detail: detail.into(),
             created_at_unix_ms: unix_timestamp_ms(),
         });
+    }
+
+    pub fn wake_delivery_outbox(&self) {
+        self.delivery_outbox_wakeup.notify_one();
+    }
+
+    pub async fn wait_for_delivery_outbox(&self) {
+        self.delivery_outbox_wakeup.notified().await;
     }
 
     pub async fn insert_task(&self, task: StoredTask) -> anyhow::Result<StoredTask> {
@@ -958,6 +1069,209 @@ impl AppState {
         row.map(TryInto::try_into).transpose()
     }
 
+    pub async fn upsert_end_user_approval_session(
+        &self,
+        session: EndUserApprovalSessionRecord,
+    ) -> anyhow::Result<EndUserApprovalSessionRecord> {
+        save_end_user_approval_session(&self.pool, &session).await?;
+        self.emit_console_event(
+            "end_user_approval",
+            Some(session.session_id.to_string()),
+            Some(session.status.as_db().to_string()),
+            format!(
+                "end-user approval session for {}",
+                session
+                    .sender_display
+                    .clone()
+                    .or(session.sender_id.clone())
+                    .unwrap_or_else(|| "unknown user".to_string())
+            ),
+        );
+        Ok(session)
+    }
+
+    pub async fn get_end_user_approval_session(
+        &self,
+        session_id: Uuid,
+    ) -> anyhow::Result<Option<EndUserApprovalSessionRecord>> {
+        let row = sqlx::query_as::<_, EndUserApprovalSessionRow>(
+            r#"
+            SELECT
+                session_id,
+                approval_id,
+                approval_kind,
+                task_id,
+                transaction_id,
+                platform,
+                chat_id,
+                sender_id,
+                sender_display,
+                approval_token_hash,
+                token_hint,
+                status,
+                expires_at_unix_ms,
+                decided_at_unix_ms,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM end_user_approval_sessions
+            WHERE session_id = ?1
+            "#,
+        )
+        .bind(session_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch end-user approval session")?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_pending_end_user_approval_session_by_approval(
+        &self,
+        approval_id: Uuid,
+    ) -> anyhow::Result<Option<EndUserApprovalSessionRecord>> {
+        let row = sqlx::query_as::<_, EndUserApprovalSessionRow>(
+            r#"
+            SELECT
+                session_id,
+                approval_id,
+                approval_kind,
+                task_id,
+                transaction_id,
+                platform,
+                chat_id,
+                sender_id,
+                sender_display,
+                approval_token_hash,
+                token_hint,
+                status,
+                expires_at_unix_ms,
+                decided_at_unix_ms,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM end_user_approval_sessions
+            WHERE approval_id = ?1 AND status = ?2
+            ORDER BY created_at_unix_ms DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(approval_id.to_string())
+        .bind(EndUserApprovalStatus::Pending.as_db())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!("failed to fetch pending end-user approval session for {approval_id}")
+        })?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_end_user_approval_session_by_token(
+        &self,
+        approval_token: &str,
+    ) -> anyhow::Result<Option<EndUserApprovalSessionRecord>> {
+        let row = sqlx::query_as::<_, EndUserApprovalSessionRow>(
+            r#"
+            SELECT
+                session_id,
+                approval_id,
+                approval_kind,
+                task_id,
+                transaction_id,
+                platform,
+                chat_id,
+                sender_id,
+                sender_display,
+                approval_token_hash,
+                token_hint,
+                status,
+                expires_at_unix_ms,
+                decided_at_unix_ms,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM end_user_approval_sessions
+            WHERE approval_token_hash = ?1
+            ORDER BY created_at_unix_ms DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(hash_approval_token(approval_token))
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch end-user approval session by token")?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn upsert_marketplace_peer(
+        &self,
+        peer: MarketplacePeerRecord,
+    ) -> anyhow::Result<MarketplacePeerRecord> {
+        save_marketplace_peer(&self.pool, &peer).await?;
+        self.emit_console_event(
+            "marketplace_peer",
+            Some(peer.peer_id.clone()),
+            Some(peer.sync_status.as_db().to_string()),
+            format!("marketplace peer '{}' upserted", peer.display_name),
+        );
+        Ok(peer)
+    }
+
+    pub async fn get_marketplace_peer(
+        &self,
+        peer_id: &str,
+    ) -> anyhow::Result<Option<MarketplacePeerRecord>> {
+        let row = sqlx::query_as::<_, MarketplacePeerRow>(
+            r#"
+            SELECT
+                peer_id,
+                display_name,
+                base_url,
+                catalog_url,
+                enabled,
+                trust_enabled,
+                sync_status,
+                last_sync_error,
+                last_synced_at_unix_ms,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM marketplace_peers
+            WHERE peer_id = ?1
+            "#,
+        )
+        .bind(peer_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch marketplace peer '{peer_id}'"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_marketplace_peers(&self) -> anyhow::Result<Vec<MarketplacePeerRecord>> {
+        let rows = sqlx::query_as::<_, MarketplacePeerRow>(
+            r#"
+            SELECT
+                peer_id,
+                display_name,
+                base_url,
+                catalog_url,
+                enabled,
+                trust_enabled,
+                sync_status,
+                last_sync_error,
+                last_synced_at_unix_ms,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM marketplace_peers
+            ORDER BY display_name ASC, peer_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list marketplace peers")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     pub async fn upsert_chat_ingress_event(
         &self,
         event: ChatIngressEventRecord,
@@ -1063,6 +1377,41 @@ impl AppState {
         };
 
         rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn latest_chat_ingress_event_for_task(
+        &self,
+        task_id: Uuid,
+    ) -> anyhow::Result<Option<ChatIngressEventRecord>> {
+        let row = sqlx::query_as::<_, ChatIngressEventRow>(
+            r#"
+            SELECT
+                ingress_id,
+                platform,
+                event_type,
+                chat_id,
+                sender_id,
+                sender_display,
+                text,
+                raw_payload,
+                linked_task_id,
+                reply_text,
+                status,
+                error,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM chat_ingress_events
+            WHERE linked_task_id = ?1
+            ORDER BY created_at_unix_ms DESC, rowid DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(task_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch latest chat ingress event for task {task_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
     }
 
     pub async fn upsert_node(
@@ -1188,9 +1537,9 @@ impl AppState {
             } else {
                 "unverified".to_string()
             }),
-            node.attestation_error.clone().unwrap_or_else(|| {
-                format!("node '{}' attestation updated", node.display_name)
-            }),
+            node.attestation_error
+                .clone()
+                .unwrap_or_else(|| format!("node '{}' attestation updated", node.display_name)),
         );
         Ok(Some(node))
     }
@@ -1215,7 +1564,14 @@ impl AppState {
             "node_connection",
             Some(node.node_id.clone()),
             Some(node.status.as_db().to_string()),
-            format!("node connection is now {}", if connected { "connected" } else { "disconnected" }),
+            format!(
+                "node connection is now {}",
+                if connected {
+                    "connected"
+                } else {
+                    "disconnected"
+                }
+            ),
         );
         Ok(Some(node))
     }
@@ -1564,7 +1920,10 @@ impl AppState {
             "node_command",
             Some(command.command_id.to_string()),
             Some(command.status.as_db().to_string()),
-            command.error.clone().unwrap_or_else(|| command.command_type.clone()),
+            command
+                .error
+                .clone()
+                .unwrap_or_else(|| command.command_type.clone()),
         );
         Ok(Some(command))
     }
@@ -1964,6 +2323,86 @@ impl TryFrom<ApprovalRequestRow> for ApprovalRequestRecord {
                 .decision_payload
                 .map(|value| parse_json_field(&value, "decision_payload"))
                 .transpose()?,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct EndUserApprovalSessionRow {
+    session_id: String,
+    approval_id: String,
+    approval_kind: String,
+    task_id: Option<String>,
+    transaction_id: Option<String>,
+    platform: Option<String>,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+    approval_token_hash: String,
+    token_hint: String,
+    status: String,
+    expires_at_unix_ms: Option<i64>,
+    decided_at_unix_ms: Option<i64>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<EndUserApprovalSessionRow> for EndUserApprovalSessionRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: EndUserApprovalSessionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            session_id: parse_uuid(&row.session_id, "session_id")?,
+            approval_id: parse_uuid(&row.approval_id, "approval_id")?,
+            approval_kind: ApprovalRequestKind::from_db(&row.approval_kind)?,
+            task_id: parse_uuid_opt(row.task_id, "task_id")?,
+            transaction_id: parse_uuid_opt(row.transaction_id, "transaction_id")?,
+            platform: row.platform,
+            chat_id: row.chat_id,
+            sender_id: row.sender_id,
+            sender_display: row.sender_display,
+            approval_token_hash: row.approval_token_hash,
+            token_hint: row.token_hint,
+            status: EndUserApprovalStatus::from_db(&row.status)?,
+            expires_at_unix_ms: i64_to_u128_opt(row.expires_at_unix_ms)?,
+            decided_at_unix_ms: i64_to_u128_opt(row.decided_at_unix_ms)?,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct MarketplacePeerRow {
+    peer_id: String,
+    display_name: String,
+    base_url: String,
+    catalog_url: String,
+    enabled: i64,
+    trust_enabled: i64,
+    sync_status: String,
+    last_sync_error: Option<String>,
+    last_synced_at_unix_ms: Option<i64>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<MarketplacePeerRow> for MarketplacePeerRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: MarketplacePeerRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            peer_id: row.peer_id,
+            display_name: row.display_name,
+            base_url: row.base_url,
+            catalog_url: row.catalog_url,
+            enabled: row.enabled != 0,
+            trust_enabled: row.trust_enabled != 0,
+            sync_status: MarketplacePeerSyncStatus::from_db(&row.sync_status)?,
+            last_sync_error: row.last_sync_error,
+            last_synced_at_unix_ms: i64_to_u128_opt(row.last_synced_at_unix_ms)?,
             created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
             updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
         })
@@ -2386,6 +2825,49 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         ON approval_requests(kind, reference_id, created_at_unix_ms DESC)
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS end_user_approval_sessions (
+            session_id TEXT PRIMARY KEY,
+            approval_id TEXT NOT NULL,
+            approval_kind TEXT NOT NULL,
+            task_id TEXT,
+            transaction_id TEXT,
+            platform TEXT,
+            chat_id TEXT,
+            sender_id TEXT,
+            sender_display TEXT,
+            approval_token_hash TEXT NOT NULL,
+            token_hint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expires_at_unix_ms INTEGER,
+            decided_at_unix_ms INTEGER,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_end_user_approval_token_hash
+        ON end_user_approval_sessions(approval_token_hash)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_end_user_approval_approval
+        ON end_user_approval_sessions(approval_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS marketplace_peers (
+            peer_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            catalog_url TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            trust_enabled INTEGER NOT NULL,
+            sync_status TEXT NOT NULL,
+            last_sync_error TEXT,
+            last_synced_at_unix_ms INTEGER,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS workspace_profiles (
             workspace_id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL,
@@ -2434,6 +2916,51 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_node_claims_status
         ON node_claims(status, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS node_claim_audit_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            token_hint TEXT,
+            session_url TEXT,
+            created_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_node_claim_audit_events_claim
+        ON node_claim_audit_events(claim_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_node_claim_audit_events_node
+        ON node_claim_audit_events(node_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS setup_verification_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            surface TEXT NOT NULL,
+            target TEXT NOT NULL,
+            label TEXT NOT NULL,
+            region TEXT NOT NULL,
+            integration_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            action TEXT,
+            endpoint TEXT NOT NULL,
+            env_keys TEXT NOT NULL,
+            missing_env_keys TEXT NOT NULL,
+            is_default_path INTEGER NOT NULL,
+            verified_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_setup_verification_receipts_surface_target
+        ON setup_verification_receipts(surface, target, created_at_unix_ms DESC)
         "#,
         r#"
         CREATE TABLE IF NOT EXISTS chat_ingress_events (
@@ -2745,6 +3272,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
             card_id TEXT NOT NULL,
             source_kind TEXT NOT NULL,
             quote_url TEXT,
+            state_subscriber_url TEXT,
             previous_quote_id TEXT,
             superseded_by_quote_id TEXT,
             negotiation_round INTEGER NOT NULL,
@@ -2784,6 +3312,41 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_agent_quote_ledger_consumed_by_transaction_id
         ON agent_quote_ledger(consumed_by_transaction_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_delivery_outbox (
+            delivery_id TEXT PRIMARY KEY,
+            delivery_key TEXT NOT NULL UNIQUE,
+            delivery_kind TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            settlement_id TEXT,
+            reconciliation_id TEXT,
+            quote_id TEXT,
+            target_url TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL,
+            max_attempts INTEGER NOT NULL,
+            next_attempt_at_unix_ms INTEGER NOT NULL,
+            last_attempt_at_unix_ms INTEGER,
+            delivered_at_unix_ms INTEGER,
+            last_http_status INTEGER,
+            last_error TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_delivery_outbox_status_due
+        ON agent_delivery_outbox(status, next_attempt_at_unix_ms ASC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_delivery_outbox_settlement_id
+        ON agent_delivery_outbox(settlement_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_delivery_outbox_quote_id
+        ON agent_delivery_outbox(quote_id, created_at_unix_ms DESC)
         "#,
     ] {
         sqlx::query(statement)
@@ -2909,6 +3472,13 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         "remote_agent_settlements",
         "quote_id",
         "ALTER TABLE remote_agent_settlements ADD COLUMN quote_id TEXT",
+    )
+    .await?;
+    ensure_sqlite_column(
+        pool,
+        "agent_quote_ledger",
+        "state_subscriber_url",
+        "ALTER TABLE agent_quote_ledger ADD COLUMN state_subscriber_url TEXT",
     )
     .await?;
 
@@ -3055,6 +3625,121 @@ async fn save_approval_request(
     .execute(pool)
     .await
     .context("failed to save approval request")?;
+
+    Ok(())
+}
+
+async fn save_end_user_approval_session(
+    pool: &SqlitePool,
+    session: &EndUserApprovalSessionRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO end_user_approval_sessions (
+            session_id,
+            approval_id,
+            approval_kind,
+            task_id,
+            transaction_id,
+            platform,
+            chat_id,
+            sender_id,
+            sender_display,
+            approval_token_hash,
+            token_hint,
+            status,
+            expires_at_unix_ms,
+            decided_at_unix_ms,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        ON CONFLICT(session_id) DO UPDATE SET
+            approval_id = excluded.approval_id,
+            approval_kind = excluded.approval_kind,
+            task_id = excluded.task_id,
+            transaction_id = excluded.transaction_id,
+            platform = excluded.platform,
+            chat_id = excluded.chat_id,
+            sender_id = excluded.sender_id,
+            sender_display = excluded.sender_display,
+            approval_token_hash = excluded.approval_token_hash,
+            token_hint = excluded.token_hint,
+            status = excluded.status,
+            expires_at_unix_ms = excluded.expires_at_unix_ms,
+            decided_at_unix_ms = excluded.decided_at_unix_ms,
+            created_at_unix_ms = end_user_approval_sessions.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(session.session_id.to_string())
+    .bind(session.approval_id.to_string())
+    .bind(session.approval_kind.as_db())
+    .bind(session.task_id.map(|value| value.to_string()))
+    .bind(session.transaction_id.map(|value| value.to_string()))
+    .bind(&session.platform)
+    .bind(&session.chat_id)
+    .bind(&session.sender_id)
+    .bind(&session.sender_display)
+    .bind(&session.approval_token_hash)
+    .bind(&session.token_hint)
+    .bind(session.status.as_db())
+    .bind(session.expires_at_unix_ms.map(u128_to_i64).transpose()?)
+    .bind(session.decided_at_unix_ms.map(u128_to_i64).transpose()?)
+    .bind(u128_to_i64(session.created_at_unix_ms)?)
+    .bind(u128_to_i64(session.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save end-user approval session")?;
+
+    Ok(())
+}
+
+async fn save_marketplace_peer(
+    pool: &SqlitePool,
+    peer: &MarketplacePeerRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO marketplace_peers (
+            peer_id,
+            display_name,
+            base_url,
+            catalog_url,
+            enabled,
+            trust_enabled,
+            sync_status,
+            last_sync_error,
+            last_synced_at_unix_ms,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(peer_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            base_url = excluded.base_url,
+            catalog_url = excluded.catalog_url,
+            enabled = excluded.enabled,
+            trust_enabled = excluded.trust_enabled,
+            sync_status = excluded.sync_status,
+            last_sync_error = excluded.last_sync_error,
+            last_synced_at_unix_ms = excluded.last_synced_at_unix_ms,
+            created_at_unix_ms = marketplace_peers.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(&peer.peer_id)
+    .bind(&peer.display_name)
+    .bind(&peer.base_url)
+    .bind(&peer.catalog_url)
+    .bind(peer.enabled)
+    .bind(peer.trust_enabled)
+    .bind(peer.sync_status.as_db())
+    .bind(&peer.last_sync_error)
+    .bind(peer.last_synced_at_unix_ms.map(u128_to_i64).transpose()?)
+    .bind(u128_to_i64(peer.created_at_unix_ms)?)
+    .bind(u128_to_i64(peer.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save marketplace peer")?;
 
     Ok(())
 }
@@ -3616,6 +4301,10 @@ fn ensure_sqlite_database_parent(database_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn hash_approval_token(raw: &str) -> String {
+    hex::encode(Sha256::digest(raw.as_bytes()))
+}
+
 fn parse_uuid(raw: &str, field: &str) -> anyhow::Result<Uuid> {
     Uuid::parse_str(raw).with_context(|| format!("invalid uuid in field {field}: {raw}"))
 }
@@ -3656,7 +4345,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, StoredTask, TaskStatus, unix_timestamp_ms};
+    use super::{
+        AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, StoredTask,
+        TaskStatus, unix_timestamp_ms,
+    };
     use crate::sandbox;
 
     fn temp_database_url() -> (String, PathBuf) {
