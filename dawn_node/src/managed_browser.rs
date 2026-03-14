@@ -1048,14 +1048,7 @@ pub async fn close_managed_browser(
             terminate_browser_process(pid).await?;
         }
         if session.user_data_dir.exists() && !session.persistent_profile {
-            tokio::fs::remove_dir_all(&session.user_data_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to remove managed browser profile directory {}",
-                        session.user_data_dir.display()
-                    )
-                })?;
+            remove_managed_browser_profile_dir(&session.user_data_dir).await?;
         }
     }
     Ok(())
@@ -1109,14 +1102,7 @@ pub async fn delete_managed_browser_profile(
             profile_path.display()
         );
     }
-    tokio::fs::remove_dir_all(&profile_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to remove managed browser profile {}",
-                profile_path.display()
-            )
-        })?;
+    remove_managed_browser_profile_dir(&profile_path).await?;
     Ok(ManagedBrowserProfileDeleteResult {
         profile_name,
         profile_path: profile_path.display().to_string(),
@@ -2785,6 +2771,29 @@ fn resolve_managed_browser_user_data_dir(
         debug_port,
         unix_timestamp_ms()
     ))
+}
+
+async fn remove_managed_browser_profile_dir(path: &Path) -> anyhow::Result<()> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    }
+    let error = last_error.expect("expected managed browser profile removal error");
+    Err(error).with_context(|| {
+        format!(
+            "failed to remove managed browser profile directory {}",
+            path.display()
+        )
+    })
 }
 
 fn detect_browser_executable() -> anyhow::Result<String> {
