@@ -18,14 +18,14 @@ use managed_browser::{
     collect_managed_browser_cookies, collect_managed_browser_errors,
     collect_managed_browser_network_requests, collect_managed_browser_trace,
     delete_managed_browser_profile, emulate_managed_browser_device,
-    emulate_managed_browser_network, evaluate_managed_browser, handle_managed_browser_dialog,
-    inspect_managed_browser, inspect_managed_browser_profile, inspect_managed_browser_storage,
-    launch_managed_browser, launch_managed_browser_with_profile, list_managed_browser_profiles,
-    mutate_managed_browser_storage, navigate_managed_browser, open_managed_browser_tab,
-    open_managed_browser_window, prepare_managed_browser_download, press_key_managed_browser,
-    print_to_pdf_managed_browser, refresh_managed_browser, screenshot_managed_browser,
-    set_managed_browser_geolocation, set_managed_browser_headers, type_managed_browser,
-    upload_managed_browser, wait_for_managed_browser,
+    emulate_managed_browser_network, evaluate_managed_browser, export_managed_browser_profile,
+    handle_managed_browser_dialog, inspect_managed_browser, inspect_managed_browser_profile,
+    inspect_managed_browser_storage, launch_managed_browser, launch_managed_browser_with_profile,
+    list_managed_browser_profiles, mutate_managed_browser_storage, navigate_managed_browser,
+    open_managed_browser_tab, open_managed_browser_window, prepare_managed_browser_download,
+    press_key_managed_browser, print_to_pdf_managed_browser, refresh_managed_browser,
+    screenshot_managed_browser, set_managed_browser_geolocation, set_managed_browser_headers,
+    type_managed_browser, upload_managed_browser, wait_for_managed_browser,
 };
 use reqwest::{Client, Method, Url};
 use scraper::{Html, Selector};
@@ -565,6 +565,9 @@ async fn execute_command(
         "browser_profiles" => execute_browser_profiles_command(runtime_state, envelope).await,
         "browser_profile_inspect" => {
             execute_browser_profile_inspect_command(runtime_state, envelope).await
+        }
+        "browser_profile_export" => {
+            execute_browser_profile_export_command(runtime_state, envelope).await
         }
         "browser_profile_delete" => {
             execute_browser_profile_delete_command(runtime_state, envelope).await
@@ -3371,6 +3374,76 @@ async fn execute_browser_profile_inspect_command(
                 "runtime": "managed",
                 "action": "browser_profile_inspect",
                 "profile": profile,
+                "inUseBySessions": in_use_by_sessions,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_profile_export_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(profile_name) = envelope
+        .payload
+        .get("profileName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_profile_export requires payload.profileName".to_string()),
+        };
+    };
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let export_path = resolve_browser_profile_export_path(requested_path, profile_name);
+    let in_use_by_sessions = runtime_state
+        .browser_sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            let managed = session.managed.as_ref()?;
+            let candidate = managed.profile_name.as_deref()?;
+            if candidate == profile_name && managed.persistent_profile {
+                return Some(json!({
+                    "sessionId": session_id,
+                    "currentUrl": session.current_url,
+                    "debugPort": managed.debug_port,
+                    "active": runtime_state
+                        .active_browser_session_id
+                        .as_deref()
+                        .map(|active_id| active_id == session_id)
+                        .unwrap_or(false),
+                }));
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    match export_managed_browser_profile(profile_name, &export_path) {
+        Ok(exported) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "runtime": "managed",
+                "action": "browser_profile_export",
+                "profile": exported,
                 "inUseBySessions": in_use_by_sessions,
             })),
             error: None,
@@ -7706,6 +7779,19 @@ fn resolve_browser_trace_path(requested: Option<&str>, session_id: &str) -> Path
     path
 }
 
+fn resolve_browser_profile_export_path(requested: Option<&str>, profile_name: &str) -> PathBuf {
+    match requested.map(PathBuf::from) {
+        Some(path) if path.is_dir() => path.join(profile_name),
+        Some(path) if path.to_string_lossy().ends_with(['\\', '/']) => path.join(profile_name),
+        Some(path) => path,
+        None => env::temp_dir().join(format!(
+            "dawn-browser-profile-export-{}-{}",
+            profile_name,
+            unix_timestamp_ms()
+        )),
+    }
+}
+
 fn infer_browser_download_file_name(source_url: &str) -> String {
     let candidate = Url::parse(source_url)
         .ok()
@@ -10628,6 +10714,7 @@ fn default_capabilities() -> Vec<String> {
         "browser_start".to_string(),
         "browser_profiles".to_string(),
         "browser_profile_inspect".to_string(),
+        "browser_profile_export".to_string(),
         "browser_profile_delete".to_string(),
         "browser_status".to_string(),
         "browser_stop".to_string(),
@@ -11788,6 +11875,15 @@ mod tests {
     }
 
     #[test]
+    fn resolves_browser_profile_export_path_to_named_directory() {
+        let path = resolve_browser_profile_export_path(Some("artifacts/browser/exports/"), "ops");
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("ops")
+        );
+    }
+
+    #[test]
     fn normalizes_browser_storage_area_aliases() {
         assert_eq!(
             normalize_browser_storage_area("local"),
@@ -11845,6 +11941,11 @@ mod tests {
             capabilities
                 .iter()
                 .any(|value| value == "browser_profile_inspect")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_profile_export")
         );
         assert!(
             capabilities

@@ -703,6 +703,17 @@ pub struct ManagedBrowserProfileInspectResult {
     pub last_modified_unix_ms: Option<u128>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedBrowserProfileExportResult {
+    pub profile_name: String,
+    pub source_path: String,
+    pub export_path: String,
+    pub directory_count: usize,
+    pub file_count: usize,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedBrowserDownloadRequest {
     pub source_url: String,
@@ -1150,6 +1161,32 @@ pub fn inspect_managed_browser_profile(
         file_count: stats.file_count,
         total_bytes: stats.total_bytes,
         last_modified_unix_ms: stats.last_modified_unix_ms,
+    })
+}
+
+pub fn export_managed_browser_profile(
+    profile_name: &str,
+    export_path: &Path,
+) -> anyhow::Result<ManagedBrowserProfileExportResult> {
+    let inspected = inspect_managed_browser_profile(profile_name)?;
+    let source_path = PathBuf::from(&inspected.profile_path);
+    if source_path == export_path {
+        anyhow::bail!("browser profile export path must differ from the source profile path");
+    }
+    if export_path.exists() {
+        anyhow::bail!(
+            "browser profile export path {} already exists",
+            export_path.display()
+        );
+    }
+    copy_managed_browser_profile_dir(&source_path, export_path)?;
+    Ok(ManagedBrowserProfileExportResult {
+        profile_name: inspected.profile_name,
+        source_path: inspected.profile_path,
+        export_path: export_path.display().to_string(),
+        directory_count: inspected.directory_count,
+        file_count: inspected.file_count,
+        total_bytes: inspected.total_bytes,
     })
 }
 
@@ -2868,6 +2905,53 @@ fn update_managed_browser_profile_modified(
     }
 }
 
+fn copy_managed_browser_profile_dir(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination).with_context(|| {
+        format!(
+            "failed to create managed browser export directory {}",
+            destination.display()
+        )
+    })?;
+    for entry in std::fs::read_dir(source).with_context(|| {
+        format!(
+            "failed to read managed browser profile path {}",
+            source.display()
+        )
+    })? {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read one managed browser profile entry in {}",
+                source.display()
+            )
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to stat {}", source_path.display()))?;
+        if metadata.is_dir() {
+            copy_managed_browser_profile_dir(&source_path, &destination_path)?;
+        } else {
+            if let Some(parent) = destination_path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create managed browser export directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            std::fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "failed to copy managed browser profile file {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 async fn remove_managed_browser_profile_dir(path: &Path) -> anyhow::Result<()> {
     let mut last_error = None;
     for attempt in 0..5 {
@@ -3332,9 +3416,10 @@ mod tests {
     use super::{
         ManagedBrowserCookie, build_managed_browser_cookie_header, close_managed_browser,
         collect_managed_browser_trace, cookie_query_params, delete_managed_browser_profile,
-        evaluate_managed_browser, inspect_managed_browser_profile, launch_managed_browser,
-        parse_managed_browser_key_spec, resolve_managed_browser_user_data_dir,
-        sanitize_managed_browser_profile_name, validate_managed_browser_download_source,
+        evaluate_managed_browser, export_managed_browser_profile, inspect_managed_browser_profile,
+        launch_managed_browser, parse_managed_browser_key_spec,
+        resolve_managed_browser_user_data_dir, sanitize_managed_browser_profile_name,
+        validate_managed_browser_download_source,
     };
     use serde_json::json;
     use std::{
@@ -3468,6 +3553,29 @@ mod tests {
         assert!(inspected.file_count >= 2);
         assert!(inspected.total_bytes >= 8);
         std::fs::remove_dir_all(path).expect("expected test profile cleanup");
+    }
+
+    #[test]
+    fn exports_managed_browser_profile_dir() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let profile_name = format!("export-profile-{suffix}");
+        let export_name = format!("export-copy-{suffix}");
+        let path = resolve_managed_browser_user_data_dir(Some(&profile_name), true, 9222);
+        let export_root = env::temp_dir().join(export_name);
+        std::fs::create_dir_all(path.join("Default")).expect("expected nested profile dir");
+        std::fs::write(path.join("Preferences"), "{\"a\":1}").expect("expected root file");
+        std::fs::write(path.join("Default").join("Cookies"), "sqlite")
+            .expect("expected nested file");
+        let exported = export_managed_browser_profile(&profile_name, &export_root)
+            .expect("expected profile export to succeed");
+        assert_eq!(exported.profile_name, profile_name);
+        assert!(export_root.join("Preferences").exists());
+        assert!(export_root.join("Default").join("Cookies").exists());
+        std::fs::remove_dir_all(path).expect("expected test profile cleanup");
+        std::fs::remove_dir_all(export_root).expect("expected export cleanup");
     }
 
     #[tokio::test]
