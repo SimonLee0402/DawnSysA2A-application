@@ -11,6 +11,7 @@ mod chat_ingress;
 mod connectors;
 mod control_center;
 mod control_plane;
+mod control_ui;
 mod end_user_approvals;
 mod gateway;
 mod identity;
@@ -54,6 +55,7 @@ async fn health_check() -> &'static str {
 pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .nest("/app", control_ui::router())
         .nest("/console", control_center::router())
         .nest("/end-user", end_user_approvals::page_router())
         .route(
@@ -415,6 +417,22 @@ mod tests {
         )
         .await?;
         assert_eq!(command_record["status"], "succeeded");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_control_ui_page_renders() -> anyhow::Result<()> {
+        let (base_url, handle, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+
+        let markup = get_text(&client, &format!("{base_url}/app")).await?;
+        assert!(markup.contains("Dawn Personal Workbench"));
+        assert!(markup.contains("id=\"bootstrap-form\""));
+        assert!(markup.contains("/api/gateway/identity/status"));
+        assert!(markup.contains("/api/a2a/task"));
 
         handle.abort();
         fs::remove_file(db_path).ok();

@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dawn Personal Workbench</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23121621'/%3E%3Cpath d='M18 46V18h11.5c4.7 0 8.3 1.1 10.8 3.4 2.5 2.3 3.7 5.7 3.7 10.2 0 4.8-1.4 8.4-4.1 10.8-2.8 2.4-6.7 3.6-11.9 3.6H18Zm8.2-6.7h2.9c4.2 0 6.3-2.5 6.3-7.5 0-4.8-2-7.2-5.9-7.2h-3.3v14.7Z' fill='%23f6d36b'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #efe3cf;
+      --surface: rgba(255, 249, 239, 0.92);
+      --ink: #17202b;
+      --muted: #5f6d78;
+      --line: rgba(44, 57, 71, 0.14);
+      --accent: #0d567d;
+      --accent-strong: #083c57;
+      --signal: #c95a2c;
+      --success: #0f7c61;
+      --danger: #a5352c;
+      --shadow-soft: 0 16px 38px rgba(51, 33, 11, 0.1);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --font-body: "IBM Plex Sans", "Microsoft YaHei UI", sans-serif;
+      --font-display: "Fraunces", "Georgia", serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { color-scheme: light; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font-body);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13, 86, 125, 0.22), transparent 30%),
+        radial-gradient(circle at 80% 18%, rgba(201, 90, 44, 0.18), transparent 24%),
+        linear-gradient(180deg, #f4ebdc 0%, #ece0cb 48%, #e6d6be 100%);
+      background-attachment: fixed;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(23, 32, 43, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 32, 43, 0.035) 1px, transparent 1px);
+      background-size: 92px 92px;
+      opacity: 0.38;
+      pointer-events: none;
+    }
+    a { color: inherit; }
+    .page {
+      position: relative;
+      z-index: 1;
+      width: min(1440px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 28px 0 72px;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+    .hero-panel, .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(16px);
+    }
+    .hero-copy, .stream-panel, .panel { padding: 24px; }
+    .hero-copy { position: relative; overflow: hidden; }
+    .hero-copy::after {
+      content: "";
+      position: absolute;
+      right: -90px;
+      top: -40px;
+      width: 220px;
+      height: 220px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(13, 86, 125, 0.18), transparent 68%);
+      pointer-events: none;
+    }
+    .eyebrow, .badge, .stream-pill, .button, button, .chip-button, .connector-pill span, .stat-label, .panel-kicker {
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+    .eyebrow, .stream-pill, .badge, .button, button, .chip-button, .session-banner, .notice, .connector-pill, .stat, .mini-card, .list-card, input, textarea, select {
+      border-radius: var(--radius-lg);
+    }
+    .eyebrow, .badge, .stream-pill, .session-banner, .notice, .connector-pill, .stat, .mini-card, .list-card {
+      border: 1px solid rgba(23, 32, 43, 0.08);
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 12px;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--signal), #f4b042);
+      box-shadow: 0 0 0 5px rgba(201, 90, 44, 0.12);
+    }
+    h1, h2, h3 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+    h1 {
+      margin-top: 18px;
+      max-width: 12ch;
+      font-size: clamp(2.6rem, 5vw, 4.4rem);
+      line-height: 0.95;
+    }
+    .hero-copy p, .panel-head p, .microcopy, .footer-note, .empty, .stream-entry span {
+      color: var(--muted);
+      line-height: 1.65;
+    }
+    .hero-actions, .hero-stats, .layout, .column, .badge-row, .form-grid, .form-actions, .card-grid, .connector-grid, .split, .list, .stream-log, .inline-actions {
+      display: grid;
+      gap: 12px;
+    }
+    .hero-actions, .badge-row, .form-actions, .inline-actions { display: flex; flex-wrap: wrap; align-items: center; }
+    .hero-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 22px; }
+    .stat { padding: 16px 18px; }
+    .stat-label, .panel-kicker, .connector-pill span {
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .stat-value {
+      display: block;
+      font-size: 1.72rem;
+      font-weight: 700;
+      line-height: 1;
+      margin: 8px 0;
+    }
+    .button, button.primary, button.secondary, .chip-button {
+      appearance: none;
+      border: none;
+      cursor: pointer;
+      font: inherit;
+      transition: transform 160ms ease, box-shadow 160ms ease;
+    }
+    .button, button.primary {
+      padding: 12px 18px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      color: #fdf7ed;
+      box-shadow: 0 14px 32px rgba(13, 86, 125, 0.2);
+      text-decoration: none;
+    }
+    .button.secondary, button.secondary, .chip-button {
+      padding: 12px 18px;
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--ink);
+      border: 1px solid rgba(23, 32, 43, 0.08);
+    }
+    .chip-button { padding: 8px 12px; font-size: 13px; color: var(--muted); }
+    .button:hover, button:hover, .chip-button:hover { transform: translateY(-1px); }
+    .stream-panel { display: flex; flex-direction: column; justify-content: space-between; gap: 18px; }
+    .stream-head, .panel-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+    .stream-pill { display: inline-flex; align-items: center; gap: 10px; padding: 8px 12px; color: var(--accent); }
+    .stream-pill::before, .connector-led { content: ""; width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+    .stream-entry { padding: 14px 16px; }
+    .layout { grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr); margin-top: 18px; }
+    .column { align-content: start; gap: 18px; }
+    .panel-head { margin-bottom: 18px; }
+    .form-grid.two, .card-grid, .split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    label { display: grid; gap: 8px; color: var(--muted); font-size: 13px; font-weight: 600; }
+    input, textarea, select {
+      width: 100%;
+      padding: 13px 14px;
+      border: 1px solid rgba(23, 32, 43, 0.1);
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--ink);
+      font: inherit;
+    }
+    textarea { min-height: 112px; resize: vertical; }
+    .badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; text-transform: uppercase; }
+    .badge.success { background: rgba(15, 124, 97, 0.14); color: var(--success); }
+    .badge.warn { background: rgba(201, 90, 44, 0.14); color: var(--signal); }
+    .badge.danger { background: rgba(165, 53, 44, 0.14); color: var(--danger); }
+    .badge.neutral { color: var(--muted); }
+    .session-banner, .notice, .empty, .mini-card, .list-card, .connector-pill { padding: 14px 16px; }
+    .notice.error { background: rgba(165, 53, 44, 0.08); color: var(--danger); }
+    .notice.success { background: rgba(15, 124, 97, 0.08); color: var(--success); }
+    .list-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 10px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    code, .mono {
+      font-family: "Consolas", "IBM Plex Mono", monospace;
+      background: rgba(23, 32, 43, 0.06);
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+    .connector-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .connector-pill { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .connector-led {
+      width: 12px;
+      height: 12px;
+      box-shadow: 0 0 0 6px rgba(23, 32, 43, 0.05);
+      background: rgba(23, 32, 43, 0.16);
+    }
+    .connector-led.ready {
+      background: var(--success);
+      box-shadow: 0 0 0 6px rgba(15, 124, 97, 0.12);
+    }
+    .connector-led.warn {
+      background: var(--signal);
+      box-shadow: 0 0 0 6px rgba(201, 90, 44, 0.12);
+    }
+    @media (max-width: 1160px) {
+      .hero, .layout, .split, .connector-grid, .card-grid, .form-grid.two, .hero-stats { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .page { width: min(100vw - 18px, 100%); padding-top: 18px; }
+      .hero-copy, .stream-panel, .panel { padding: 20px; }
+      h1 { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <article class="hero-panel hero-copy">
+        <div class="eyebrow">Dawn Personal Workbench</div>
+        <h1>把 CLI、聊天入口和自动化流聚到一个用户工作台里。</h1>
+        <p>
+          这里不是 operator <code>/console</code>。这是面向实际使用者的控制界面：先登录本机工作区，
+          然后配置默认模型和聊天平台，直接发起 A2A 任务或远端代理委托，同时盯住审批、节点和最近入口消息。
+        </p>
+        <div class="hero-actions">
+          <a class="button" href="/console">打开 Operator Console</a>
+          <a class="button secondary" href="/marketplace">打开 Marketplace</a>
+        </div>
+        <div class="hero-stats">
+          <div class="stat"><span class="stat-label">Readiness</span><span class="stat-value" id="hero-readiness">--%</span><div id="hero-next-step">正在加载工作区状态</div></div>
+          <div class="stat"><span class="stat-label">Connected Nodes</span><span class="stat-value" id="hero-nodes">--</span><div id="hero-node-note">等待节点元数据</div></div>
+          <div class="stat"><span class="stat-label">Pending Approvals</span><span class="stat-value" id="hero-approvals">--</span><div id="hero-approval-note">等待审批队列</div></div>
+          <div class="stat"><span class="stat-label">Live Tasks</span><span class="stat-value" id="hero-tasks">--</span><div id="hero-task-note">等待任务队列</div></div>
+        </div>
+      </article>
+      <aside class="hero-panel stream-panel">
+        <div class="stream-head">
+          <div><div class="panel-kicker">Live Control Stream</div><h2>工作台刷新状态</h2></div>
+          <div class="stream-pill" id="stream-pill">connecting</div>
+        </div>
+        <div class="stream-log" id="stream-log">
+          <div class="stream-entry"><strong>最新事件</strong><span id="latest-stream-event">工作台会复用 <code>/console/events</code> 触发轻量刷新，但不会接管 operator 面的审批控制台。</span></div>
+          <div class="stream-entry"><strong>事件通道</strong><span id="stream-channel-detail">console · waiting for stream</span></div>
+          <div class="stream-entry"><strong>最后刷新</strong><span id="last-refresh">尚未完成第一次载入。</span></div>
+          <div class="stream-entry"><strong>当前会话</strong><span id="session-summary">未保存 operator session token。只读看板仍可用。</span></div>
+        </div>
+      </aside>
+    </section>
+
+    <main class="layout">
+      <div class="column" id="left-column">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Session</div>
+              <h2>本机工作区登录</h2>
+              <p>创建一个 operator session token，后续工作区更新会直接复用它。token 只保存在当前浏览器。</p>
+            </div>
+            <div class="badge-row">
+              <span class="badge neutral" id="session-badge">未登录</span>
+            </div>
+          </div>
+          <form class="form-grid" id="bootstrap-form">
+            <div class="form-grid two">
+              <label>
+                Operator Name
+                <input id="operator-name" type="text" value="console-operator" />
+              </label>
+              <label>
+                Bootstrap Token
+                <input id="bootstrap-token" type="text" value="dawn-dev-bootstrap" />
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="primary" type="submit">创建会话</button>
+              <button class="secondary" type="button" id="clear-session-button">清除本地 token</button>
+            </div>
+          </form>
+          <div class="session-banner" id="session-banner">
+            <strong>提示：</strong> 没有 session token 时，工作台仍然会显示实时状态；只有需要写入工作区配置时才会校验 token。
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Workspace</div>
+              <h2>默认模型与聊天平台</h2>
+              <p>这里对应 CLI 里的 <code>onboard</code>、<code>models</code>、<code>channels</code> 基础配置。</p>
+            </div>
+            <div class="badge-row" id="workspace-badges"></div>
+          </div>
+          <form class="form-grid" id="workspace-form">
+            <div class="form-grid two">
+              <label>
+                Display Name
+                <input id="workspace-display-name" type="text" />
+              </label>
+              <label>
+                Region
+                <input id="workspace-region" type="text" />
+              </label>
+            </div>
+            <div class="form-grid two">
+              <label>
+                Tenant ID
+                <input id="workspace-tenant-id" type="text" />
+              </label>
+              <label>
+                Project ID
+                <input id="workspace-project-id" type="text" />
+              </label>
+            </div>
+            <label>
+              Default Model Providers
+              <input id="workspace-models" type="text" placeholder="openai, anthropic, ollama" />
+            </label>
+            <label>
+              Default Chat Platforms
+              <input id="workspace-channels" type="text" placeholder="telegram, slack, feishu" />
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">保存工作区</button>
+              <span class="microcopy">需要上面的 session token。没有 token 时这个表单只会显示当前值。</span>
+            </div>
+          </form>
+          <div class="notice" id="workspace-notice">工作区配置尚未加载。</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Task Composer</div>
+              <h2>直接发起 A2A 任务</h2>
+              <p>适合 node-command orchestration、connector prompt 或者先用自然语言落一个试验任务。</p>
+            </div>
+            <div class="badge-row">
+              <button class="chip-button" type="button" data-task-template="desktop">桌面检查</button>
+              <button class="chip-button" type="button" data-task-template="browser">浏览器摘要</button>
+              <button class="chip-button" type="button" data-task-template="model">模型试跑</button>
+            </div>
+          </div>
+          <form class="form-grid" id="task-form">
+            <label>
+              Task Name
+              <input id="task-name" type="text" placeholder="desktop-check" />
+            </label>
+            <label>
+              Instruction
+              <textarea id="task-instruction" placeholder="orchestrate:{&quot;steps&quot;:[...]}"></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">提交任务</button>
+              <span class="microcopy">提交后会立即写入 A2A task ledger。</span>
+            </div>
+          </form>
+          <div class="notice" id="task-notice">任务表单就绪。</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Delegate</div>
+              <h2>远端代理委托</h2>
+              <p>这里复用 agent card invoke 接口，适合在用户工作台里发出一次委托，而不是先回到 CLI。</p>
+            </div>
+          </div>
+          <form class="form-grid" id="delegate-form">
+            <label>
+              Agent Card
+              <select id="delegate-card"></select>
+            </label>
+            <div class="form-grid two">
+              <label>
+                Delegate Name
+                <input id="delegate-name" type="text" placeholder="travel-brief" />
+              </label>
+              <label>
+                Await Completion
+                <select id="delegate-await">
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              Instruction
+              <textarea id="delegate-instruction" placeholder="Plan a trip to Shanghai and draft the first options."></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">发起委托</button>
+              <span class="microcopy">更复杂的 settlement / quote 协商仍建议走 CLI，因为那条链已经更完整。</span>
+            </div>
+          </form>
+          <div class="notice" id="delegate-notice">等待 agent card 列表。</div>
+        </section>
+      </div>
+
+      <div class="column" id="right-column">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Connectors</div>
+              <h2>模型与聊天链路</h2>
+              <p>先判断 readiness，再回 CLI 细化 secret 和 verify。</p>
+            </div>
+          </div>
+          <div class="connector-grid" id="connector-grid"></div>
+          <div class="footer-note" id="connector-footer">等待 connector 状态。</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Runtime Boards</div>
+              <h2>节点、审批和任务</h2>
+              <p>优先给用户一眼看到“现在能不能跑”和“哪里卡住了”。</p>
+            </div>
+          </div>
+          <div class="split">
+            <div>
+              <h3 style="margin-bottom: 12px;">Nodes</h3>
+              <div class="list" id="node-list"></div>
+            </div>
+            <div>
+              <h3 style="margin-bottom: 12px;">Pending Approvals</h3>
+              <div class="list" id="approval-list"></div>
+            </div>
+          </div>
+          <div class="split" style="margin-top: 18px;">
+            <div>
+              <h3 style="margin-bottom: 12px;">Recent Tasks</h3>
+              <div class="list" id="task-list"></div>
+            </div>
+            <div>
+              <h3 style="margin-bottom: 12px;">Ingress Events</h3>
+              <div class="list" id="ingress-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Catalog</div>
+              <h2>技能、代理和远端回执</h2>
+              <p>把常用技能、已安装 agent cards 和最近的远端 invocation 摆在同一块。</p>
+            </div>
+          </div>
+          <div class="card-grid">
+            <div>
+              <h3 style="margin-bottom: 12px;">Skills</h3>
+              <div class="list" id="skill-list"></div>
+            </div>
+            <div>
+              <h3 style="margin-bottom: 12px;">Agent Cards</h3>
+              <div class="list" id="agent-list"></div>
+            </div>
+          </div>
+          <div style="margin-top: 18px;">
+            <h3 style="margin-bottom: 12px;">Remote Invocations</h3>
+            <div class="list" id="invocation-list"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script>
+    const SESSION_STORAGE_KEY = "dawn.control-ui.session-token";
+    const OPERATOR_STORAGE_KEY = "dawn.control-ui.operator-name";
+    const state = {
+      sessionToken: "",
+      operatorName: "",
+      workspace: null,
+      cards: [],
+      approvals: [],
+      tasks: [],
+      nodes: [],
+      refreshTimer: null,
+      stream: null
+    };
+
+    const taskTemplates = {
+      desktop: {
+        name: "desktop-check",
+        instruction: "orchestrate:{\"steps\":[{\"kind\":\"node_command\",\"nodeId\":\"node-local\",\"commandType\":\"system_info\"},{\"kind\":\"node_command\",\"nodeId\":\"node-local\",\"commandType\":\"desktop_windows_list\",\"payload\":{\"approvalRequired\":true}}]}"
+      },
+      browser: {
+        name: "browser-summary",
+        instruction: "orchestrate:{\"steps\":[{\"kind\":\"node_command\",\"nodeId\":\"node-local\",\"commandType\":\"browser_navigate\",\"payload\":{\"sessionId\":\"browser-default\",\"url\":\"https://example.com\",\"managed\":true,\"approvalRequired\":true}},{\"kind\":\"node_command\",\"nodeId\":\"node-local\",\"commandType\":\"browser_snapshot\",\"payload\":{\"sessionId\":\"browser-default\",\"approvalRequired\":true}}]}"
+      },
+      model: {
+        name: "model-smoke",
+        instruction: "orchestrate:{\"steps\":[{\"kind\":\"model_connector\",\"provider\":\"openai\",\"input\":\"Summarize the current Dawn workspace in one sentence.\"}]}"
+      }
+    };
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function formatTime(unixMs) {
+      if (!unixMs) return "unknown";
+      try {
+        return new Date(Number(unixMs)).toLocaleString("zh-CN", { hour12: false });
+      } catch (_) {
+        return "unknown";
+      }
+    }
+
+    function formatList(value) {
+      if (!Array.isArray(value) || value.length === 0) return "none";
+      return value.join(", ");
+    }
+
+    function setNotice(id, tone, message) {
+      const node = $(id);
+      if (!node) return;
+      node.className = `notice${tone ? ` ${tone}` : ""}`;
+      node.textContent = message;
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      const text = await response.text();
+      let body = null;
+      if (text) {
+        try {
+          body = JSON.parse(text);
+        } catch (_) {
+          body = text;
+        }
+      }
+      if (!response.ok) {
+        const detail = body && typeof body === "object"
+          ? body.error || body.message || JSON.stringify(body)
+          : text || `${response.status}`;
+        throw new Error(detail || `${response.status}`);
+      }
+      return body;
+    }
+
+    async function fetchJsonFallback(urls) {
+      let lastError = null;
+      for (const url of urls) {
+        try {
+          return await fetchJson(url);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError || new Error("request failed");
+    }
+
+    function renderSessionState() {
+      $("session-summary").textContent = state.sessionToken
+        ? `已保存 operator token，actor = ${state.operatorName || "console-operator"}。`
+        : "未保存 operator session token。只读看板仍可用。";
+      $("session-badge").textContent = state.sessionToken ? "已登录" : "未登录";
+      $("session-badge").className = `badge ${state.sessionToken ? "success" : "neutral"}`;
+    }
+
+    function rememberSession() {
+      if (state.sessionToken) {
+        localStorage.setItem(SESSION_STORAGE_KEY, state.sessionToken);
+      } else {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+      if (state.operatorName) {
+        localStorage.setItem(OPERATOR_STORAGE_KEY, state.operatorName);
+      } else {
+        localStorage.removeItem(OPERATOR_STORAGE_KEY);
+      }
+      renderSessionState();
+    }
+
+    function restoreSession() {
+      state.sessionToken = localStorage.getItem(SESSION_STORAGE_KEY) || "";
+      state.operatorName = localStorage.getItem(OPERATOR_STORAGE_KEY) || "console-operator";
+      $("operator-name").value = state.operatorName;
+      renderSessionState();
+    }
+
+    function applyWorkspaceToForm(workspace) {
+      if (!workspace) return;
+      state.workspace = workspace;
+      $("workspace-display-name").value = workspace.displayName || "";
+      $("workspace-region").value = workspace.region || "";
+      $("workspace-tenant-id").value = workspace.tenantId || "";
+      $("workspace-project-id").value = workspace.projectId || "";
+      $("workspace-models").value = (workspace.defaultModelProviders || []).join(", ");
+      $("workspace-channels").value = (workspace.defaultChatPlatforms || []).join(", ");
+      $("workspace-notice").textContent = `最近更新：${formatTime(workspace.updatedAtUnixMs)} · onboarding = ${workspace.onboardingStatus || "unknown"}`;
+    }
+
+    function renderIdentity(identityStatus) {
+      const readiness = identityStatus?.readiness || {};
+      const metrics = readiness.metrics || {};
+      $("hero-readiness").textContent = `${readiness.completionPercent ?? 0}%`;
+      $("hero-next-step").textContent = readiness.nextStep || "所有已配置项都会在这里给出下一步建议。";
+      $("workspace-badges").innerHTML = [
+        `<span class="badge ${readiness.overallStatus === "ready" ? "success" : "warn"}">${escapeHtml(readiness.overallStatus || "unknown")}</span>`,
+        `<span class="badge neutral">${escapeHtml(identityStatus?.workspace?.displayName || "default workspace")}</span>`,
+        `<span class="badge neutral">${escapeHtml(identityStatus?.workspace?.region || "region unknown")}</span>`
+      ].join("");
+      applyWorkspaceToForm(identityStatus?.workspace || null);
+      $("hero-approvals").textContent = `${metrics.pendingPaymentApprovals ?? 0}`;
+      $("hero-approval-note").textContent = `${identityStatus?.pendingNodeClaims ?? 0} pending node claims`;
+    }
+
+    function renderConnectorStatus(report) {
+      const configured = report?.configured || {};
+      const entries = Object.entries(configured);
+      $("connector-grid").innerHTML = entries.length
+        ? entries.map(([name, ready]) => `
+            <div class="connector-pill">
+              <span>${escapeHtml(name.replaceAll("_", " "))}</span>
+              <div class="connector-led ${ready ? "ready" : "warn"}"></div>
+            </div>
+          `).join("")
+        : `<div class="empty">没有拿到 connector 状态。</div>`;
+      const readyCount = entries.filter(([, ready]) => !!ready).length;
+      $("connector-footer").textContent = `${readyCount}/${entries.length} connectors configured · models = ${formatList(report?.supportedModelProviders?.map((item) => item.provider))}`;
+    }
+
+    function renderNodes(nodes) {
+      state.nodes = Array.isArray(nodes) ? nodes : [];
+      const connected = state.nodes.filter((node) => node.connected).length;
+      $("hero-nodes").textContent = `${connected}/${state.nodes.length}`;
+      $("hero-node-note").textContent = connected > 0 ? "实时节点在线" : "当前没有连接中的节点";
+      $("node-list").innerHTML = state.nodes.length
+        ? state.nodes
+            .sort((a, b) => Number(b.connected) - Number(a.connected) || Number(b.updatedAtUnixMs || 0) - Number(a.updatedAtUnixMs || 0))
+            .slice(0, 6)
+            .map((node) => `
+              <article class="list-card">
+                <strong>${escapeHtml(node.displayName || node.nodeId)}</strong>
+                <div>${escapeHtml(node.nodeId)}</div>
+                <div class="list-meta">
+                  <span class="badge ${node.connected ? "success" : "neutral"}">${escapeHtml(node.status || "unknown")}</span>
+                  <span>${escapeHtml(node.transport || "transport unknown")}</span>
+                  <span>${node.attestationVerified ? "attested" : "unverified"}</span>
+                </div>
+                <div class="footer-note">${escapeHtml((node.capabilities || []).slice(0, 5).join(", ") || "no declared capabilities")}</div>
+              </article>
+            `).join("")
+        : `<div class="empty">还没有节点记录。先在 CLI 执行 <code>dawn-node node claim</code> 或 <code>dawn-node run</code>。</div>`;
+    }
+
+    function renderApprovals(approvals) {
+      state.approvals = Array.isArray(approvals) ? approvals : [];
+      $("approval-list").innerHTML = state.approvals.length
+        ? state.approvals.slice(0, 6).map((approval) => {
+            const canOperate = approval.kind === "node_command";
+            return `
+              <article class="list-card">
+                <strong>${escapeHtml(approval.title || approval.kind || "approval")}</strong>
+                <div>${escapeHtml(approval.summary || "no summary")}</div>
+                <div class="list-meta">
+                  <span class="badge ${approval.kind === "payment" ? "warn" : "neutral"}">${escapeHtml(approval.kind)}</span>
+                  <span>${formatTime(approval.createdAtUnixMs)}</span>
+                  <code>${escapeHtml(approval.referenceId)}</code>
+                </div>
+                ${canOperate ? `
+                  <div class="inline-actions">
+                    <button class="secondary" type="button" data-approval-action="approve" data-approval-id="${escapeHtml(approval.approvalId)}">Approve</button>
+                    <button class="secondary" type="button" data-approval-action="reject" data-approval-id="${escapeHtml(approval.approvalId)}">Reject</button>
+                  </div>
+                ` : `<div class="footer-note">Payment approvals 仍建议走 CLI signer 或 end-user approval link。</div>`}
+              </article>
+            `;
+          }).join("")
+        : `<div class="empty">审批队列为空。</div>`;
+      $("hero-approvals").textContent = `${state.approvals.length}`;
+      $("hero-approval-note").textContent = state.approvals.some((item) => item.kind === "payment")
+        ? "存在 payment approvals"
+        : "当前主要是 node approvals";
+    }
+
+    function renderTasks(tasks) {
+      state.tasks = Array.isArray(tasks) ? tasks : [];
+      const liveCount = state.tasks.filter((task) => ["accepted", "queued", "running", "waiting_payment_authorization"].includes(task.status)).length;
+      $("hero-tasks").textContent = `${liveCount}`;
+      $("hero-task-note").textContent = `${state.tasks.length} tasks in ledger`;
+      $("task-list").innerHTML = state.tasks.length
+        ? state.tasks
+            .sort((a, b) => Number(b.updatedAtUnixMs || 0) - Number(a.updatedAtUnixMs || 0))
+            .slice(0, 7)
+            .map((task) => `
+              <article class="list-card">
+                <strong>${escapeHtml(task.name || task.taskId)}</strong>
+                <div>${escapeHtml(task.taskId)}</div>
+                <div class="list-meta">
+                  <span class="badge ${task.status === "completed" ? "success" : task.status === "failed" ? "danger" : "warn"}">${escapeHtml(task.status)}</span>
+                  <span>${formatTime(task.updatedAtUnixMs)}</span>
+                </div>
+                <div class="footer-note">${escapeHtml(task.lastUpdateReason || task.instruction || "")}</div>
+              </article>
+            `).join("")
+        : `<div class="empty">还没有任务。可以直接用左侧 composer 发一个 A2A task。</div>`;
+    }
+
+    function renderIngress(events) {
+      const list = Array.isArray(events) ? events : [];
+      $("ingress-list").innerHTML = list.length
+        ? list.slice(0, 7).map((event) => `
+            <article class="list-card">
+              <strong>${escapeHtml(event.senderDisplay || event.platform)}</strong>
+              <div>${escapeHtml(event.platform)} · ${escapeHtml(event.eventType || "message")}</div>
+              <div class="list-meta">
+                <span class="badge ${event.status === "failed" ? "danger" : event.status === "replied" ? "success" : "neutral"}">${escapeHtml(event.status)}</span>
+                <span>${formatTime(event.updatedAtUnixMs)}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(event.text || event.replyText || "")}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">最近没有入口消息。</div>`;
+    }
+
+    function renderSkills(skills) {
+      const list = Array.isArray(skills) ? skills : [];
+      $("skill-list").innerHTML = list.length
+        ? list.slice(0, 6).map((skill) => `
+            <article class="mini-card">
+              <strong>${escapeHtml(skill.displayName || skill.skillId)}</strong>
+              <div>${escapeHtml(skill.skillId)} · ${escapeHtml(skill.version)}</div>
+              <div class="list-meta">
+                <span class="badge ${skill.active ? "success" : "neutral"}">${skill.active ? "active" : "inactive"}</span>
+                <span>${escapeHtml(skill.sourceKind || "unknown")}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(skill.description || "No description.")}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">还没有注册技能。</div>`;
+    }
+
+    function renderCards(cards) {
+      state.cards = Array.isArray(cards) ? cards : [];
+      $("agent-list").innerHTML = state.cards.length
+        ? state.cards.slice(0, 6).map((card) => `
+            <article class="mini-card">
+              <strong>${escapeHtml(card.card?.name || card.cardId)}</strong>
+              <div>${escapeHtml(card.cardId)} · ${escapeHtml(card.sourceKind || "unknown")}</div>
+              <div class="list-meta">
+                <span class="badge ${card.published ? "success" : "neutral"}">${card.published ? "published" : "draft"}</span>
+                <span>${card.locallyHosted ? "local" : "remote"}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(card.card?.description || "No description.")}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">还没有 agent cards。</div>`;
+      renderDelegateOptions();
+    }
+
+    function renderDelegateOptions() {
+      const select = $("delegate-card");
+      if (!select) return;
+      select.innerHTML = state.cards.length
+        ? state.cards.map((card) => `<option value="${escapeHtml(card.cardId)}">${escapeHtml(card.card?.name || card.cardId)}</option>`).join("")
+        : `<option value="">No cards available</option>`;
+    }
+
+    function renderStreamSummary(detail, channelDetail) {
+      const latestNode = $("latest-stream-event");
+      const channelNode = $("stream-channel-detail");
+      if (latestNode) {
+        latestNode.textContent = detail;
+      }
+      if (channelNode) {
+        channelNode.textContent = channelDetail;
+      }
+    }
+
+    function renderInvocations(invocations) {
+      const list = Array.isArray(invocations) ? invocations : [];
+      $("invocation-list").innerHTML = list.length
+        ? list
+            .sort((a, b) => Number(b.updatedAtUnixMs || 0) - Number(a.updatedAtUnixMs || 0))
+            .slice(0, 6)
+            .map((invocation) => `
+              <article class="list-card">
+                <strong>${escapeHtml(invocation.cardId)}</strong>
+                <div>${escapeHtml(invocation.invocationId)}</div>
+                <div class="list-meta">
+                  <span class="badge ${invocation.status === "completed" ? "success" : invocation.status === "failed" ? "danger" : "warn"}">${escapeHtml(invocation.status)}</span>
+                  <span>${formatTime(invocation.updatedAtUnixMs)}</span>
+                </div>
+                <div class="footer-note">${escapeHtml(invocation.error || invocation.remoteTaskId || invocation.remoteAgentUrl || "")}</div>
+              </article>
+            `).join("")
+        : `<div class="empty">还没有远端代理调用记录。</div>`;
+    }
+
+    function updateRefreshStamp(label) {
+      const node = $("last-refresh");
+      if (node) {
+        node.textContent = label;
+      }
+    }
+
+    async function refreshDashboard() {
+      const responses = await Promise.allSettled([
+        fetchJson("/api/gateway/identity/status"),
+        fetchJson("/api/gateway/connectors/status"),
+        fetchJson("/api/a2a/tasks"),
+        fetchJson("/api/gateway/approvals?status=pending"),
+        fetchJson("/api/gateway/control-plane/nodes"),
+        fetchJsonFallback(["/api/gateway/agent-cards", "/api/gateway/agent-cards/"]),
+        fetchJsonFallback(["/api/gateway/skills", "/api/gateway/skills/"]),
+        fetchJson("/api/gateway/ingress/events?limit=8"),
+        fetchJson("/api/gateway/agent-cards/invocations")
+      ]);
+
+      const [identityStatus, connectorStatus, tasks, approvals, nodes, cards, skills, ingress, invocations] = responses.map((item) =>
+        item.status === "fulfilled" ? item.value : null
+      );
+
+      if (!identityStatus) {
+        setNotice("workspace-notice", "error", "工作区状态读取失败。");
+      } else {
+        renderIdentity(identityStatus);
+      }
+      renderConnectorStatus(connectorStatus || {});
+      renderTasks(tasks || []);
+      renderApprovals(approvals || []);
+      renderNodes(nodes || []);
+      renderCards(cards || []);
+      renderSkills(skills || []);
+      renderIngress(ingress || []);
+      renderInvocations(invocations || []);
+      updateRefreshStamp(`最后刷新：${new Date().toLocaleString("zh-CN", { hour12: false })}`);
+    }
+
+    function connectConsoleStream() {
+      if (state.stream) {
+        state.stream.close();
+      }
+      $("stream-pill").textContent = "connecting";
+      const source = new EventSource("/console/events");
+      state.stream = source;
+      source.onopen = () => {
+        $("stream-pill").textContent = "live";
+      };
+      source.addEventListener("console_update", (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          const detail = payload.detail || payload.status || payload.channel || "update";
+          $("stream-pill").textContent = payload.status || "live";
+          renderStreamSummary(
+            detail,
+            `${payload.channel || "console"} · ${formatTime(payload.createdAtUnixMs)}`
+          );
+          renderSessionState();
+        } catch (_) {
+          $("stream-pill").textContent = "live";
+        }
+        if (state.refreshTimer) {
+          clearTimeout(state.refreshTimer);
+        }
+        state.refreshTimer = setTimeout(() => {
+          refreshDashboard().catch((error) => {
+            updateRefreshStamp(`刷新失败：${error.message}`);
+          });
+        }, 500);
+      });
+      source.onerror = () => {
+        $("stream-pill").textContent = "reconnecting";
+      };
+    }
+
+    async function handleBootstrap(event) {
+      event.preventDefault();
+      const operatorName = $("operator-name").value.trim() || "console-operator";
+      const bootstrapToken = $("bootstrap-token").value.trim() || "dawn-dev-bootstrap";
+      try {
+        const response = await fetchJson("/api/gateway/identity/bootstrap/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bootstrapToken, operatorName })
+        });
+        state.sessionToken = response.sessionToken || "";
+        state.operatorName = operatorName;
+        rememberSession();
+        setNotice("workspace-notice", "success", `已创建 session token，lastSeen = ${formatTime(response.session?.lastSeenAtUnixMs)}`);
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("workspace-notice", "error", `创建 session 失败：${error.message}`);
+      }
+    }
+
+    async function handleWorkspaceSave(event) {
+      event.preventDefault();
+      if (!state.sessionToken) {
+        setNotice("workspace-notice", "error", "先创建或保存一个 session token。");
+        return;
+      }
+      try {
+        const response = await fetchJson("/api/gateway/identity/workspace", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionToken: state.sessionToken,
+            tenantId: $("workspace-tenant-id").value.trim(),
+            projectId: $("workspace-project-id").value.trim(),
+            displayName: $("workspace-display-name").value.trim(),
+            region: $("workspace-region").value.trim(),
+            defaultModelProviders: $("workspace-models").value.split(",").map((item) => item.trim()).filter(Boolean),
+            defaultChatPlatforms: $("workspace-channels").value.split(",").map((item) => item.trim()).filter(Boolean),
+            onboardingStatus: "configured"
+          })
+        });
+        applyWorkspaceToForm(response.workspace || null);
+        setNotice("workspace-notice", "success", `工作区已更新，actor = ${response.actor || state.operatorName}`);
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("workspace-notice", "error", `工作区更新失败：${error.message}`);
+      }
+    }
+
+    async function handleTaskSubmit(event) {
+      event.preventDefault();
+      try {
+        const response = await fetchJson("/api/a2a/task", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: $("task-name").value.trim(),
+            instruction: $("task-instruction").value.trim()
+          })
+        });
+        setNotice("task-notice", "success", `任务已提交：${response.task?.taskId || "unknown"} · ${response.sandboxStatus || "queued"}`);
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("task-notice", "error", `任务提交失败：${error.message}`);
+      }
+    }
+
+    async function handleDelegateSubmit(event) {
+      event.preventDefault();
+      const cardId = $("delegate-card").value;
+      if (!cardId) {
+        setNotice("delegate-notice", "error", "没有可用的 agent card。");
+        return;
+      }
+      try {
+        const response = await fetchJson(`/api/gateway/agent-cards/${encodeURIComponent(cardId)}/invoke`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: $("delegate-name").value.trim() || "delegate-from-workbench",
+            instruction: $("delegate-instruction").value.trim(),
+            awaitCompletion: $("delegate-await").value === "true"
+          })
+        });
+        setNotice("delegate-notice", "success", `委托已发出：${response.invocation?.invocationId || "unknown"} · ${response.invocation?.status || "dispatched"}`);
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("delegate-notice", "error", `委托失败：${error.message}`);
+      }
+    }
+
+    async function handleApprovalAction(action, approvalId) {
+      const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
+      const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
+      if (reason === null) return;
+      try {
+        await fetchJson(`/api/gateway/approvals/${approvalId}/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actor, decision: action, reason })
+        });
+        await refreshDashboard();
+      } catch (error) {
+        alert(`Approval action failed: ${error.message}`);
+      }
+    }
+
+    function bindInteractions() {
+      $("bootstrap-form").addEventListener("submit", handleBootstrap);
+      $("workspace-form").addEventListener("submit", handleWorkspaceSave);
+      $("task-form").addEventListener("submit", handleTaskSubmit);
+      $("delegate-form").addEventListener("submit", handleDelegateSubmit);
+      $("clear-session-button").addEventListener("click", () => {
+        state.sessionToken = "";
+        rememberSession();
+      });
+      document.querySelectorAll("[data-task-template]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const template = taskTemplates[button.dataset.taskTemplate];
+          if (!template) return;
+          $("task-name").value = template.name;
+          $("task-instruction").value = template.instruction;
+        });
+      });
+      $("approval-list").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-approval-action]");
+        if (!target) return;
+        handleApprovalAction(target.dataset.approvalAction, target.dataset.approvalId);
+      });
+    }
+
+    async function boot() {
+      restoreSession();
+      bindInteractions();
+      connectConsoleStream();
+      await refreshDashboard();
+    }
+
+    boot().catch((error) => {
+      updateRefreshStamp(`初始化失败：${error.message}`);
+      $("stream-pill").textContent = "error";
+    });
+  </script>
+</body>
+</html>

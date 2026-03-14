@@ -27,6 +27,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
   - Accepts inbound Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and QQ traffic, persists ingress events, and routes text into A2A tasks.
 - `dawn_core/src/control_center.rs`
   - Serves the operator-facing dashboard at `/console`.
+- `dawn_core/src/control_ui.rs`
+  - Serves the end-user workbench at `/app`.
 - `dawn_core/src/gateway.rs`
   - Exposes the high-level gateway status and nests the control-plane and connector routers.
 - `dawn_core/src/marketplace.rs`
@@ -122,6 +124,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/marketplace/install/skill`
 - `POST /api/gateway/marketplace/install/agent-card`
 - `GET /console`
+- `GET /app`
 - `GET /marketplace`
 - `GET /api/gateway/agent-cards/status`
 - `GET /api/gateway/agent-cards/`
@@ -270,6 +273,13 @@ Control Center:
 - the same liquid-glass deck now includes an `Identity & Onboarding` studio for operator bootstrap sessions, workspace profile persistence, and first-time node claim issuance.
 - the same operator deck now includes a `Reconciliation Fabric` view plus receipt-push actions, so cross-gateway settlement receipts and counterparty acknowledgments can be inspected from the same liquid-glass drawer.
   - the page refreshes against the existing API surface and does not require a separate frontend build pipeline.
+
+Control UI:
+
+- `GET /app` serves a user-facing workbench that is intentionally separate from `/console`.
+- the page focuses on the end-user flow: bootstrap an operator session token, review workspace defaults, inspect connector readiness, create A2A tasks, invoke remote agent cards, and watch nodes, approvals, tasks, ingress events, skills, and recent remote invocations from one screen.
+- the workbench reuses the existing API surface rather than introducing a parallel frontend backend: `/api/gateway/identity/status`, `/api/gateway/connectors/status`, `/api/a2a/tasks`, `/api/gateway/approvals`, `/api/gateway/control-plane/nodes`, `/api/gateway/agent-cards`, `/api/gateway/skills`, `/api/gateway/ingress/events`, and `/api/gateway/agent-cards/invocations`.
+- the page also subscribes to `/console/events` over SSE for lightweight refresh triggers, but it does not embed operator-only approval controls or replace the existing `/console` operations deck.
 
 Approval Center:
 
