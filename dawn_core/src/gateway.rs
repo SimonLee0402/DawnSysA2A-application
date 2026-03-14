@@ -70,6 +70,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "telegram",
             "discord",
             "slack",
+            "mattermost",
+            "msteams",
             "feishu",
             "dingtalk",
             "wecom_bot",
@@ -79,6 +81,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
         supported_model_providers: vec![
             "openai",
             "anthropic",
+            "google",
+            "openrouter",
             "deepseek",
             "qwen",
             "zhipu",

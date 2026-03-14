@@ -1729,6 +1729,8 @@ fn build_channel_send_request(
         "telegram" => "/api/gateway/connectors/chat/telegram/send",
         "slack" => "/api/gateway/connectors/chat/slack/send",
         "discord" => "/api/gateway/connectors/chat/discord/send",
+        "mattermost" => "/api/gateway/connectors/chat/mattermost/send",
+        "msteams" => "/api/gateway/connectors/chat/msteams/send",
         "feishu" => "/api/gateway/connectors/chat/feishu/send",
         "dingtalk" => "/api/gateway/connectors/chat/dingtalk/send",
         "wecom_bot" => "/api/gateway/connectors/chat/wecom/send",
@@ -1750,9 +1752,11 @@ fn build_channel_send_request(
                 "disableNotification": args.disable_notification,
             })
         }
-        "slack" | "discord" | "feishu" | "dingtalk" | "wecom_bot" => json!({
-            "text": args.text,
-        }),
+        "slack" | "discord" | "mattermost" | "msteams" | "feishu" | "dingtalk" | "wecom_bot" => {
+            json!({
+                "text": args.text,
+            })
+        }
         "wechat_official_account" => {
             let open_id = args.chat_id.as_deref().ok_or_else(|| {
                 anyhow!("wechat_official_account send requires --chat-id as openId")
@@ -3416,11 +3420,13 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
     if is_models {
         match normalized.as_str() {
             "claude" => "anthropic".to_string(),
+            "gemini" => "google".to_string(),
             other => other.to_string(),
         }
     } else {
         match normalized.as_str() {
             "wecom" => "wecom_bot".to_string(),
+            "teams" | "microsoft_teams" | "microsoft-teams" => "msteams".to_string(),
             other => other.to_string(),
         }
     }
@@ -3440,6 +3446,18 @@ fn connector_secret_pairs(
         (true, "openai") => insert_if_some(&mut pairs, "OPENAI_API_KEY", args.api_key.as_deref()),
         (true, "anthropic") => {
             insert_if_some(&mut pairs, "ANTHROPIC_API_KEY", args.api_key.as_deref())
+        }
+        (true, "google") => {
+            insert_if_some(&mut pairs, "GEMINI_API_KEY", args.api_key.as_deref());
+            insert_if_some(&mut pairs, "GOOGLE_API_KEY", args.api_key.as_deref());
+        }
+        (true, "openrouter") => {
+            insert_if_some(&mut pairs, "OPENROUTER_API_KEY", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "OPENROUTER_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
         }
         (true, "deepseek") => {
             insert_if_some(&mut pairs, "DEEPSEEK_API_KEY", args.api_key.as_deref())
@@ -3480,6 +3498,20 @@ fn connector_secret_pairs(
             insert_if_some(
                 &mut pairs,
                 "DISCORD_BOT_WEBHOOK_URL",
+                args.webhook_url.as_deref(),
+            );
+        }
+        (false, "mattermost") => {
+            insert_if_some(
+                &mut pairs,
+                "MATTERMOST_BOT_WEBHOOK_URL",
+                args.webhook_url.as_deref(),
+            );
+        }
+        (false, "msteams") => {
+            insert_if_some(
+                &mut pairs,
+                "MSTEAMS_BOT_WEBHOOK_URL",
                 args.webhook_url.as_deref(),
             );
         }
@@ -3859,9 +3891,9 @@ impl GatewayClient {
 mod tests {
     use super::{
         ApprovalRequestSummary, PaymentRecordSummary, build_ap2_signature_payload,
-        build_catalog_query, build_chat_reply, extract_text_from_value,
-        find_pending_approval_record, format_payment_approval_summary, resolve_ap2_mcu_seed_hex,
-        sign_ap2_payload, update_values,
+        build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
+        extract_text_from_value, find_pending_approval_record, format_payment_approval_summary,
+        normalize_connector_target, resolve_ap2_mcu_seed_hex, sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
     use serde_json::json;
@@ -4030,5 +4062,93 @@ mod tests {
             .expect_err("serial signer without mock seed should fail")
             .to_string();
         assert!(error.contains("transport is not available yet"));
+    }
+
+    #[test]
+    fn normalizes_connector_aliases_for_new_targets() {
+        assert_eq!(normalize_connector_target(true, "gemini"), "google");
+        assert_eq!(normalize_connector_target(false, "teams"), "msteams");
+    }
+
+    #[test]
+    fn builds_secret_pairs_for_google_and_openrouter() {
+        let google_args = super::ConnectorConnectArgs {
+            target: "google".to_string(),
+            gateway: None,
+            api_key: Some("google-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: None,
+            env: Vec::new(),
+        };
+        let google_pairs =
+            connector_secret_pairs(true, "google", &google_args).expect("google secrets");
+        assert_eq!(
+            google_pairs.get("GEMINI_API_KEY").map(String::as_str),
+            Some("google-key")
+        );
+        assert_eq!(
+            google_pairs.get("GOOGLE_API_KEY").map(String::as_str),
+            Some("google-key")
+        );
+
+        let openrouter_args = super::ConnectorConnectArgs {
+            target: "openrouter".to_string(),
+            gateway: None,
+            api_key: Some("openrouter-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://openrouter.ai/api/v1/chat/completions".to_string()),
+            env: Vec::new(),
+        };
+        let openrouter_pairs = connector_secret_pairs(true, "openrouter", &openrouter_args)
+            .expect("openrouter secrets");
+        assert_eq!(
+            openrouter_pairs
+                .get("OPENROUTER_API_KEY")
+                .map(String::as_str),
+            Some("openrouter-key")
+        );
+        assert_eq!(
+            openrouter_pairs
+                .get("OPENROUTER_CHAT_COMPLETIONS_URL")
+                .map(String::as_str),
+            Some("https://openrouter.ai/api/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn builds_send_requests_for_new_webhook_channels() {
+        let args = super::ChannelSendArgs {
+            target: "mattermost".to_string(),
+            text: "hello channel".to_string(),
+            gateway: None,
+            chat_id: None,
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+
+        let (path, body) =
+            build_channel_send_request("mattermost", &args).expect("mattermost send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/mattermost/send");
+        assert_eq!(body, json!({ "text": "hello channel" }));
+
+        let (path, body) =
+            build_channel_send_request("msteams", &args).expect("msteams send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/msteams/send");
+        assert_eq!(body, json!({ "text": "hello channel" }));
     }
 }

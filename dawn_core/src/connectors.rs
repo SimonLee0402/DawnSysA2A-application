@@ -25,6 +25,8 @@ struct ConnectorStatusReport {
 struct ConfiguredConnectors {
     openai: bool,
     anthropic: bool,
+    google: bool,
+    openrouter: bool,
     deepseek: bool,
     qwen: bool,
     zhipu: bool,
@@ -34,6 +36,8 @@ struct ConfiguredConnectors {
     telegram: bool,
     slack: bool,
     discord: bool,
+    mattermost: bool,
+    msteams: bool,
     feishu: bool,
     dingtalk: bool,
     wecom_bot: bool,
@@ -140,6 +144,8 @@ pub async fn execute_model_connector(
     match provider {
         "openai" => execute_openai_response(request).await,
         "anthropic" => execute_anthropic_response(request).await,
+        "google" => execute_google_response(request).await,
+        "openrouter" => execute_openrouter_response(request).await,
         "deepseek" => execute_deepseek_response(request).await,
         "qwen" => execute_qwen_response(request).await,
         "zhipu" => execute_zhipu_response(request).await,
@@ -169,6 +175,12 @@ pub async fn execute_chat_connector(
         "slack" => send_webhook_connector("slack", "SLACK_BOT_WEBHOOK_URL", request.text).await,
         "discord" => {
             send_webhook_connector("discord", "DISCORD_BOT_WEBHOOK_URL", request.text).await
+        }
+        "mattermost" => {
+            send_webhook_connector("mattermost", "MATTERMOST_BOT_WEBHOOK_URL", request.text).await
+        }
+        "msteams" => {
+            send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text).await
         }
         "feishu" => send_webhook_connector("feishu", "FEISHU_BOT_WEBHOOK_URL", request.text).await,
         "dingtalk" => {
@@ -211,6 +223,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/status", get(status))
         .route("/model/openai/respond", post(openai_respond))
         .route("/model/anthropic/respond", post(anthropic_respond))
+        .route("/model/google/respond", post(google_respond))
+        .route("/model/openrouter/respond", post(openrouter_respond))
         .route("/model/deepseek/respond", post(deepseek_respond))
         .route("/model/qwen/respond", post(qwen_respond))
         .route("/model/zhipu/respond", post(zhipu_respond))
@@ -220,6 +234,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/chat/telegram/send", post(send_telegram_message))
         .route("/chat/slack/send", post(send_slack_message))
         .route("/chat/discord/send", post(send_discord_message))
+        .route("/chat/mattermost/send", post(send_mattermost_message))
+        .route("/chat/msteams/send", post(send_msteams_message))
         .route("/chat/feishu/send", post(send_feishu_message))
         .route("/chat/dingtalk/send", post(send_dingtalk_message))
         .route("/chat/wecom/send", post(send_wecom_message))
@@ -235,6 +251,8 @@ async fn status() -> Json<ConnectorStatusReport> {
         configured: ConfiguredConnectors {
             openai: std::env::var("OPENAI_API_KEY").is_ok(),
             anthropic: std::env::var("ANTHROPIC_API_KEY").is_ok(),
+            google: resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]).is_some(),
+            openrouter: std::env::var("OPENROUTER_API_KEY").is_ok(),
             deepseek: std::env::var("DEEPSEEK_API_KEY").is_ok(),
             qwen: resolve_first_present_env(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]).is_some(),
             zhipu: std::env::var("ZHIPU_API_KEY").is_ok(),
@@ -245,6 +263,8 @@ async fn status() -> Json<ConnectorStatusReport> {
             telegram: std::env::var("TELEGRAM_BOT_TOKEN").is_ok(),
             slack: std::env::var("SLACK_BOT_WEBHOOK_URL").is_ok(),
             discord: std::env::var("DISCORD_BOT_WEBHOOK_URL").is_ok(),
+            mattermost: std::env::var("MATTERMOST_BOT_WEBHOOK_URL").is_ok(),
+            msteams: std::env::var("MSTEAMS_BOT_WEBHOOK_URL").is_ok(),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
             wecom_bot: std::env::var("WECOM_BOT_WEBHOOK_URL").is_ok(),
@@ -261,6 +281,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "anthropic",
                 region: "global",
                 integration_mode: "live_messages",
+            },
+            ModelProviderSupport {
+                provider: "google",
+                region: "global",
+                integration_mode: "live_generate_content",
+            },
+            ModelProviderSupport {
+                provider: "openrouter",
+                region: "global",
+                integration_mode: "live_openai_compatible",
             },
             ModelProviderSupport {
                 provider: "deepseek",
@@ -310,6 +340,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 integration_mode: "live_webhook",
             },
             ChatPlatformSupport {
+                platform: "mattermost",
+                region: "global",
+                integration_mode: "live_webhook",
+            },
+            ChatPlatformSupport {
+                platform: "msteams",
+                region: "global",
+                integration_mode: "live_webhook",
+            },
+            ChatPlatformSupport {
                 platform: "feishu",
                 region: "china",
                 integration_mode: "live_webhook",
@@ -353,6 +393,26 @@ async fn anthropic_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_anthropic_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn google_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_google_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn openrouter_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_openrouter_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -443,6 +503,26 @@ async fn send_discord_message(
     Json(request): Json<WebhookTextRequest>,
 ) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
     send_webhook_connector("discord", "DISCORD_BOT_WEBHOOK_URL", request.text)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_mattermost_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<WebhookTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_webhook_connector("mattermost", "MATTERMOST_BOT_WEBHOOK_URL", request.text)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_msteams_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<WebhookTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -601,6 +681,119 @@ async fn execute_anthropic_response(
         provider: "anthropic",
         model: body["model"].as_str().unwrap_or("unknown").to_string(),
         output_text: extract_anthropic_text(&raw_response),
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn execute_google_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model.unwrap_or_else(|| "gemini-2.5-flash".to_string());
+    let Some(api_key) = resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]) else {
+        return Ok(ModelResponseResult {
+            mode: "dry_run",
+            provider: "google",
+            model,
+            output_text: format!(
+                "GEMINI_API_KEY or GOOGLE_API_KEY is not configured. Dry-run request would send input: {input}"
+            ),
+            raw_response: None,
+        });
+    };
+    let endpoint = std::env::var("GOOGLE_GENERATE_CONTENT_URL").unwrap_or_else(|_| {
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent")
+    });
+    let body = json!({
+        "system_instruction": instructions.as_ref().map(|value| json!({
+            "parts": [{ "text": value }]
+        })),
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{ "text": input }]
+            }
+        ]
+    });
+
+    info!("Dispatching live Google Gemini request through gateway connector");
+    let response = Client::new()
+        .post(&endpoint)
+        .query(&[("key", api_key.as_str())])
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = response.json::<Value>().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("google connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "google",
+        model,
+        output_text: extract_google_text(&raw_response),
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn execute_openrouter_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model.unwrap_or_else(|| "openai/gpt-4.1-mini".to_string());
+    let Some(api_key) = std::env::var("OPENROUTER_API_KEY").ok() else {
+        return Ok(ModelResponseResult {
+            mode: "dry_run",
+            provider: "openrouter",
+            model,
+            output_text: format!(
+                "OPENROUTER_API_KEY is not configured. Dry-run request would send input: {input}"
+            ),
+            raw_response: None,
+        });
+    };
+    let endpoint = resolve_endpoint(
+        Some("OPENROUTER_CHAT_COMPLETIONS_URL"),
+        "https://openrouter.ai/api/v1/chat/completions",
+    );
+    let body = json!({
+        "model": model,
+        "messages": build_chat_completion_messages(&input, instructions.as_deref()),
+        "stream": false
+    });
+
+    info!("Dispatching live OpenRouter request through gateway connector");
+    let mut request_builder = Client::new().post(&endpoint).bearer_auth(api_key);
+    if let Ok(referer) = std::env::var("OPENROUTER_HTTP_REFERER") {
+        request_builder = request_builder.header("HTTP-Referer", referer);
+    }
+    if let Ok(title) = std::env::var("OPENROUTER_X_TITLE") {
+        request_builder = request_builder.header("X-Title", title);
+    }
+    let response = request_builder.json(&body).send().await?;
+    let status = response.status();
+    let raw_response = response.json::<Value>().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("openrouter connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "openrouter",
+        model: body["model"].as_str().unwrap_or("unknown").to_string(),
+        output_text: extract_chat_completion_text(&raw_response),
         raw_response: Some(raw_response),
     })
 }
@@ -768,7 +961,7 @@ async fn send_webhook_connector(
     text: String,
 ) -> anyhow::Result<ChatSendResult> {
     let payload = match platform {
-        "slack" => json!({
+        "slack" | "mattermost" | "msteams" => json!({
             "text": text
         }),
         "discord" => json!({
@@ -1173,6 +1366,29 @@ fn extract_chat_completion_text(raw_response: &Value) -> String {
         .unwrap_or_else(|| raw_response.to_string())
 }
 
+fn extract_google_text(raw_response: &Value) -> String {
+    raw_response
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| raw_response.to_string())
+}
+
 fn extract_anthropic_text(raw_response: &Value) -> String {
     raw_response
         .get("content")
@@ -1212,8 +1428,8 @@ mod tests {
     use super::{
         QQSendRequest, build_chat_completion_messages, build_qq_message_payload,
         build_wechat_official_account_payload, extract_anthropic_text,
-        extract_chat_completion_text, extract_ollama_text, extract_openai_text,
-        normalize_qq_target_type,
+        extract_chat_completion_text, extract_google_text, extract_ollama_text,
+        extract_openai_text, normalize_qq_target_type,
     };
 
     #[test]
@@ -1298,6 +1514,24 @@ mod tests {
     }
 
     #[test]
+    fn extracts_google_candidate_content_text() {
+        let raw = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "text": "google reply" },
+                            { "text": "second line" }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(extract_google_text(&raw), "google reply\nsecond line");
+    }
+
+    #[test]
     fn builds_messages_with_system_instructions() {
         let messages = build_chat_completion_messages("hello", Some("be concise"));
 
@@ -1365,5 +1599,14 @@ mod tests {
         assert_eq!(normalize_qq_target_type(Some("group")), "group");
         assert_eq!(normalize_qq_target_type(Some("unknown")), "user");
         assert_eq!(normalize_qq_target_type(None), "user");
+    }
+
+    #[test]
+    fn webhook_like_platforms_use_plain_text_shape() {
+        let payload = match "mattermost" {
+            "slack" | "mattermost" | "msteams" => json!({ "text": "hello" }),
+            _ => unreachable!(),
+        };
+        assert_eq!(payload, json!({ "text": "hello" }));
     }
 }
