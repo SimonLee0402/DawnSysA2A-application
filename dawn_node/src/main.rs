@@ -1,4 +1,5 @@
 mod cli;
+mod managed_browser;
 mod profile;
 
 use std::{
@@ -11,6 +12,19 @@ use std::{
 use anyhow::Context;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
+use managed_browser::{
+    ManagedBrowserPageState, ManagedBrowserSession, activate_managed_browser,
+    click_managed_browser, close_managed_browser, collect_managed_browser_console_messages,
+    collect_managed_browser_cookies, collect_managed_browser_errors,
+    collect_managed_browser_network_requests, collect_managed_browser_trace,
+    emulate_managed_browser_device, emulate_managed_browser_network, evaluate_managed_browser,
+    handle_managed_browser_dialog, inspect_managed_browser, inspect_managed_browser_storage,
+    launch_managed_browser, mutate_managed_browser_storage, navigate_managed_browser,
+    open_managed_browser_tab, open_managed_browser_window, prepare_managed_browser_download,
+    press_key_managed_browser, print_to_pdf_managed_browser, refresh_managed_browser,
+    screenshot_managed_browser, set_managed_browser_geolocation, set_managed_browser_headers,
+    type_managed_browser, upload_managed_browser, wait_for_managed_browser,
+};
 use reqwest::{Client, Method, Url};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
@@ -121,15 +135,18 @@ struct BrowserSession {
     last_action: String,
     loaded_at_unix_ms: u128,
     history: Vec<String>,
+    forward_history: Vec<String>,
     pending_form_selector: Option<String>,
     pending_form_fields: BTreeMap<String, String>,
     pending_form_uploads: BTreeMap<String, String>,
+    managed: Option<ManagedBrowserSession>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserSessionSummary {
     session_id: String,
+    runtime: String,
     current_url: String,
     title: Option<String>,
     status_code: u16,
@@ -168,6 +185,7 @@ struct BrowserFormTarget {
 #[serde(rename_all = "camelCase")]
 struct BrowserPageSnapshot {
     session_id: String,
+    runtime: String,
     current_url: String,
     title: Option<String>,
     text_preview: String,
@@ -184,6 +202,7 @@ struct BrowserPageSnapshot {
 #[serde(rename_all = "camelCase")]
 struct BrowserTabSummary {
     session_id: String,
+    runtime: String,
     current_url: String,
     title: Option<String>,
     last_action: String,
@@ -201,6 +220,20 @@ struct BrowserTypeTarget {
     field_tag: String,
     field_type: Option<String>,
     current_value: String,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserDeviceEmulationRequest {
+    preset: Option<String>,
+    width: u32,
+    height: u32,
+    device_scale_factor: f64,
+    mobile: bool,
+    touch: bool,
+    user_agent: Option<String>,
+    platform: Option<String>,
+    accept_language: Option<String>,
+    reload: bool,
 }
 
 #[derive(Debug)]
@@ -526,14 +559,51 @@ async fn execute_command(
         "read_file_preview" => execute_read_file_preview_command(envelope).await,
         "stat_path" => execute_stat_path_command(envelope).await,
         "process_snapshot" => execute_process_snapshot_command(envelope).await,
+        "browser_start" => execute_browser_start_command(runtime_state, envelope).await,
+        "browser_status" => execute_browser_status_command(runtime_state, envelope).await,
+        "browser_stop" => execute_browser_stop_command(runtime_state, envelope).await,
         "browser_navigate" => execute_browser_navigate_command(runtime_state, envelope).await,
+        "browser_new_tab" => execute_browser_new_tab_command(runtime_state, envelope).await,
+        "browser_new_window" => execute_browser_new_window_command(runtime_state, envelope).await,
         "browser_extract" => execute_browser_extract_command(runtime_state, envelope).await,
         "browser_click" => execute_browser_click_command(runtime_state, envelope).await,
         "browser_back" => execute_browser_back_command(runtime_state, envelope).await,
+        "browser_forward" => execute_browser_forward_command(runtime_state, envelope).await,
+        "browser_reload" => execute_browser_reload_command(runtime_state, envelope).await,
         "browser_focus" => execute_browser_focus_command(runtime_state, envelope).await,
         "browser_close" => execute_browser_close_command(runtime_state, envelope).await,
         "browser_tabs" => execute_browser_tabs_command(runtime_state, envelope).await,
         "browser_snapshot" => execute_browser_snapshot_command(runtime_state, envelope).await,
+        "browser_screenshot" => execute_browser_screenshot_command(runtime_state, envelope).await,
+        "browser_pdf" => execute_browser_pdf_command(runtime_state, envelope).await,
+        "browser_console_messages" => {
+            execute_browser_console_messages_command(runtime_state, envelope).await
+        }
+        "browser_network_requests" => {
+            execute_browser_network_requests_command(runtime_state, envelope).await
+        }
+        "browser_trace" => execute_browser_trace_command(runtime_state, envelope).await,
+        "browser_trace_export" => {
+            execute_browser_trace_export_command(runtime_state, envelope).await
+        }
+        "browser_errors" => execute_browser_errors_command(runtime_state, envelope).await,
+        "browser_cookies" => execute_browser_cookies_command(runtime_state, envelope).await,
+        "browser_storage" => execute_browser_storage_command(runtime_state, envelope).await,
+        "browser_storage_set" => execute_browser_storage_set_command(runtime_state, envelope).await,
+        "browser_set_headers" => execute_browser_set_headers_command(runtime_state, envelope).await,
+        "browser_set_offline" => execute_browser_set_offline_command(runtime_state, envelope).await,
+        "browser_set_geolocation" => {
+            execute_browser_set_geolocation_command(runtime_state, envelope).await
+        }
+        "browser_emulate_device" => {
+            execute_browser_emulate_device_command(runtime_state, envelope).await
+        }
+        "browser_evaluate" => execute_browser_evaluate_command(runtime_state, envelope).await,
+        "browser_wait_for" => execute_browser_wait_for_command(runtime_state, envelope).await,
+        "browser_handle_dialog" => {
+            execute_browser_handle_dialog_command(runtime_state, envelope).await
+        }
+        "browser_press_key" => execute_browser_press_key_command(runtime_state, envelope).await,
         "browser_type" => execute_browser_type_command(runtime_state, envelope).await,
         "browser_upload" => execute_browser_upload_command(runtime_state, envelope).await,
         "browser_download" => execute_browser_download_command(runtime_state, envelope).await,
@@ -553,8 +623,31 @@ async fn execute_command(
         "desktop_mouse_move" => execute_desktop_mouse_move_command(envelope).await,
         "desktop_mouse_click" => execute_desktop_mouse_click_command(envelope).await,
         "desktop_screenshot" => execute_desktop_screenshot_command(envelope).await,
+        "desktop_ocr" => execute_desktop_ocr_command(envelope).await,
+        "desktop_accessibility_query" => {
+            execute_desktop_accessibility_query_command(envelope).await
+        }
+        "desktop_accessibility_click" => {
+            execute_desktop_accessibility_click_command(envelope).await
+        }
+        "desktop_accessibility_wait_for" => {
+            execute_desktop_accessibility_wait_for_command(envelope).await
+        }
+        "desktop_accessibility_fill" => execute_desktop_accessibility_fill_command(envelope).await,
+        "desktop_accessibility_workflow" => {
+            execute_desktop_accessibility_workflow_command(envelope).await
+        }
         "desktop_accessibility_snapshot" => {
             execute_desktop_accessibility_snapshot_command(envelope).await
+        }
+        "desktop_accessibility_focus" => {
+            execute_desktop_accessibility_focus_command(envelope).await
+        }
+        "desktop_accessibility_invoke" => {
+            execute_desktop_accessibility_invoke_command(envelope).await
+        }
+        "desktop_accessibility_set_value" => {
+            execute_desktop_accessibility_set_value_command(envelope).await
         }
         "shell_exec" => execute_shell_command(config, envelope).await,
         other => CommandResultEnvelope {
@@ -1347,11 +1440,78 @@ struct DesktopScreenshotResult {
     height: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopBoundingRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAccessibilityMatch {
+    name: Option<String>,
+    automation_id: Option<String>,
+    class_name: Option<String>,
+    control_type: Option<String>,
+    native_window_handle: Option<i64>,
+    is_enabled: Option<bool>,
+    is_offscreen: Option<bool>,
+    bounding_rect: Option<DesktopBoundingRect>,
+    center_x: Option<i32>,
+    center_y: Option<i32>,
+    match_score: Option<i32>,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAccessibilityQueryResult {
+    visited_nodes: usize,
+    matches: Vec<DesktopAccessibilityMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopOcrResult {
+    backend: String,
+    text: String,
+    lines: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DesktopWindowSelector {
     title: Option<String>,
     handle: Option<String>,
     process_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAccessibilityNodeSelector {
+    name: Option<String>,
+    automation_id: Option<String>,
+    class_name: Option<String>,
+    control_type: Option<String>,
+    match_mode: String,
+    prefer_visible: bool,
+    prefer_enabled: bool,
+}
+
+impl Default for DesktopAccessibilityNodeSelector {
+    fn default() -> Self {
+        Self {
+            name: None,
+            automation_id: None,
+            class_name: None,
+            control_type: None,
+            match_mode: "contains".to_string(),
+            prefer_visible: true,
+            prefer_enabled: true,
+        }
+    }
 }
 
 async fn execute_desktop_windows_list_command(
@@ -1750,6 +1910,983 @@ async fn execute_desktop_accessibility_snapshot_command(
     }
 }
 
+async fn execute_desktop_accessibility_query_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let window_selector = desktop_window_selector_from_payload(&envelope.payload);
+    if window_selector.title.is_none()
+        && window_selector.handle.is_none()
+        && window_selector.process_name.is_none()
+    {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_query requires payload.title, payload.handle, or payload.processName"
+                    .to_string(),
+            ),
+        };
+    }
+    let node_selector = desktop_accessibility_node_selector_from_payload(&envelope.payload);
+    if !desktop_accessibility_selector_has_predicate(&node_selector) {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_query requires payload.name, payload.automationId, payload.className, or payload.controlType"
+                    .to_string(),
+            ),
+        };
+    }
+    let search_depth = envelope
+        .payload
+        .get("depth")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(5);
+    let node_limit = envelope
+        .payload
+        .get("nodeLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(400);
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(10);
+
+    match query_desktop_accessibility_nodes(
+        window_selector.title.as_deref(),
+        window_selector.handle.as_deref(),
+        window_selector.process_name.as_deref(),
+        &node_selector,
+        search_depth,
+        node_limit,
+        limit,
+    )
+    .await
+    {
+        Ok((window, query)) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "desktop_accessibility_query",
+                "window": window,
+                "selector": node_selector,
+                "searchDepth": search_depth,
+                "nodeLimit": node_limit,
+                "limit": limit,
+                "query": query,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_accessibility_click_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let window_selector = desktop_window_selector_from_payload(&envelope.payload);
+    if window_selector.title.is_none()
+        && window_selector.handle.is_none()
+        && window_selector.process_name.is_none()
+    {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_click requires payload.title, payload.handle, or payload.processName"
+                    .to_string(),
+            ),
+        };
+    }
+    let node_selector = desktop_accessibility_node_selector_from_payload(&envelope.payload);
+    if !desktop_accessibility_selector_has_predicate(&node_selector) {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_click requires payload.name, payload.automationId, payload.className, or payload.controlType"
+                    .to_string(),
+            ),
+        };
+    }
+    let search_depth = envelope
+        .payload
+        .get("depth")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(5);
+    let node_limit = envelope
+        .payload
+        .get("nodeLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(400);
+    let element_index = envelope
+        .payload
+        .get("elementIndex")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(0);
+    let button = envelope
+        .payload
+        .get("button")
+        .and_then(Value::as_str)
+        .unwrap_or("left");
+    let button = match normalize_desktop_mouse_button(button) {
+        Ok(button) => button,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let double_click = envelope
+        .payload
+        .get("doubleClick")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let limit = element_index.saturating_add(1).max(1);
+
+    match query_desktop_accessibility_nodes(
+        window_selector.title.as_deref(),
+        window_selector.handle.as_deref(),
+        window_selector.process_name.as_deref(),
+        &node_selector,
+        search_depth,
+        node_limit,
+        limit,
+    )
+    .await
+    {
+        Ok((window, query)) => {
+            let Some(target) = query.matches.get(element_index).cloned() else {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_click",
+                        "window": window,
+                        "selector": node_selector,
+                        "elementIndex": element_index,
+                        "query": query,
+                    })),
+                    error: Some(format!(
+                        "desktop_accessibility_click did not find match at elementIndex {}",
+                        element_index
+                    )),
+                };
+            };
+            let Some(center_x) = target.center_x else {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_click",
+                        "window": window,
+                        "selector": node_selector,
+                        "elementIndex": element_index,
+                        "match": target,
+                    })),
+                    error: Some(
+                        "desktop_accessibility_click target did not expose a usable bounding rectangle"
+                            .to_string(),
+                    ),
+                };
+            };
+            let Some(center_y) = target.center_y else {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_click",
+                        "window": window,
+                        "selector": node_selector,
+                        "elementIndex": element_index,
+                        "match": target,
+                    })),
+                    error: Some(
+                        "desktop_accessibility_click target did not expose a usable bounding rectangle"
+                            .to_string(),
+                    ),
+                };
+            };
+            match click_desktop_mouse(button, double_click, Some((center_x, center_y))).await {
+                Ok(launcher) => CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_click",
+                        "window": window,
+                        "selector": node_selector,
+                        "elementIndex": element_index,
+                        "button": button,
+                        "doubleClick": double_click,
+                        "launcher": launcher,
+                        "match": target,
+                        "query": query,
+                    })),
+                    error: None,
+                },
+                Err(error) => CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_click",
+                        "window": window,
+                        "selector": node_selector,
+                        "elementIndex": element_index,
+                        "button": button,
+                        "doubleClick": double_click,
+                        "match": target,
+                    })),
+                    error: Some(error.to_string()),
+                },
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_accessibility_wait_for_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let window_selector = desktop_window_selector_from_payload(&envelope.payload);
+    if window_selector.title.is_none()
+        && window_selector.handle.is_none()
+        && window_selector.process_name.is_none()
+    {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_wait_for requires payload.title, payload.handle, or payload.processName"
+                    .to_string(),
+            ),
+        };
+    }
+    let node_selector = desktop_accessibility_node_selector_from_payload(&envelope.payload);
+    if !desktop_accessibility_selector_has_predicate(&node_selector) {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_wait_for requires payload.name, payload.automationId, payload.className, or payload.controlType"
+                    .to_string(),
+            ),
+        };
+    }
+    let search_depth = envelope
+        .payload
+        .get("depth")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(5);
+    let node_limit = envelope
+        .payload
+        .get("nodeLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(400);
+    let timeout_ms = envelope
+        .payload
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(8_000);
+    let poll_ms = envelope
+        .payload
+        .get("pollMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(250);
+
+    match wait_for_desktop_accessibility_node(
+        window_selector.title.as_deref(),
+        window_selector.handle.as_deref(),
+        window_selector.process_name.as_deref(),
+        &node_selector,
+        search_depth,
+        node_limit,
+        timeout_ms,
+        poll_ms,
+    )
+    .await
+    {
+        Ok((window, query)) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "desktop_accessibility_wait_for",
+                "window": window,
+                "selector": node_selector,
+                "searchDepth": search_depth,
+                "nodeLimit": node_limit,
+                "timeoutMs": timeout_ms,
+                "pollMs": poll_ms,
+                "query": query,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_accessibility_fill_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let window_selector = desktop_window_selector_from_payload(&envelope.payload);
+    if window_selector.title.is_none()
+        && window_selector.handle.is_none()
+        && window_selector.process_name.is_none()
+    {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_fill requires payload.title, payload.handle, or payload.processName"
+                    .to_string(),
+            ),
+        };
+    }
+    let node_selector = desktop_accessibility_node_selector_from_payload(&envelope.payload);
+    if !desktop_accessibility_selector_has_predicate(&node_selector) {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_fill requires payload.name, payload.automationId, payload.className, or payload.controlType"
+                    .to_string(),
+            ),
+        };
+    }
+    let value = envelope
+        .payload
+        .get("value")
+        .or_else(|| envelope.payload.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if value.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("desktop_accessibility_fill requires payload.value".to_string()),
+        };
+    }
+    let search_depth = envelope
+        .payload
+        .get("depth")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(5);
+    let node_limit = envelope
+        .payload
+        .get("nodeLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(400);
+    let element_index = envelope
+        .payload
+        .get("elementIndex")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(0);
+    let delay_ms = envelope
+        .payload
+        .get("delayMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(250);
+    let clear_existing = envelope
+        .payload
+        .get("clearExisting")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let submit = envelope
+        .payload
+        .get("submit")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let fallback_to_type = envelope
+        .payload
+        .get("fallbackToType")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let set_value_attempt = perform_desktop_accessibility_action(
+        window_selector.title.as_deref(),
+        window_selector.handle.as_deref(),
+        window_selector.process_name.as_deref(),
+        &node_selector,
+        "set_value",
+        Some(&value),
+        search_depth,
+        node_limit,
+        element_index,
+    )
+    .await;
+    match set_value_attempt {
+        Ok((window, action_result)) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "desktop_accessibility_fill",
+                "mode": "value_pattern",
+                "window": window,
+                "selector": node_selector,
+                "searchDepth": search_depth,
+                "nodeLimit": node_limit,
+                "valueLength": value.chars().count(),
+                "result": action_result,
+            })),
+            error: None,
+        },
+        Err(error) if fallback_to_type => {
+            let focus_result = match perform_desktop_accessibility_action(
+                window_selector.title.as_deref(),
+                window_selector.handle.as_deref(),
+                window_selector.process_name.as_deref(),
+                &node_selector,
+                "focus",
+                None,
+                search_depth,
+                node_limit,
+                element_index,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(focus_error) => {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: Some(json!({
+                            "action": "desktop_accessibility_fill",
+                            "selector": node_selector,
+                            "fallbackToType": fallback_to_type,
+                            "setValueError": error.to_string(),
+                        })),
+                        error: Some(focus_error.to_string()),
+                    };
+                }
+            };
+            if clear_existing {
+                if let Err(clear_error) = send_desktop_key_press("CTRL+A", delay_ms).await {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: Some(json!({
+                            "action": "desktop_accessibility_fill",
+                            "mode": "send_keys",
+                            "window": focus_result.0,
+                            "selector": node_selector,
+                            "setValueError": error.to_string(),
+                            "focusResult": focus_result.1,
+                        })),
+                        error: Some(clear_error.to_string()),
+                    };
+                }
+            }
+            let text_launcher = match send_desktop_text(&value, delay_ms).await {
+                Ok(launcher) => launcher,
+                Err(type_error) => {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: Some(json!({
+                            "action": "desktop_accessibility_fill",
+                            "mode": "send_keys",
+                            "window": focus_result.0,
+                            "selector": node_selector,
+                            "setValueError": error.to_string(),
+                            "focusResult": focus_result.1,
+                            "clearExisting": clear_existing,
+                        })),
+                        error: Some(type_error.to_string()),
+                    };
+                }
+            };
+            let submit_result = if submit {
+                match send_desktop_key_press("ENTER", delay_ms).await {
+                    Ok((launcher, send_keys)) => Some(json!({
+                        "launcher": launcher,
+                        "sendKeys": send_keys,
+                    })),
+                    Err(submit_error) => {
+                        return CommandResultEnvelope {
+                            message_type: "command_result",
+                            command_id: envelope.command_id,
+                            status: "failed",
+                            result: Some(json!({
+                                "action": "desktop_accessibility_fill",
+                                "mode": "send_keys",
+                                "window": focus_result.0,
+                                "selector": node_selector,
+                                "setValueError": error.to_string(),
+                                "focusResult": focus_result.1,
+                                "clearExisting": clear_existing,
+                                "textLauncher": text_launcher,
+                            })),
+                            error: Some(submit_error.to_string()),
+                        };
+                    }
+                }
+            } else {
+                None
+            };
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "action": "desktop_accessibility_fill",
+                    "mode": "send_keys",
+                    "window": focus_result.0,
+                    "selector": node_selector,
+                    "searchDepth": search_depth,
+                    "nodeLimit": node_limit,
+                    "valueLength": value.chars().count(),
+                    "clearExisting": clear_existing,
+                    "submit": submit,
+                    "setValueError": error.to_string(),
+                    "focusResult": focus_result.1,
+                    "textLauncher": text_launcher,
+                    "submitResult": submit_result,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: Some(json!({
+                "action": "desktop_accessibility_fill",
+                "selector": node_selector,
+                "searchDepth": search_depth,
+                "nodeLimit": node_limit,
+                "fallbackToType": fallback_to_type,
+            })),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_accessibility_workflow_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(steps) = envelope.payload.get("steps").and_then(Value::as_array) else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_workflow requires payload.steps to be an array".to_string(),
+            ),
+        };
+    };
+    if steps.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_accessibility_workflow requires at least one workflow step".to_string(),
+            ),
+        };
+    }
+
+    let mut results = Vec::with_capacity(steps.len());
+    for (index, step) in steps.iter().enumerate() {
+        let step_payload =
+            match merge_desktop_accessibility_workflow_step_payload(&envelope.payload, step) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: Some(json!({
+                            "action": "desktop_accessibility_workflow",
+                            "stepIndex": index,
+                            "results": results,
+                        })),
+                        error: Some(error.to_string()),
+                    };
+                }
+            };
+        let kind = match desktop_accessibility_workflow_step_kind(&step_payload) {
+            Ok(kind) => kind,
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_workflow",
+                        "stepIndex": index,
+                        "results": results,
+                    })),
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+        let step_command_id = format!("{}:workflow:{index}", envelope.command_id);
+        let step_result = match kind.as_str() {
+            "sleep" => {
+                let duration_ms = step_payload
+                    .get("durationMs")
+                    .or_else(|| step_payload.get("timeoutMs"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(250);
+                tokio::time::sleep(Duration::from_millis(duration_ms.max(1))).await;
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: step_command_id.clone(),
+                    status: "succeeded",
+                    result: Some(json!({
+                        "action": "desktop_accessibility_workflow_sleep",
+                        "durationMs": duration_ms,
+                    })),
+                    error: None,
+                }
+            }
+            "wait_for_window" => {
+                execute_desktop_wait_for_window_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_wait_for_window".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "window_focus" => {
+                execute_desktop_window_focus_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_window_focus".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "launch_and_focus" => {
+                execute_desktop_launch_and_focus_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_launch_and_focus".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "query" => {
+                execute_desktop_accessibility_query_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_query".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "wait_for" => {
+                execute_desktop_accessibility_wait_for_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_wait_for".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "click" => {
+                execute_desktop_accessibility_click_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_click".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "focus" => {
+                execute_desktop_accessibility_focus_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_focus".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "invoke" => {
+                execute_desktop_accessibility_invoke_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_invoke".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "set_value" => {
+                execute_desktop_accessibility_set_value_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_set_value".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "fill" => {
+                execute_desktop_accessibility_fill_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_accessibility_fill".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "ocr" => {
+                execute_desktop_ocr_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_ocr".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "type_text" => {
+                execute_desktop_type_text_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_type_text".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            "key_press" => {
+                execute_desktop_key_press_command(GatewayCommandEnvelope {
+                    command_id: step_command_id.clone(),
+                    command_type: "desktop_key_press".to_string(),
+                    payload: step_payload.clone(),
+                })
+                .await
+            }
+            other => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: step_command_id.clone(),
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "unsupported desktop_accessibility_workflow step kind `{other}`"
+                )),
+            },
+        };
+        let step_summary = json!({
+            "index": index,
+            "kind": kind,
+            "status": step_result.status,
+            "result": step_result.result,
+            "error": step_result.error,
+        });
+        let failed = step_result.status != "succeeded";
+        results.push(step_summary);
+        if failed {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: Some(json!({
+                    "action": "desktop_accessibility_workflow",
+                    "stepIndex": index,
+                    "results": results,
+                })),
+                error: Some(format!(
+                    "desktop_accessibility_workflow stopped at step {} ({})",
+                    index, kind
+                )),
+            };
+        }
+    }
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "action": "desktop_accessibility_workflow",
+            "stepCount": results.len(),
+            "results": results,
+        })),
+        error: None,
+    }
+}
+
+async fn execute_desktop_accessibility_focus_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    execute_desktop_accessibility_action_command(envelope, "focus").await
+}
+
+async fn execute_desktop_accessibility_invoke_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    execute_desktop_accessibility_action_command(envelope, "invoke").await
+}
+
+async fn execute_desktop_accessibility_set_value_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    execute_desktop_accessibility_action_command(envelope, "set_value").await
+}
+
+async fn execute_desktop_accessibility_action_command(
+    envelope: GatewayCommandEnvelope,
+    action: &str,
+) -> CommandResultEnvelope {
+    let window_selector = desktop_window_selector_from_payload(&envelope.payload);
+    if window_selector.title.is_none()
+        && window_selector.handle.is_none()
+        && window_selector.process_name.is_none()
+    {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "desktop_accessibility_{action} requires payload.title, payload.handle, or payload.processName"
+            )),
+        };
+    }
+    let node_selector = desktop_accessibility_node_selector_from_payload(&envelope.payload);
+    if !desktop_accessibility_selector_has_predicate(&node_selector) {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "desktop_accessibility_{action} requires payload.name, payload.automationId, payload.className, or payload.controlType"
+            )),
+        };
+    }
+    let value = if action == "set_value" {
+        let value = envelope
+            .payload
+            .get("value")
+            .or_else(|| envelope.payload.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if value.is_empty() {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some("desktop_accessibility_set_value requires payload.value".to_string()),
+            };
+        }
+        Some(value)
+    } else {
+        None
+    };
+    let search_depth = envelope
+        .payload
+        .get("depth")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(5);
+    let node_limit = envelope
+        .payload
+        .get("nodeLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(400);
+    let element_index = envelope
+        .payload
+        .get("elementIndex")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(0);
+
+    match perform_desktop_accessibility_action(
+        window_selector.title.as_deref(),
+        window_selector.handle.as_deref(),
+        window_selector.process_name.as_deref(),
+        &node_selector,
+        action,
+        value.as_deref(),
+        search_depth,
+        node_limit,
+        element_index,
+    )
+    .await
+    {
+        Ok((window, action_result)) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": format!("desktop_accessibility_{action}"),
+                "window": window,
+                "selector": node_selector,
+                "searchDepth": search_depth,
+                "nodeLimit": node_limit,
+                "value": value,
+                "result": action_result,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 async fn execute_desktop_mouse_click_command(
     envelope: GatewayCommandEnvelope,
 ) -> CommandResultEnvelope {
@@ -1857,12 +2994,386 @@ async fn execute_desktop_screenshot_command(
     }
 }
 
+async fn execute_desktop_ocr_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    let requested_backend = envelope
+        .payload
+        .get("backend")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let language = envelope
+        .payload
+        .get("language")
+        .or_else(|| envelope.payload.get("lang"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let image_path = envelope
+        .payload
+        .get("imagePath")
+        .or_else(|| envelope.payload.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let region = match resolve_desktop_capture_region(&envelope.payload) {
+        Ok(region) => region,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let keep_image = envelope
+        .payload
+        .get("keepImage")
+        .and_then(Value::as_bool)
+        .unwrap_or(image_path.is_some());
+
+    let (image_path, captured) = if let Some(path) = image_path {
+        if !path.is_file() {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "desktop_ocr image path `{}` does not exist or is not a file",
+                    path.display()
+                )),
+            };
+        }
+        (path, false)
+    } else {
+        let screenshot_path = resolve_desktop_screenshot_path(None);
+        if let Err(error) = capture_desktop_screenshot(&screenshot_path, region).await {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+        (screenshot_path, true)
+    };
+
+    let backend = match resolve_desktop_ocr_backend(requested_backend.as_deref()).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            if captured && !keep_image {
+                let _ = std::fs::remove_file(&image_path);
+            }
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let outcome = match backend {
+        "tesseract" => run_tesseract_ocr(&image_path, language.as_deref()).await,
+        other => Err(anyhow::anyhow!("unsupported desktop OCR backend `{other}`")),
+    };
+
+    match outcome {
+        Ok(ocr) => {
+            if captured && !keep_image {
+                let _ = std::fs::remove_file(&image_path);
+            }
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "action": "desktop_ocr",
+                    "backend": backend,
+                    "language": language,
+                    "image": {
+                        "path": image_path.display().to_string(),
+                        "captured": captured,
+                        "retained": !captured || keep_image,
+                    },
+                    "region": region.map(|(x, y, width, height)| json!({
+                        "x": x,
+                        "y": y,
+                        "width": width,
+                        "height": height,
+                    })),
+                    "ocr": ocr,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => {
+            if captured && !keep_image {
+                let _ = std::fs::remove_file(&image_path);
+            }
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: Some(json!({
+                    "action": "desktop_ocr",
+                    "backend": backend,
+                    "language": language,
+                    "image": {
+                        "path": image_path.display().to_string(),
+                        "captured": captured,
+                        "retained": !captured || keep_image,
+                    },
+                })),
+                error: Some(error.to_string()),
+            }
+        }
+    }
+}
+
 const DEFAULT_BROWSER_SESSION_ID: &str = "browser-default";
 const MAX_BROWSER_HTML_BYTES: usize = 1_500_000;
 const DEFAULT_BROWSER_EXTRACT_LIMIT: usize = 5;
 const DEFAULT_BROWSER_TEXT_LIMIT_CHARS: usize = 1_200;
 const DEFAULT_BROWSER_SNAPSHOT_LIMIT: usize = 6;
 const DEFAULT_DESKTOP_WINDOW_LIMIT: usize = 10;
+
+async fn execute_browser_start_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let raw_url = envelope
+        .payload
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("about:blank")
+        .trim()
+        .to_string();
+    let launch_url = if raw_url.is_empty() || raw_url.eq_ignore_ascii_case("about:blank") {
+        "about:blank".to_string()
+    } else {
+        match normalize_browser_url(&raw_url) {
+            Ok(url) => url,
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        }
+    };
+    let session_id = match resolve_browser_start_session_id(
+        &runtime_state.browser_sessions,
+        &envelope.payload,
+    ) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    match launch_managed_browser(&launch_url).await {
+        Ok((managed, page)) => {
+            let session = match new_browser_client() {
+                Ok(client) => build_managed_browser_session(
+                    client,
+                    managed.clone(),
+                    page,
+                    "start",
+                    Vec::new(),
+                ),
+                Err(error) => {
+                    let cleanup_error = close_managed_browser(&managed, true)
+                        .await
+                        .err()
+                        .map(|value| value.to_string());
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(match cleanup_error {
+                            Some(cleanup_error) => {
+                                format!("{error}; cleanup also failed: {cleanup_error}")
+                            }
+                            None => error.to_string(),
+                        }),
+                    };
+                }
+            };
+            let summary = browser_session_summary(&session_id, &session);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), session);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_start",
+                    "page": summary,
+                    "tabs": browser_tab_summaries(
+                        &runtime_state.browser_sessions,
+                        runtime_state.active_browser_session_id.as_deref(),
+                    ),
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_status_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_start or browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_status requires a managed browser session. Run browser_start or browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    match inspect_managed_browser(&managed).await {
+        Ok(status) => {
+            let tracked_sessions = tracked_managed_browser_group_summaries(runtime_state, &managed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_status",
+                    "browser": status,
+                    "trackedSessions": tracked_sessions,
+                    "activeSessionId": runtime_state.active_browser_session_id,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_stop_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_start or browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_stop requires a managed browser session. Run browser_start or browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let removed_session_ids = tracked_managed_browser_group_session_ids(runtime_state, &managed);
+    let removed_tabs = removed_session_ids
+        .iter()
+        .filter_map(|candidate_id| {
+            runtime_state
+                .browser_sessions
+                .get(candidate_id)
+                .map(|candidate| browser_session_summary(candidate_id, candidate))
+        })
+        .collect::<Vec<_>>();
+    for removed_session_id in &removed_session_ids {
+        runtime_state.browser_sessions.remove(removed_session_id);
+    }
+    let cleanup_warning = close_managed_browser(&managed, true)
+        .await
+        .err()
+        .map(|error| error.to_string());
+    runtime_state.active_browser_session_id = preferred_active_browser_session_id(
+        &runtime_state.browser_sessions,
+        runtime_state.active_browser_session_id.as_deref(),
+    );
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "sessionId": session_id,
+            "runtime": "managed",
+            "action": "browser_stop",
+            "stoppedSessionIds": removed_session_ids,
+            "stoppedTabs": removed_tabs,
+            "cleanupWarning": cleanup_warning,
+            "activeSessionId": runtime_state.active_browser_session_id,
+            "remainingTabs": browser_tab_summaries(
+                &runtime_state.browser_sessions,
+                runtime_state.active_browser_session_id.as_deref(),
+            ),
+        })),
+        error: None,
+    }
+}
 
 async fn execute_browser_navigate_command(
     runtime_state: &mut NodeRuntimeState,
@@ -1886,6 +3397,12 @@ async fn execute_browser_navigate_command(
     }
 
     let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let existing_session = runtime_state.browser_sessions.get(&session_id).cloned();
+    let use_managed_browser = existing_session
+        .as_ref()
+        .and_then(|session| session.managed.as_ref())
+        .is_some()
+        || payload_requests_managed_browser(&envelope.payload);
     let normalized_url = match normalize_browser_url(&raw_url) {
         Ok(url) => url,
         Err(error) => {
@@ -1899,6 +3416,77 @@ async fn execute_browser_navigate_command(
         }
     };
 
+    if use_managed_browser {
+        let managed_result = if let Some(session) = existing_session {
+            if let Some(managed) = session.managed.clone() {
+                let history = browser_navigation_history_with_current(&session);
+                match navigate_managed_browser(&managed, &normalized_url).await {
+                    Ok(page) => Ok(build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "navigate",
+                        history,
+                    )),
+                    Err(error) => Err(error),
+                }
+            } else {
+                match launch_managed_browser(&normalized_url).await {
+                    Ok((managed, page)) => Ok(build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "navigate",
+                        Vec::new(),
+                    )),
+                    Err(error) => Err(error),
+                }
+            }
+        } else {
+            match launch_managed_browser(&normalized_url).await {
+                Ok((managed, page)) => match new_browser_client() {
+                    Ok(client) => Ok(build_managed_browser_session(
+                        client,
+                        managed,
+                        page,
+                        "navigate",
+                        Vec::new(),
+                    )),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            }
+        };
+
+        return match managed_result {
+            Ok(session) => {
+                let summary = browser_session_summary(&session_id, &session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "runtime": "managed",
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
+
     match create_browser_session(&normalized_url, "navigate").await {
         Ok(session) => {
             let summary = browser_session_summary(&session_id, &session);
@@ -1911,6 +3499,143 @@ async fn execute_browser_navigate_command(
                 command_id: envelope.command_id,
                 status: "succeeded",
                 result: Some(serde_json::to_value(summary).unwrap_or_else(|_| json!({}))),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_new_tab_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    execute_browser_new_managed_target_command(runtime_state, envelope, "tab").await
+}
+
+async fn execute_browser_new_window_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    execute_browser_new_managed_target_command(runtime_state, envelope, "window").await
+}
+
+async fn execute_browser_new_managed_target_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+    target_kind: &str,
+) -> CommandResultEnvelope {
+    let source_session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(source_session) = runtime_state
+        .browser_sessions
+        .get(&source_session_id)
+        .cloned()
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{source_session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = source_session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser_new_{target_kind} requires a managed browser session. Run browser_navigate with payload.managed=true first."
+            )),
+        };
+    };
+    let raw_url = envelope
+        .payload
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if raw_url.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!("browser_new_{target_kind} requires payload.url")),
+        };
+    }
+    let normalized_url = match normalize_browser_url(&raw_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let next_session_id = match resolve_new_browser_session_id(
+        &runtime_state.browser_sessions,
+        &source_session_id,
+        target_kind,
+        &envelope.payload,
+    ) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let open_result = match target_kind {
+        "window" => open_managed_browser_window(&managed, &normalized_url).await,
+        _ => open_managed_browser_tab(&managed, &normalized_url).await,
+    };
+    match open_result {
+        Ok((next_managed, page)) => {
+            let next_session = build_managed_browser_session(
+                source_session.client.clone(),
+                next_managed,
+                page,
+                &format!("new_{target_kind}"),
+                Vec::new(),
+            );
+            let summary = browser_session_summary(&next_session_id, &next_session);
+            runtime_state
+                .browser_sessions
+                .insert(next_session_id.clone(), next_session);
+            set_active_browser_session(runtime_state, &next_session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": next_session_id,
+                    "sourceSessionId": source_session_id,
+                    "runtime": "managed",
+                    "action": format!("browser_new_{target_kind}"),
+                    "page": summary,
+                    "tabs": browser_tab_summaries(
+                        &runtime_state.browser_sessions,
+                        runtime_state.active_browser_session_id.as_deref(),
+                    ),
+                })),
                 error: None,
             }
         }
@@ -1940,19 +3665,58 @@ async fn execute_browser_back_command(
             )),
         };
     };
-    let Some(previous_url) = session.history.last().cloned() else {
-        return CommandResultEnvelope {
-            message_type: "command_result",
-            command_id: envelope.command_id,
-            status: "failed",
-            result: None,
-            error: Some(format!(
-                "browser session `{session_id}` has no previous page in history"
-            )),
-        };
+    let (previous_url, history, forward_history) = match browser_back_transition(&session) {
+        Ok(result) => result,
+        Err(_) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "browser session `{session_id}` has no previous page in history"
+                )),
+            };
+        }
     };
-    let mut history = session.history.clone();
-    history.pop();
+    if let Some(managed) = session.managed.clone() {
+        return match navigate_managed_browser(&managed, &previous_url).await {
+            Ok(page) => {
+                let mut next_session = build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "back",
+                    history,
+                );
+                next_session.forward_history = forward_history;
+                let summary = browser_session_summary(&session_id, &next_session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), next_session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "action": "browser_back",
+                        "runtime": "managed",
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
 
     match fetch_browser_session_with_client(
         session.client.clone(),
@@ -1965,7 +3729,8 @@ async fn execute_browser_back_command(
     )
     .await
     {
-        Ok(next_session) => {
+        Ok(mut next_session) => {
+            next_session.forward_history = forward_history;
             let summary = browser_session_summary(&session_id, &next_session);
             runtime_state
                 .browser_sessions
@@ -1978,6 +3743,223 @@ async fn execute_browser_back_command(
                 result: Some(json!({
                     "sessionId": session_id,
                     "action": "browser_back",
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_forward_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let (next_url, history, forward_history) = match browser_forward_transition(&session) {
+        Ok(result) => result,
+        Err(_) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "browser session `{session_id}` has no forward page in history"
+                )),
+            };
+        }
+    };
+    if let Some(managed) = session.managed.clone() {
+        return match navigate_managed_browser(&managed, &next_url).await {
+            Ok(page) => {
+                let mut next_session = build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "forward",
+                    history,
+                );
+                next_session.forward_history = forward_history;
+                let summary = browser_session_summary(&session_id, &next_session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), next_session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "action": "browser_forward",
+                        "runtime": "managed",
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
+
+    match fetch_browser_session_with_client(
+        session.client.clone(),
+        &next_url,
+        "forward",
+        history,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        None,
+    )
+    .await
+    {
+        Ok(mut next_session) => {
+            next_session.forward_history = forward_history;
+            let summary = browser_session_summary(&session_id, &next_session);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), next_session);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "action": "browser_forward",
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_reload_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    if session.current_url.trim().is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` has no current URL to reload"
+            )),
+        };
+    }
+    if let Some(managed) = session.managed.clone() {
+        return match navigate_managed_browser(&managed, &session.current_url).await {
+            Ok(page) => {
+                let next_session = preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "reload",
+                        session.history.clone(),
+                    ),
+                    &session,
+                );
+                let summary = browser_session_summary(&session_id, &next_session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), next_session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "action": "browser_reload",
+                        "runtime": "managed",
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
+
+    match fetch_browser_session_with_client(
+        session.client.clone(),
+        &session.current_url,
+        "reload",
+        session.history.clone(),
+        session.pending_form_fields.clone(),
+        session.pending_form_uploads.clone(),
+        session.pending_form_selector.clone(),
+    )
+    .await
+    {
+        Ok(mut next_session) => {
+            next_session.forward_history = session.forward_history.clone();
+            let summary = browser_session_summary(&session_id, &next_session);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), next_session);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "action": "browser_reload",
                     "page": summary,
                 })),
                 error: None,
@@ -2017,6 +3999,14 @@ async fn execute_browser_focus_command(
             )),
         };
     };
+    let activation_warning = if let Some(managed) = session.managed.as_ref() {
+        activate_managed_browser(managed)
+            .await
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
     set_active_browser_session(runtime_state, &session_id);
     CommandResultEnvelope {
         message_type: "command_result",
@@ -2026,6 +4016,7 @@ async fn execute_browser_focus_command(
             "sessionId": session_id,
             "active": true,
             "page": browser_session_summary(&session_id, &session),
+            "activationWarning": activation_warning,
         })),
         error: None,
     }
@@ -2047,6 +4038,23 @@ async fn execute_browser_close_command(
             )),
         };
     };
+    let cleanup_warning = if let Some(managed) = session.managed.as_ref() {
+        let terminate_browser = !runtime_state.browser_sessions.values().any(|candidate| {
+            candidate
+                .managed
+                .as_ref()
+                .map(|candidate_managed| {
+                    managed_browser_sessions_share_process(candidate_managed, managed)
+                })
+                .unwrap_or(false)
+        });
+        close_managed_browser(managed, terminate_browser)
+            .await
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
     runtime_state.active_browser_session_id = next_active_browser_session_id(
         &runtime_state.browser_sessions,
         runtime_state.active_browser_session_id.as_deref(),
@@ -2062,6 +4070,7 @@ async fn execute_browser_close_command(
                 "currentUrl": session.current_url,
                 "title": session.title,
             },
+            "cleanupWarning": cleanup_warning,
             "activeSessionId": runtime_state.active_browser_session_id,
             "remainingTabs": browser_tab_summaries(
                 &runtime_state.browser_sessions,
@@ -2129,6 +4138,37 @@ async fn execute_browser_snapshot_command(
             )),
         };
     };
+    let session = if let Some(managed) = session.managed.clone() {
+        match refresh_managed_browser(&managed).await {
+            Ok(page) => {
+                let refreshed = preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "snapshot",
+                        session.history.clone(),
+                    ),
+                    &session,
+                );
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), refreshed.clone());
+                refreshed
+            }
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        }
+    } else {
+        session
+    };
     match build_browser_snapshot(&session_id, &session, limit, limit_chars) {
         Ok(snapshot) => CommandResultEnvelope {
             message_type: "command_result",
@@ -2137,6 +4177,1697 @@ async fn execute_browser_snapshot_command(
             result: Some(serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}))),
             error: None,
         },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_screenshot_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_screenshot requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let screenshot_path = resolve_browser_screenshot_path(requested_path, &session_id);
+    let full_page = envelope
+        .payload
+        .get("fullPage")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    match screenshot_managed_browser(&managed, &screenshot_path, full_page).await {
+        Ok(result) => {
+            let page = match refresh_managed_browser(&managed).await {
+                Ok(page) => {
+                    let refreshed = preserve_browser_forward_history(
+                        build_managed_browser_session(
+                            session.client.clone(),
+                            managed.clone(),
+                            page,
+                            "screenshot",
+                            session.history.clone(),
+                        ),
+                        &session,
+                    );
+                    let summary = browser_session_summary(&session_id, &refreshed);
+                    runtime_state
+                        .browser_sessions
+                        .insert(session_id.clone(), refreshed);
+                    summary
+                }
+                Err(_) => browser_session_summary(&session_id, &session),
+            };
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_screenshot",
+                    "screenshot": result,
+                    "page": page,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_pdf_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_pdf requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let pdf_path = resolve_browser_pdf_path(requested_path, &session_id);
+    let landscape = envelope
+        .payload
+        .get("landscape")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let print_background = envelope
+        .payload
+        .get("printBackground")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    match print_to_pdf_managed_browser(&managed, &pdf_path, landscape, print_background).await {
+        Ok(result) => {
+            let page = match refresh_managed_browser(&managed).await {
+                Ok(page) => {
+                    let refreshed = preserve_browser_forward_history(
+                        build_managed_browser_session(
+                            session.client.clone(),
+                            managed.clone(),
+                            page,
+                            "pdf",
+                            session.history.clone(),
+                        ),
+                        &session,
+                    );
+                    let summary = browser_session_summary(&session_id, &refreshed);
+                    runtime_state
+                        .browser_sessions
+                        .insert(session_id.clone(), refreshed);
+                    summary
+                }
+                Err(_) => browser_session_summary(&session_id, &session),
+            };
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_pdf",
+                    "pdf": result,
+                    "page": page,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_console_messages_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_console_messages requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(50);
+    match collect_managed_browser_console_messages(&managed, limit).await {
+        Ok(console) => {
+            let refreshed = match refresh_managed_browser(&managed).await {
+                Ok(page) => preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "console_messages",
+                        session.history.clone(),
+                    ),
+                    &session,
+                ),
+                Err(_) => session.clone(),
+            };
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_console_messages",
+                    "console": console,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_network_requests_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_network_requests requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(25);
+    match collect_managed_browser_network_requests(&managed, limit).await {
+        Ok(network) => {
+            let refreshed = match refresh_managed_browser(&managed).await {
+                Ok(page) => preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "network_requests",
+                        session.history.clone(),
+                    ),
+                    &session,
+                ),
+                Err(_) => session.clone(),
+            };
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_network_requests",
+                    "network": network,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_trace_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_trace requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(100);
+    match collect_managed_browser_trace(&managed, limit).await {
+        Ok(trace) => {
+            let refreshed = match refresh_managed_browser(&managed).await {
+                Ok(page) => preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "trace",
+                        session.history.clone(),
+                    ),
+                    &session,
+                ),
+                Err(_) => session.clone(),
+            };
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_trace",
+                    "trace": trace,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_trace_export_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_trace_export requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(200);
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let trace_path = resolve_browser_trace_path(requested_path, &session_id);
+
+    match collect_managed_browser_trace(&managed, limit).await {
+        Ok(trace) => {
+            let encoded = match serde_json::to_vec_pretty(&trace) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(format!(
+                            "failed to serialize managed browser trace: {error}"
+                        )),
+                    };
+                }
+            };
+            if let Some(parent) = trace_path.parent() {
+                if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(format!(
+                            "failed to create trace export directory {}: {error}",
+                            parent.display()
+                        )),
+                    };
+                }
+            }
+            if let Err(error) = tokio::fs::write(&trace_path, &encoded).await {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "failed to save managed browser trace to {}: {error}",
+                        trace_path.display()
+                    )),
+                };
+            }
+            let page = match refresh_managed_browser(&managed).await {
+                Ok(page) => {
+                    let refreshed = preserve_browser_forward_history(
+                        build_managed_browser_session(
+                            session.client.clone(),
+                            managed.clone(),
+                            page,
+                            "trace_export",
+                            session.history.clone(),
+                        ),
+                        &session,
+                    );
+                    let summary = browser_session_summary(&session_id, &refreshed);
+                    runtime_state
+                        .browser_sessions
+                        .insert(session_id.clone(), refreshed);
+                    summary
+                }
+                Err(_) => browser_session_summary(&session_id, &session),
+            };
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_trace_export",
+                    "tracePath": trace_path.display().to_string(),
+                    "bytesWritten": encoded.len(),
+                    "trace": {
+                        "currentUrl": trace.current_url,
+                        "count": trace.count,
+                    },
+                    "page": page,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_errors_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_errors requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let console_limit = envelope
+        .payload
+        .get("consoleLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(50);
+    let network_limit = envelope
+        .payload
+        .get("networkLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(50);
+    match collect_managed_browser_errors(&managed, console_limit, network_limit).await {
+        Ok(errors) => {
+            let refreshed = match refresh_managed_browser(&managed).await {
+                Ok(page) => preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "errors",
+                        session.history.clone(),
+                    ),
+                    &session,
+                ),
+                Err(_) => session.clone(),
+            };
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_errors",
+                    "errors": errors,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_cookies_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_cookies requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(50);
+    match collect_managed_browser_cookies(&managed, limit).await {
+        Ok(cookies) => {
+            let refreshed = match refresh_managed_browser(&managed).await {
+                Ok(page) => preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "cookies",
+                        session.history.clone(),
+                    ),
+                    &session,
+                ),
+                Err(_) => session.clone(),
+            };
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_cookies",
+                    "cookies": cookies,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_storage_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_storage requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(100);
+    match inspect_managed_browser_storage(&managed, limit).await {
+        Ok(storage) => {
+            let refreshed = match refresh_managed_browser(&managed).await {
+                Ok(page) => preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "storage",
+                        session.history.clone(),
+                    ),
+                    &session,
+                ),
+                Err(_) => session.clone(),
+            };
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_storage",
+                    "storage": storage,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_storage_set_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_storage_set requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let Some(storage_area) = envelope
+        .payload
+        .get("storageArea")
+        .or_else(|| envelope.payload.get("scope"))
+        .and_then(Value::as_str)
+        .and_then(normalize_browser_storage_area)
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_storage_set requires payload.storageArea with one of localStorage/local/sessionStorage/session"
+                    .to_string(),
+            ),
+        };
+    };
+    let key = envelope
+        .payload
+        .get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if key.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_storage_set requires payload.key".to_string()),
+        };
+    }
+    let remove = envelope
+        .payload
+        .get("remove")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let value = envelope
+        .payload
+        .get("value")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    if !remove && value.is_none() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_storage_set requires payload.value unless payload.remove=true".to_string(),
+            ),
+        };
+    }
+    match mutate_managed_browser_storage(&managed, storage_area, &key, value.as_deref(), remove)
+        .await
+    {
+        Ok((mutation, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "storage_set",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_storage_set",
+                    "mutation": mutation,
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_set_headers_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_set_headers requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let headers = match payload_string_map(&envelope.payload, "headers") {
+        Ok(headers) => headers,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let reload = envelope
+        .payload
+        .get("reload")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match set_managed_browser_headers(&managed, &headers, reload).await {
+        Ok((headers_result, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "set_headers",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_set_headers",
+                    "headers": headers_result,
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_set_offline_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_set_offline requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let offline = envelope
+        .payload
+        .get("offline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let latency_ms = envelope
+        .payload
+        .get("latencyMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let download_throughput_kbps = envelope
+        .payload
+        .get("downloadThroughputKbps")
+        .and_then(Value::as_u64);
+    let upload_throughput_kbps = envelope
+        .payload
+        .get("uploadThroughputKbps")
+        .and_then(Value::as_u64);
+    let reload = envelope
+        .payload
+        .get("reload")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match emulate_managed_browser_network(
+        &managed,
+        offline,
+        latency_ms,
+        download_throughput_kbps,
+        upload_throughput_kbps,
+        reload,
+    )
+    .await
+    {
+        Ok((network_result, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "set_offline",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_set_offline",
+                    "network": network_result,
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_set_geolocation_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_set_geolocation requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let Some(latitude) = envelope.payload.get("latitude").and_then(Value::as_f64) else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_set_geolocation requires payload.latitude".to_string()),
+        };
+    };
+    let Some(longitude) = envelope.payload.get("longitude").and_then(Value::as_f64) else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_set_geolocation requires payload.longitude".to_string()),
+        };
+    };
+    let accuracy = envelope
+        .payload
+        .get("accuracy")
+        .and_then(Value::as_f64)
+        .unwrap_or(10.0);
+    let reload = envelope
+        .payload
+        .get("reload")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match set_managed_browser_geolocation(&managed, latitude, longitude, accuracy, reload).await {
+        Ok((geolocation_result, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "set_geolocation",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_set_geolocation",
+                    "geolocation": geolocation_result,
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_emulate_device_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_emulate_device requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let request = match resolve_browser_device_emulation_request(&envelope.payload) {
+        Ok(request) => request,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    match emulate_managed_browser_device(
+        &managed,
+        request.preset.as_deref(),
+        request.width,
+        request.height,
+        request.device_scale_factor,
+        request.mobile,
+        request.touch,
+        request.user_agent.as_deref(),
+        request.platform.as_deref(),
+        request.accept_language.as_deref(),
+        request.reload,
+    )
+    .await
+    {
+        Ok((device_result, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "emulate_device",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_emulate_device",
+                    "device": device_result,
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_evaluate_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let expression = envelope
+        .payload
+        .get("expression")
+        .and_then(Value::as_str)
+        .or_else(|| envelope.payload.get("script").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if expression.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_evaluate requires payload.expression".to_string()),
+        };
+    }
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_evaluate requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let return_by_value = envelope
+        .payload
+        .get("returnByValue")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let refresh = envelope
+        .payload
+        .get("refresh")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    match evaluate_managed_browser(&managed, &expression, return_by_value).await {
+        Ok(evaluation) => {
+            let page_summary = if refresh {
+                match refresh_managed_browser(&managed).await {
+                    Ok(page) => {
+                        let refreshed = preserve_browser_forward_history(
+                            build_managed_browser_session(
+                                session.client.clone(),
+                                managed.clone(),
+                                page,
+                                "evaluate",
+                                session.history.clone(),
+                            ),
+                            &session,
+                        );
+                        let summary = browser_session_summary(&session_id, &refreshed);
+                        runtime_state
+                            .browser_sessions
+                            .insert(session_id.clone(), refreshed);
+                        summary
+                    }
+                    Err(error) => {
+                        return CommandResultEnvelope {
+                            message_type: "command_result",
+                            command_id: envelope.command_id,
+                            status: "failed",
+                            result: None,
+                            error: Some(error.to_string()),
+                        };
+                    }
+                }
+            } else {
+                browser_session_summary(&session_id, &session)
+            };
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_evaluate",
+                    "evaluation": evaluation,
+                    "page": page_summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_wait_for_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let selector = envelope
+        .payload
+        .get("selector")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let text = envelope
+        .payload
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let text_gone = envelope
+        .payload
+        .get("textGone")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if selector.is_none() && text.is_none() && text_gone.is_none() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_wait_for requires at least one of payload.selector, payload.text, or payload.textGone"
+                    .to_string(),
+            ),
+        };
+    }
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_wait_for requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let timeout = Duration::from_millis(
+        envelope
+            .payload
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(10_000)
+            .max(100),
+    );
+    let poll_interval = Duration::from_millis(
+        envelope
+            .payload
+            .get("pollMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(250)
+            .max(50),
+    );
+    match wait_for_managed_browser(
+        &managed,
+        selector.as_deref(),
+        text.as_deref(),
+        text_gone.as_deref(),
+        timeout,
+        poll_interval,
+    )
+    .await
+    {
+        Ok((wait, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "wait_for",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let page_summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_wait_for",
+                    "wait": wait,
+                    "page": page_summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_handle_dialog_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_handle_dialog requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let accept = envelope
+        .payload
+        .get("accept")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let prompt_text = envelope
+        .payload
+        .get("promptText")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match handle_managed_browser_dialog(&managed, accept, prompt_text).await {
+        Ok((handled, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "dialog",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_handle_dialog",
+                    "dialog": handled,
+                    "page": summary,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_press_key_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let key = envelope
+        .payload
+        .get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if key.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_press_key requires payload.key".to_string()),
+        };
+    }
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_press_key requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    match press_key_managed_browser(&managed, &key).await {
+        Ok((pressed, page)) => {
+            let refreshed = preserve_browser_forward_history(
+                build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "press_key",
+                    session.history.clone(),
+                ),
+                &session,
+            );
+            let page_summary = browser_session_summary(&session_id, &refreshed);
+            runtime_state
+                .browser_sessions
+                .insert(session_id.clone(), refreshed);
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_press_key",
+                    "keyPress": pressed,
+                    "page": page_summary,
+                })),
+                error: None,
+            }
+        }
         Err(error) => CommandResultEnvelope {
             message_type: "command_result",
             command_id: envelope.command_id,
@@ -2186,6 +5917,82 @@ async fn execute_browser_type_command(
         .get("submit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let managed_session = runtime_state
+        .browser_sessions
+        .get(&session_id)
+        .and_then(|session| session.managed.clone());
+    if let Some(managed) = managed_session {
+        let current_session = runtime_state
+            .browser_sessions
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| BrowserSession {
+                client: new_browser_client().unwrap_or_else(|_| Client::new()),
+                current_url: String::new(),
+                page_html: String::new(),
+                title: None,
+                status_code: 200,
+                content_type: Some("text/html".to_string()),
+                last_action: "type".to_string(),
+                loaded_at_unix_ms: unix_timestamp_ms(),
+                history: Vec::new(),
+                forward_history: Vec::new(),
+                pending_form_selector: None,
+                pending_form_fields: BTreeMap::new(),
+                pending_form_uploads: BTreeMap::new(),
+                managed: Some(managed.clone()),
+            });
+        return match type_managed_browser(&managed, &selector, &text, append, submit).await {
+            Ok((typed, page)) => {
+                let mut history = current_session.history.clone();
+                if submit && !current_session.current_url.is_empty() {
+                    history.push(current_session.current_url.clone());
+                }
+                let mut next_session = build_managed_browser_session(
+                    current_session.client.clone(),
+                    managed,
+                    page,
+                    "type",
+                    history,
+                );
+                if !submit {
+                    next_session.forward_history = current_session.forward_history.clone();
+                }
+                let summary = browser_session_summary(&session_id, &next_session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), next_session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "runtime": "managed",
+                        "action": "browser_type",
+                        "typed": {
+                            "selector": selector,
+                            "fieldTag": typed.tag,
+                            "fieldType": typed.field_type,
+                            "value": typed.value,
+                            "append": append,
+                            "submitted": typed.submitted,
+                        },
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
     let type_target = {
         let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
             return CommandResultEnvelope {
@@ -2423,7 +6230,99 @@ async fn execute_browser_upload_command(
         .get("submit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let upload_path = match upload_path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "failed to resolve browser_upload path `{}`: {error}",
+                    upload_path.display()
+                )),
+            };
+        }
+    };
     let staged_path = upload_path.display().to_string();
+    let managed_session = runtime_state
+        .browser_sessions
+        .get(&session_id)
+        .and_then(|session| session.managed.clone());
+    if let Some(managed) = managed_session {
+        let current_session = runtime_state
+            .browser_sessions
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| BrowserSession {
+                client: new_browser_client().unwrap_or_else(|_| Client::new()),
+                current_url: String::new(),
+                page_html: String::new(),
+                title: None,
+                status_code: 200,
+                content_type: Some("text/html".to_string()),
+                last_action: "upload".to_string(),
+                loaded_at_unix_ms: unix_timestamp_ms(),
+                history: Vec::new(),
+                forward_history: Vec::new(),
+                pending_form_selector: None,
+                pending_form_fields: BTreeMap::new(),
+                pending_form_uploads: BTreeMap::new(),
+                managed: Some(managed.clone()),
+            });
+        return match upload_managed_browser(&managed, &selector, &upload_path, submit).await {
+            Ok((uploaded, page)) => {
+                let mut history = current_session.history.clone();
+                if uploaded.submitted && !current_session.current_url.is_empty() {
+                    history.push(current_session.current_url.clone());
+                }
+                let mut next_session = build_managed_browser_session(
+                    current_session.client.clone(),
+                    managed,
+                    page,
+                    "upload",
+                    history,
+                );
+                if !uploaded.submitted {
+                    next_session.forward_history = current_session.forward_history.clone();
+                }
+                let summary = browser_session_summary(&session_id, &next_session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), next_session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "runtime": "managed",
+                        "action": "browser_upload",
+                        "uploaded": {
+                            "selector": selector,
+                            "fieldName": uploaded.field_name,
+                            "fieldType": uploaded.field_type,
+                            "fileName": uploaded.file_name,
+                            "fileCount": uploaded.file_count,
+                            "path": staged_path,
+                            "submitted": uploaded.submitted,
+                        },
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
     let upload_target = {
         let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
             return CommandResultEnvelope {
@@ -2593,13 +6492,98 @@ async fn execute_browser_download_command(
             )),
         };
     };
-    let source_url = if let Some(raw_url) = envelope
+    let raw_url = envelope
         .payload
         .get("url")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    let selector = envelope
+        .payload
+        .get("selector")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let element_index = envelope
+        .payload
+        .get("elementIndex")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(managed) = session.managed.clone() {
+        let current_session = runtime_state
+            .browser_sessions
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| session.clone());
+        let (download_request, page) = match prepare_managed_browser_download(
+            &managed,
+            raw_url,
+            selector,
+            element_index,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+        let output_path =
+            resolve_browser_download_path(requested_path, &download_request.source_url);
+        let result = match download_managed_browser_resource(
+            &current_session.client,
+            &session_id,
+            &download_request,
+            &output_path,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+        let next_session = preserve_browser_forward_history(
+            build_managed_browser_session(
+                current_session.client.clone(),
+                managed,
+                page,
+                "download",
+                current_session.history.clone(),
+            ),
+            &current_session,
+        );
+        runtime_state
+            .browser_sessions
+            .insert(session_id.clone(), next_session);
+        set_active_browser_session(runtime_state, &session_id);
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(serde_json::to_value(result).unwrap_or_else(|_| json!({}))),
+            error: None,
+        };
+    }
+    let source_url = if let Some(raw_url) = raw_url {
         match resolve_browser_download_source(&session.current_url, raw_url) {
             Ok(url) => url,
             Err(error) => {
@@ -2613,15 +6597,7 @@ async fn execute_browser_download_command(
             }
         }
     } else {
-        let selector = envelope
-            .payload
-            .get("selector")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_string();
-        if selector.is_empty() {
+        let Some(selector) = selector else {
             return CommandResultEnvelope {
                 message_type: "command_result",
                 command_id: envelope.command_id,
@@ -2631,16 +6607,11 @@ async fn execute_browser_download_command(
                     "browser_download requires payload.url or payload.selector".to_string(),
                 ),
             };
-        }
-        let element_index = envelope
-            .payload
-            .get("elementIndex")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
+        };
         match resolve_browser_click_target(
             &session.page_html,
             &session.current_url,
-            &selector,
+            selector,
             element_index,
         ) {
             Ok(target) => target.href,
@@ -2655,12 +6626,6 @@ async fn execute_browser_download_command(
             }
         }
     };
-    let requested_path = envelope
-        .payload
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
     let output_path = resolve_browser_download_path(requested_path, &source_url);
     let result =
         match download_browser_resource(&session, &session_id, &source_url, &output_path).await {
@@ -2720,6 +6685,37 @@ async fn execute_browser_extract_command(
             )),
         };
     };
+    let session = if let Some(managed) = session.managed.clone() {
+        match refresh_managed_browser(&managed).await {
+            Ok(page) => {
+                let refreshed = preserve_browser_forward_history(
+                    build_managed_browser_session(
+                        session.client.clone(),
+                        managed,
+                        page,
+                        "extract",
+                        session.history.clone(),
+                    ),
+                    &session,
+                );
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), refreshed.clone());
+                refreshed
+            }
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        }
+    } else {
+        session
+    };
 
     match extract_browser_matches(
         &session.page_html,
@@ -2757,6 +6753,20 @@ async fn execute_browser_form_fill_command(
     envelope: GatewayCommandEnvelope,
 ) -> CommandResultEnvelope {
     let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    if runtime_state
+        .browser_sessions
+        .get(&session_id)
+        .and_then(|session| session.managed.as_ref())
+        .is_some()
+    {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(managed_browser_command_not_supported("browser_form_fill")),
+        };
+    }
     let form_selector = envelope
         .payload
         .get("formSelector")
@@ -2849,6 +6859,15 @@ async fn execute_browser_form_submit_command(
             )),
         };
     };
+    if session.managed.is_some() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(managed_browser_command_not_supported("browser_form_submit")),
+        };
+    }
     let form_selector = envelope
         .payload
         .get("formSelector")
@@ -3004,6 +7023,52 @@ async fn execute_browser_click_command(
         };
     };
 
+    if let Some(managed) = session.managed.clone() {
+        let mut history = session.history.clone();
+        history.push(session.current_url.clone());
+        return match click_managed_browser(&managed, &selector, element_index).await {
+            Ok((clicked, page)) => {
+                let next_session = build_managed_browser_session(
+                    session.client.clone(),
+                    managed,
+                    page,
+                    "click",
+                    history,
+                );
+                let summary = browser_session_summary(&session_id, &next_session);
+                runtime_state
+                    .browser_sessions
+                    .insert(session_id.clone(), next_session);
+                set_active_browser_session(runtime_state, &session_id);
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "succeeded",
+                    result: Some(json!({
+                        "sessionId": session_id,
+                        "runtime": "managed",
+                        "clicked": {
+                            "selector": selector,
+                            "elementIndex": element_index,
+                            "tag": clicked.tag,
+                            "text": clicked.text,
+                            "href": clicked.href,
+                        },
+                        "page": summary,
+                    })),
+                    error: None,
+                }
+            }
+            Err(error) => CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+    }
+
     let target = match resolve_browser_click_target(
         &session.page_html,
         &session.current_url,
@@ -3086,6 +7151,137 @@ fn requested_browser_session_id(payload: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn normalize_browser_storage_area(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "local" | "localstorage" | "local_storage" => Some("localStorage"),
+        "session" | "sessionstorage" | "session_storage" => Some("sessionStorage"),
+        _ => None,
+    }
+}
+
+fn resolve_browser_device_emulation_request(
+    payload: &Value,
+) -> anyhow::Result<BrowserDeviceEmulationRequest> {
+    let preset = payload
+        .get("preset")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let mut request = match preset.as_deref() {
+        Some(value) => match browser_device_emulation_preset(value) {
+            Some(preset_request) => preset_request,
+            None => anyhow::bail!("unsupported browser_emulate_device preset `{value}`"),
+        },
+        None => BrowserDeviceEmulationRequest {
+            preset: None,
+            width: 1440,
+            height: 900,
+            device_scale_factor: 1.0,
+            mobile: false,
+            touch: false,
+            user_agent: None,
+            platform: Some("Windows".to_string()),
+            accept_language: None,
+            reload: false,
+        },
+    };
+    request.preset = preset;
+    if let Some(value) = payload.get("width").and_then(Value::as_u64) {
+        request.width = value.max(1) as u32;
+    }
+    if let Some(value) = payload.get("height").and_then(Value::as_u64) {
+        request.height = value.max(1) as u32;
+    }
+    if let Some(value) = payload.get("deviceScaleFactor").and_then(Value::as_f64) {
+        request.device_scale_factor = value.max(0.1);
+    }
+    if let Some(value) = payload.get("mobile").and_then(Value::as_bool) {
+        request.mobile = value;
+    }
+    if let Some(value) = payload.get("touch").and_then(Value::as_bool) {
+        request.touch = value;
+    }
+    if let Some(value) = payload
+        .get("userAgent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request.user_agent = Some(value.to_string());
+    }
+    if let Some(value) = payload
+        .get("platform")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request.platform = Some(value.to_string());
+    }
+    if let Some(value) = payload
+        .get("acceptLanguage")
+        .or_else(|| payload.get("locale"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request.accept_language = Some(value.to_string());
+    }
+    request.reload = payload
+        .get("reload")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(request)
+}
+
+fn browser_device_emulation_preset(value: &str) -> Option<BrowserDeviceEmulationRequest> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "desktop" | "desktop-default" => Some(BrowserDeviceEmulationRequest {
+            preset: Some("desktop".to_string()),
+            width: 1440,
+            height: 900,
+            device_scale_factor: 1.0,
+            mobile: false,
+            touch: false,
+            user_agent: Some(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36".to_string(),
+            ),
+            platform: Some("Windows".to_string()),
+            accept_language: Some("en-US,en;q=0.9".to_string()),
+            reload: false,
+        }),
+        "mobile" | "iphone-13" | "iphone13" => Some(BrowserDeviceEmulationRequest {
+            preset: Some("iphone-13".to_string()),
+            width: 390,
+            height: 844,
+            device_scale_factor: 3.0,
+            mobile: true,
+            touch: true,
+            user_agent: Some(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1".to_string(),
+            ),
+            platform: Some("iPhone".to_string()),
+            accept_language: Some("en-US,en;q=0.9".to_string()),
+            reload: false,
+        }),
+        "pixel-7" | "pixel7" | "android" => Some(BrowserDeviceEmulationRequest {
+            preset: Some("pixel-7".to_string()),
+            width: 412,
+            height: 915,
+            device_scale_factor: 2.625,
+            mobile: true,
+            touch: true,
+            user_agent: Some(
+                "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36".to_string(),
+            ),
+            platform: Some("Android".to_string()),
+            accept_language: Some("en-US,en;q=0.9".to_string()),
+            reload: false,
+        }),
+        _ => None,
+    }
+}
+
 fn resolve_browser_session_id(runtime_state: &NodeRuntimeState, payload: &Value) -> String {
     requested_browser_session_id(payload)
         .or_else(|| runtime_state.active_browser_session_id.clone())
@@ -3121,6 +7317,116 @@ fn next_active_browser_session_id(
         .map(|(session_id, _)| session_id.clone())
 }
 
+fn preferred_active_browser_session_id(
+    browser_sessions: &HashMap<String, BrowserSession>,
+    preferred_session_id: Option<&str>,
+) -> Option<String> {
+    if let Some(preferred_session_id) = preferred_session_id
+        .filter(|preferred_session_id| browser_sessions.contains_key(*preferred_session_id))
+    {
+        return Some(preferred_session_id.to_string());
+    }
+    if browser_sessions.contains_key(DEFAULT_BROWSER_SESSION_ID) {
+        return Some(DEFAULT_BROWSER_SESSION_ID.to_string());
+    }
+    browser_sessions
+        .iter()
+        .max_by(|left, right| {
+            left.1
+                .loaded_at_unix_ms
+                .cmp(&right.1.loaded_at_unix_ms)
+                .then_with(|| left.0.cmp(right.0))
+        })
+        .map(|(session_id, _)| session_id.clone())
+}
+
+fn tracked_managed_browser_group_session_ids(
+    runtime_state: &NodeRuntimeState,
+    managed: &ManagedBrowserSession,
+) -> Vec<String> {
+    let mut session_ids = runtime_state
+        .browser_sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            session
+                .managed
+                .as_ref()
+                .filter(|candidate| managed_browser_sessions_share_process(candidate, managed))
+                .map(|_| session_id.clone())
+        })
+        .collect::<Vec<_>>();
+    session_ids.sort();
+    session_ids
+}
+
+fn tracked_managed_browser_group_summaries(
+    runtime_state: &NodeRuntimeState,
+    managed: &ManagedBrowserSession,
+) -> Vec<BrowserTabSummary> {
+    let session_ids = tracked_managed_browser_group_session_ids(runtime_state, managed);
+    let mut tabs = session_ids
+        .iter()
+        .filter_map(|session_id| {
+            runtime_state
+                .browser_sessions
+                .get(session_id)
+                .map(|session| BrowserTabSummary {
+                    session_id: session_id.clone(),
+                    runtime: browser_session_runtime_label(session).to_string(),
+                    current_url: session.current_url.clone(),
+                    title: session.title.clone(),
+                    last_action: session.last_action.clone(),
+                    loaded_at_unix_ms: session.loaded_at_unix_ms,
+                    history_depth: session.history.len(),
+                    pending_form_field_count: session.pending_form_fields.len(),
+                    pending_form_upload_count: session.pending_form_uploads.len(),
+                    active: runtime_state
+                        .active_browser_session_id
+                        .as_deref()
+                        .map(|active_id| active_id == session_id)
+                        .unwrap_or(false),
+                })
+        })
+        .collect::<Vec<_>>();
+    tabs.sort_by(|left, right| {
+        right
+            .loaded_at_unix_ms
+            .cmp(&left.loaded_at_unix_ms)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    tabs
+}
+
+fn resolve_browser_start_session_id(
+    sessions: &HashMap<String, BrowserSession>,
+    payload: &Value,
+) -> anyhow::Result<String> {
+    if let Some(explicit) = requested_browser_session_id(payload).or_else(|| {
+        payload
+            .get("newSessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    }) {
+        if sessions.contains_key(&explicit) {
+            anyhow::bail!("browser session `{explicit}` already exists");
+        }
+        return Ok(explicit);
+    }
+    if !sessions.contains_key(DEFAULT_BROWSER_SESSION_ID) {
+        return Ok(DEFAULT_BROWSER_SESSION_ID.to_string());
+    }
+    let mut counter = 1usize;
+    loop {
+        let candidate = format!("browser-managed-{counter}");
+        if !sessions.contains_key(&candidate) {
+            return Ok(candidate);
+        }
+        counter += 1;
+    }
+}
+
 fn resolve_browser_download_source(current_url: &str, raw: &str) -> anyhow::Result<String> {
     match Url::parse(raw) {
         Ok(url) => match url.scheme() {
@@ -3139,6 +7445,57 @@ fn resolve_browser_download_path(requested: Option<&str>, source_url: &str) -> P
         Some(path) => path,
         None => env::temp_dir().join(inferred_name),
     }
+}
+
+fn resolve_browser_screenshot_path(requested: Option<&str>, session_id: &str) -> PathBuf {
+    let mut path = requested
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::temp_dir().join(format!(
+                "dawn-browser-screenshot-{}-{}.png",
+                session_id,
+                unix_timestamp_ms()
+            ))
+        });
+    if path.extension().is_none() {
+        path.set_extension("png");
+    }
+    path
+}
+
+fn resolve_browser_pdf_path(requested: Option<&str>, session_id: &str) -> PathBuf {
+    let mut path = requested
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::temp_dir().join(format!(
+                "dawn-browser-pdf-{}-{}.pdf",
+                session_id,
+                unix_timestamp_ms()
+            ))
+        });
+    if path.extension().is_none() {
+        path.set_extension("pdf");
+    }
+    path
+}
+
+fn resolve_browser_trace_path(requested: Option<&str>, session_id: &str) -> PathBuf {
+    let mut path = requested
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::temp_dir().join(format!(
+                "dawn-browser-trace-{}-{}.json",
+                session_id,
+                unix_timestamp_ms()
+            ))
+        });
+    if path.extension().is_none() {
+        path.set_extension("json");
+    }
+    path
 }
 
 fn infer_browser_download_file_name(source_url: &str) -> String {
@@ -3225,6 +7582,68 @@ async fn download_browser_resource(
     })
 }
 
+async fn download_managed_browser_resource(
+    client: &Client,
+    session_id: &str,
+    request: &managed_browser::ManagedBrowserDownloadRequest,
+    output_path: &PathBuf,
+) -> anyhow::Result<BrowserDownloadResult> {
+    let mut builder = client.get(&request.source_url).header(
+        reqwest::header::USER_AGENT,
+        request
+            .user_agent
+            .as_deref()
+            .unwrap_or("DawnNode/0.1 managed-browser"),
+    );
+    if let Some(cookie_header) = request.cookie_header.as_deref() {
+        builder = builder.header(reqwest::header::COOKIE, cookie_header);
+    }
+    if !request.current_url.trim().is_empty() {
+        builder = builder.header(reqwest::header::REFERER, request.current_url.as_str());
+    }
+    let response = builder.send().await.with_context(|| {
+        format!(
+            "failed to download managed browser resource {}",
+            request.source_url
+        )
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("browser_download received HTTP {}", status.as_u16());
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    let bytes = response.bytes().await.with_context(|| {
+        format!(
+            "failed to read managed browser download body from {}",
+            request.source_url
+        )
+    })?;
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create download directory {}", parent.display()))?;
+    }
+    tokio::fs::write(output_path, &bytes)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to save browser download to {}",
+                output_path.display()
+            )
+        })?;
+    Ok(BrowserDownloadResult {
+        session_id: session_id.to_string(),
+        source_url: request.source_url.to_string(),
+        saved_path: output_path.display().to_string(),
+        bytes_written: bytes.len(),
+        content_type,
+    })
+}
+
 async fn fetch_browser_session(url: &str, action: &str) -> anyhow::Result<BrowserSession> {
     let client = new_browser_client()?;
     fetch_browser_session_with_client(
@@ -3244,6 +7663,143 @@ fn new_browser_client() -> anyhow::Result<Client> {
         .cookie_store(true)
         .build()
         .context("failed to build browser session HTTP client")
+}
+
+fn browser_session_runtime_label(session: &BrowserSession) -> &'static str {
+    if session.managed.is_some() {
+        "managed"
+    } else {
+        "http-dom"
+    }
+}
+
+fn payload_requests_managed_browser(payload: &Value) -> bool {
+    payload
+        .get("managed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("runtime")
+            .and_then(Value::as_str)
+            .map(|value| value.eq_ignore_ascii_case("managed"))
+            .unwrap_or(false)
+}
+
+fn browser_navigation_history_with_current(session: &BrowserSession) -> Vec<String> {
+    let mut history = session.history.clone();
+    if !session.current_url.is_empty() {
+        history.push(session.current_url.clone());
+    }
+    history
+}
+
+fn browser_back_transition(
+    session: &BrowserSession,
+) -> anyhow::Result<(String, Vec<String>, Vec<String>)> {
+    let Some(previous_url) = session.history.last().cloned() else {
+        anyhow::bail!("browser session has no previous page in history");
+    };
+    let mut history = session.history.clone();
+    history.pop();
+    let mut forward_history = session.forward_history.clone();
+    if !session.current_url.is_empty() {
+        forward_history.push(session.current_url.clone());
+    }
+    Ok((previous_url, history, forward_history))
+}
+
+fn browser_forward_transition(
+    session: &BrowserSession,
+) -> anyhow::Result<(String, Vec<String>, Vec<String>)> {
+    let Some(next_url) = session.forward_history.last().cloned() else {
+        anyhow::bail!("browser session has no forward page in history");
+    };
+    let mut forward_history = session.forward_history.clone();
+    forward_history.pop();
+    let mut history = session.history.clone();
+    if !session.current_url.is_empty() {
+        history.push(session.current_url.clone());
+    }
+    Ok((next_url, history, forward_history))
+}
+
+fn preserve_browser_forward_history(
+    mut next_session: BrowserSession,
+    current_session: &BrowserSession,
+) -> BrowserSession {
+    next_session.forward_history = current_session.forward_history.clone();
+    next_session
+}
+
+fn resolve_new_browser_session_id(
+    sessions: &HashMap<String, BrowserSession>,
+    base_session_id: &str,
+    session_kind: &str,
+    payload: &Value,
+) -> anyhow::Result<String> {
+    if let Some(explicit) = payload
+        .get("newSessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if sessions.contains_key(explicit) {
+            anyhow::bail!("browser session `{explicit}` already exists");
+        }
+        return Ok(explicit.to_string());
+    }
+    let mut counter = 1usize;
+    loop {
+        let candidate = format!("{base_session_id}-{session_kind}-{counter}");
+        if !sessions.contains_key(&candidate) {
+            return Ok(candidate);
+        }
+        counter += 1;
+    }
+}
+
+fn managed_browser_sessions_share_process(
+    left: &ManagedBrowserSession,
+    right: &ManagedBrowserSession,
+) -> bool {
+    if let (Some(left_pid), Some(right_pid)) = (left.browser_pid, right.browser_pid) {
+        return left_pid == right_pid;
+    }
+    left.debug_port == right.debug_port
+        && left.user_data_dir == right.user_data_dir
+        && left.executable == right.executable
+}
+
+fn managed_browser_command_not_supported(command_type: &str) -> String {
+    format!(
+        "{command_type} is not yet supported for managed browser sessions; managed mode currently supports navigate, click, snapshot, screenshot, pdf, evaluate, wait_for, handle_dialog, press_key, type, upload, and download"
+    )
+}
+
+fn build_managed_browser_session(
+    client: Client,
+    managed: ManagedBrowserSession,
+    page: ManagedBrowserPageState,
+    action: &str,
+    history: Vec<String>,
+) -> BrowserSession {
+    let _ready_state = page.ready_state.clone();
+    BrowserSession {
+        client,
+        current_url: page.current_url,
+        page_html: page.html,
+        title: page.title,
+        status_code: 200,
+        content_type: Some("text/html".to_string()),
+        last_action: action.to_string(),
+        loaded_at_unix_ms: unix_timestamp_ms(),
+        history,
+        forward_history: Vec::new(),
+        pending_form_selector: None,
+        pending_form_fields: BTreeMap::new(),
+        pending_form_uploads: BTreeMap::new(),
+        managed: Some(managed),
+    }
 }
 
 async fn create_browser_session(url: &str, action: &str) -> anyhow::Result<BrowserSession> {
@@ -3320,9 +7876,11 @@ async fn finalize_browser_response(
         last_action: action.to_string(),
         loaded_at_unix_ms: unix_timestamp_ms(),
         history,
+        forward_history: Vec::new(),
         pending_form_selector,
         pending_form_fields,
         pending_form_uploads,
+        managed: None,
     })
 }
 
@@ -3330,6 +7888,7 @@ fn browser_session_summary(session_id: &str, session: &BrowserSession) -> Browse
     let document = Html::parse_document(&session.page_html);
     BrowserSessionSummary {
         session_id: session_id.to_string(),
+        runtime: browser_session_runtime_label(session).to_string(),
         current_url: session.current_url.clone(),
         title: session.title.clone(),
         status_code: session.status_code,
@@ -3352,6 +7911,7 @@ fn browser_tab_summaries(
         .iter()
         .map(|(session_id, session)| BrowserTabSummary {
             session_id: session_id.clone(),
+            runtime: browser_session_runtime_label(session).to_string(),
             current_url: session.current_url.clone(),
             title: session.title.clone(),
             last_action: session.last_action.clone(),
@@ -3382,6 +7942,7 @@ fn build_browser_snapshot(
     let document = Html::parse_document(&session.page_html);
     Ok(BrowserPageSnapshot {
         session_id: session_id.to_string(),
+        runtime: browser_session_runtime_label(session).to_string(),
         current_url: session.current_url.clone(),
         title: session.title.clone(),
         text_preview: extract_document_text(&document, limit_chars),
@@ -4510,6 +9071,603 @@ Convert-DawnAutomationElement $root 0 | ConvertTo-Json -Depth 12 -Compress
     Ok((window, snapshot))
 }
 
+async fn perform_desktop_accessibility_action(
+    title: Option<&str>,
+    handle: Option<&str>,
+    process_name: Option<&str>,
+    node_selector: &DesktopAccessibilityNodeSelector,
+    action: &str,
+    value: Option<&str>,
+    search_depth: usize,
+    node_limit: usize,
+    element_index: usize,
+) -> anyhow::Result<(DesktopWindowEntry, Value)> {
+    let window = if let Some(handle) = handle {
+        focus_desktop_window(title, Some(handle), process_name).await?
+    } else {
+        wait_for_desktop_window(title, handle, process_name, 5_000, 200).await?
+    };
+    let script = r#"
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$handleText = $env:DAWN_ACCESSIBILITY_HANDLE
+if ([string]::IsNullOrWhiteSpace($handleText)) {
+    throw "desktop accessibility action requires a window handle"
+}
+$handleNumber = [Convert]::ToInt64($handleText.Replace("0x", ""), 16)
+$nativeHandle = [IntPtr]::new($handleNumber)
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($nativeHandle)
+if ($null -eq $root) {
+    throw "failed to resolve automation root for the requested desktop window"
+}
+$action = ([string]$env:DAWN_ACCESSIBILITY_ACTION).Trim().ToLowerInvariant()
+$selectorName = ([string]$env:DAWN_ACCESSIBILITY_NAME).Trim().ToLowerInvariant()
+$selectorAutomationId = ([string]$env:DAWN_ACCESSIBILITY_AUTOMATION_ID).Trim().ToLowerInvariant()
+$selectorClassName = ([string]$env:DAWN_ACCESSIBILITY_CLASS_NAME).Trim().ToLowerInvariant()
+$selectorControlType = ([string]$env:DAWN_ACCESSIBILITY_CONTROL_TYPE).Trim().ToLowerInvariant()
+if ($selectorControlType.StartsWith("controltype.")) {
+    $selectorControlType = $selectorControlType.Substring(12)
+}
+$matchMode = ([string]$env:DAWN_ACCESSIBILITY_MATCH_MODE).Trim().ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($matchMode)) {
+    $matchMode = "contains"
+}
+$preferVisible = ([string]$env:DAWN_ACCESSIBILITY_PREFER_VISIBLE).Trim().ToLowerInvariant() -ne "false"
+$preferEnabled = ([string]$env:DAWN_ACCESSIBILITY_PREFER_ENABLED).Trim().ToLowerInvariant() -ne "false"
+$elementIndex = [Math]::Max(0, [int]$env:DAWN_ACCESSIBILITY_ELEMENT_INDEX)
+$actionValue = $env:DAWN_ACCESSIBILITY_VALUE
+$maxDepth = [int]$env:DAWN_ACCESSIBILITY_SEARCH_DEPTH
+$nodeLimit = [int]$env:DAWN_ACCESSIBILITY_NODE_LIMIT
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+
+function Test-DawnTextMatch([string]$actual, [string]$needle) {
+    if ([string]::IsNullOrWhiteSpace($needle)) { return $true }
+    if ([string]::IsNullOrWhiteSpace($actual)) { return $false }
+    $normalizedActual = $actual.Trim().ToLowerInvariant()
+    switch ($matchMode) {
+        "exact" { return $normalizedActual -eq $needle }
+        "starts_with" { return $normalizedActual.StartsWith($needle) }
+        default { return $normalizedActual.Contains($needle) }
+    }
+}
+
+function Convert-DawnAutomationSummary($element, [int]$depth, [int]$matchScore) {
+    $current = $element.Current
+    $bounds = $current.BoundingRectangle
+    $width = [int][Math]::Round($bounds.Width)
+    $height = [int][Math]::Round($bounds.Height)
+    $x = [int][Math]::Round($bounds.Left)
+    $y = [int][Math]::Round($bounds.Top)
+    $centerX = if ($width -gt 0) { $x + [int][Math]::Floor($width / 2) } else { $null }
+    $centerY = if ($height -gt 0) { $y + [int][Math]::Floor($height / 2) } else { $null }
+    return [pscustomobject]@{
+        name = if ([string]::IsNullOrWhiteSpace($current.Name)) { $null } else { $current.Name }
+        automationId = if ([string]::IsNullOrWhiteSpace($current.AutomationId)) { $null } else { $current.AutomationId }
+        className = if ([string]::IsNullOrWhiteSpace($current.ClassName)) { $null } else { $current.ClassName }
+        controlType = if ([string]::IsNullOrWhiteSpace($current.ControlType.ProgrammaticName)) { $null } else { $current.ControlType.ProgrammaticName }
+        nativeWindowHandle = if ($current.NativeWindowHandle -eq 0) { $null } else { [int64]$current.NativeWindowHandle }
+        isEnabled = $current.IsEnabled
+        isOffscreen = $current.IsOffscreen
+        boundingRect = if ($width -gt 0 -and $height -gt 0) {
+            [pscustomobject]@{
+                x = $x
+                y = $y
+                width = $width
+                height = $height
+            }
+        } else {
+            $null
+        }
+        centerX = $centerX
+        centerY = $centerY
+        matchScore = $matchScore
+        depth = $depth
+    }
+}
+
+function Test-DawnAutomationMatch($element) {
+    if ($null -eq $element) { return $false }
+    $current = $element.Current
+    if (-not [string]::IsNullOrWhiteSpace($selectorName)) {
+        if (-not (Test-DawnTextMatch ([string]$current.Name) $selectorName)) { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorAutomationId)) {
+        $currentAutomationId = ([string]$current.AutomationId).Trim().ToLowerInvariant()
+        if ($currentAutomationId -ne $selectorAutomationId) { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorClassName)) {
+        if (-not (Test-DawnTextMatch ([string]$current.ClassName) $selectorClassName)) { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorControlType)) {
+        $controlType = ([string]$current.ControlType.ProgrammaticName).Trim().ToLowerInvariant()
+        if ($controlType.StartsWith("controltype.")) {
+            $controlType = $controlType.Substring(12)
+        }
+        if ($controlType -ne $selectorControlType) { return $false }
+    }
+    return $true
+}
+
+function Get-DawnMatchScore($element, [int]$depth) {
+    $current = $element.Current
+    $score = 0
+    if (-not [string]::IsNullOrWhiteSpace($selectorAutomationId)) {
+        $score += 120
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorName)) {
+        $normalizedName = ([string]$current.Name).Trim().ToLowerInvariant()
+        switch ($matchMode) {
+            "exact" { $score += 90 }
+            "starts_with" { $score += 75 }
+            default {
+                if ($normalizedName -eq $selectorName) {
+                    $score += 80
+                } elseif ($normalizedName.StartsWith($selectorName)) {
+                    $score += 70
+                } else {
+                    $score += 55
+                }
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorClassName)) {
+        $score += 35
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorControlType)) {
+        $score += 35
+    }
+    if ($preferVisible) {
+        if ($current.IsOffscreen) { $score -= 40 } else { $score += 18 }
+    }
+    if ($preferEnabled) {
+        if ($current.IsEnabled) { $score += 18 } else { $score -= 30 }
+    }
+    $bounds = $current.BoundingRectangle
+    if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+        $score += 10
+    } else {
+        $score -= 10
+    }
+    $score += [Math]::Max(0, 12 - $depth)
+    return [int]$score
+}
+
+$stack = New-Object System.Collections.Generic.Stack[object]
+$stack.Push([pscustomobject]@{ element = $root; depth = 0 })
+$visitedNodes = 0
+$candidates = New-Object System.Collections.Generic.List[object]
+while ($stack.Count -gt 0 -and $visitedNodes -lt $nodeLimit) {
+    $frame = $stack.Pop()
+    $element = $frame.element
+    $depth = [int]$frame.depth
+    $visitedNodes += 1
+    if (Test-DawnAutomationMatch $element) {
+        $matchScore = Get-DawnMatchScore $element $depth
+        $candidates.Add([pscustomobject]@{
+            element = $element
+            depth = $depth
+            matchScore = $matchScore
+            node = (Convert-DawnAutomationSummary $element $depth $matchScore)
+        })
+    }
+    if ($depth -ge $maxDepth) {
+        continue
+    }
+    $children = New-Object System.Collections.Generic.List[object]
+    $child = $walker.GetFirstChild($element)
+    while ($child -ne $null) {
+        $children.Add($child)
+        $child = $walker.GetNextSibling($child)
+    }
+    for ($index = $children.Count - 1; $index -ge 0; $index -= 1) {
+        $stack.Push([pscustomobject]@{ element = $children[$index]; depth = ($depth + 1) })
+    }
+}
+
+$sortedCandidates = @(
+    $candidates | Sort-Object -Property `
+        @{ Expression = { $_.matchScore }; Descending = $true }, `
+        @{ Expression = { if ($_.node.isOffscreen -eq $true) { 1 } else { 0 } }; Descending = $false }, `
+        @{ Expression = { if ($_.node.isEnabled -eq $false) { 1 } else { 0 } }; Descending = $false }, `
+        @{ Expression = { $_.depth }; Descending = $false }
+)
+
+if ($sortedCandidates.Count -eq 0) {
+    throw "no accessibility node matched the requested selector"
+}
+
+if ($elementIndex -ge $sortedCandidates.Count) {
+    throw ("no accessibility node matched the requested selector at elementIndex {0}" -f $elementIndex)
+}
+
+$selectedCandidate = $sortedCandidates[$elementIndex]
+$match = $selectedCandidate.element
+
+$patternUsed = $null
+switch ($action) {
+    "focus" {
+        $match.SetFocus()
+        $patternUsed = "SetFocus"
+    }
+    "invoke" {
+        $pattern = $null
+        if ($match.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+            ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
+            $patternUsed = "InvokePattern"
+        } elseif ($match.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+            ([System.Windows.Automation.SelectionItemPattern]$pattern).Select()
+            $patternUsed = "SelectionItemPattern"
+        } elseif ($match.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)) {
+            ([System.Windows.Automation.TogglePattern]$pattern).Toggle()
+            $patternUsed = "TogglePattern"
+        } else {
+            throw "desktop accessibility invoke did not find an invoke-capable pattern"
+        }
+    }
+    "set_value" {
+        if ([string]::IsNullOrWhiteSpace($actionValue)) {
+            throw "desktop accessibility set_value requires a non-empty value"
+        }
+        $pattern = $null
+        if ($match.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+            ([System.Windows.Automation.ValuePattern]$pattern).SetValue($actionValue)
+            $patternUsed = "ValuePattern"
+        } else {
+            throw "desktop accessibility set_value requires a node with ValuePattern"
+        }
+    }
+    default {
+        throw "unsupported accessibility action"
+    }
+}
+
+[pscustomobject]@{
+    action = $action
+    patternUsed = $patternUsed
+    node = (Convert-DawnAutomationSummary $match $selectedCandidate.depth $selectedCandidate.matchScore)
+    selectedIndex = $elementIndex
+    candidateCount = $sortedCandidates.Count
+    visitedNodes = $visitedNodes
+} | ConvertTo-Json -Depth 8 -Compress
+"#;
+    let stdout = run_windows_powershell_capture(
+        script,
+        &[
+            ("DAWN_ACCESSIBILITY_HANDLE", window.handle.clone()),
+            ("DAWN_ACCESSIBILITY_ACTION", action.to_string()),
+            (
+                "DAWN_ACCESSIBILITY_NAME",
+                node_selector.name.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_AUTOMATION_ID",
+                node_selector.automation_id.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_CLASS_NAME",
+                node_selector.class_name.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_CONTROL_TYPE",
+                node_selector.control_type.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_MATCH_MODE",
+                node_selector.match_mode.clone(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_PREFER_VISIBLE",
+                node_selector.prefer_visible.to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_PREFER_ENABLED",
+                node_selector.prefer_enabled.to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_VALUE",
+                value.unwrap_or_default().to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_SEARCH_DEPTH",
+                search_depth.max(1).to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_NODE_LIMIT",
+                node_limit.max(1).to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_ELEMENT_INDEX",
+                element_index.to_string(),
+            ),
+        ],
+    )
+    .await?;
+    let result = serde_json::from_str(&stdout)
+        .context("failed to parse desktop accessibility action JSON")?;
+    Ok((window, result))
+}
+
+async fn query_desktop_accessibility_nodes(
+    title: Option<&str>,
+    handle: Option<&str>,
+    process_name: Option<&str>,
+    node_selector: &DesktopAccessibilityNodeSelector,
+    search_depth: usize,
+    node_limit: usize,
+    limit: usize,
+) -> anyhow::Result<(DesktopWindowEntry, DesktopAccessibilityQueryResult)> {
+    let window = if let Some(handle) = handle {
+        focus_desktop_window(title, Some(handle), process_name).await?
+    } else {
+        wait_for_desktop_window(title, handle, process_name, 5_000, 200).await?
+    };
+    let script = r#"
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$handleText = $env:DAWN_ACCESSIBILITY_HANDLE
+if ([string]::IsNullOrWhiteSpace($handleText)) {
+    throw "desktop accessibility query requires a window handle"
+}
+$handleNumber = [Convert]::ToInt64($handleText.Replace("0x", ""), 16)
+$nativeHandle = [IntPtr]::new($handleNumber)
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($nativeHandle)
+if ($null -eq $root) {
+    throw "failed to resolve automation root for the requested desktop window"
+}
+$selectorName = ([string]$env:DAWN_ACCESSIBILITY_NAME).Trim().ToLowerInvariant()
+$selectorAutomationId = ([string]$env:DAWN_ACCESSIBILITY_AUTOMATION_ID).Trim().ToLowerInvariant()
+$selectorClassName = ([string]$env:DAWN_ACCESSIBILITY_CLASS_NAME).Trim().ToLowerInvariant()
+$selectorControlType = ([string]$env:DAWN_ACCESSIBILITY_CONTROL_TYPE).Trim().ToLowerInvariant()
+if ($selectorControlType.StartsWith("controltype.")) {
+    $selectorControlType = $selectorControlType.Substring(12)
+}
+$matchMode = ([string]$env:DAWN_ACCESSIBILITY_MATCH_MODE).Trim().ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($matchMode)) {
+    $matchMode = "contains"
+}
+$preferVisible = ([string]$env:DAWN_ACCESSIBILITY_PREFER_VISIBLE).Trim().ToLowerInvariant() -ne "false"
+$preferEnabled = ([string]$env:DAWN_ACCESSIBILITY_PREFER_ENABLED).Trim().ToLowerInvariant() -ne "false"
+$maxDepth = [int]$env:DAWN_ACCESSIBILITY_SEARCH_DEPTH
+$nodeLimit = [int]$env:DAWN_ACCESSIBILITY_NODE_LIMIT
+$matchLimit = [int]$env:DAWN_ACCESSIBILITY_MATCH_LIMIT
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+
+function Test-DawnTextMatch([string]$actual, [string]$needle) {
+    if ([string]::IsNullOrWhiteSpace($needle)) { return $true }
+    if ([string]::IsNullOrWhiteSpace($actual)) { return $false }
+    $normalizedActual = $actual.Trim().ToLowerInvariant()
+    switch ($matchMode) {
+        "exact" { return $normalizedActual -eq $needle }
+        "starts_with" { return $normalizedActual.StartsWith($needle) }
+        default { return $normalizedActual.Contains($needle) }
+    }
+}
+
+function Convert-DawnAutomationSummary($element, [int]$depth, [int]$matchScore) {
+    $current = $element.Current
+    $bounds = $current.BoundingRectangle
+    $width = [int][Math]::Round($bounds.Width)
+    $height = [int][Math]::Round($bounds.Height)
+    $x = [int][Math]::Round($bounds.Left)
+    $y = [int][Math]::Round($bounds.Top)
+    $centerX = if ($width -gt 0) { $x + [int][Math]::Floor($width / 2) } else { $null }
+    $centerY = if ($height -gt 0) { $y + [int][Math]::Floor($height / 2) } else { $null }
+    return [pscustomobject]@{
+        name = if ([string]::IsNullOrWhiteSpace($current.Name)) { $null } else { $current.Name }
+        automationId = if ([string]::IsNullOrWhiteSpace($current.AutomationId)) { $null } else { $current.AutomationId }
+        className = if ([string]::IsNullOrWhiteSpace($current.ClassName)) { $null } else { $current.ClassName }
+        controlType = if ([string]::IsNullOrWhiteSpace($current.ControlType.ProgrammaticName)) { $null } else { $current.ControlType.ProgrammaticName }
+        nativeWindowHandle = if ($current.NativeWindowHandle -eq 0) { $null } else { [int64]$current.NativeWindowHandle }
+        isEnabled = $current.IsEnabled
+        isOffscreen = $current.IsOffscreen
+        boundingRect = if ($width -gt 0 -and $height -gt 0) {
+            [pscustomobject]@{
+                x = $x
+                y = $y
+                width = $width
+                height = $height
+            }
+        } else {
+            $null
+        }
+        centerX = $centerX
+        centerY = $centerY
+        matchScore = $matchScore
+        depth = $depth
+    }
+}
+
+function Test-DawnAutomationMatch($element) {
+    if ($null -eq $element) { return $false }
+    $current = $element.Current
+    if (-not [string]::IsNullOrWhiteSpace($selectorName)) {
+        if (-not (Test-DawnTextMatch ([string]$current.Name) $selectorName)) { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorAutomationId)) {
+        $currentAutomationId = ([string]$current.AutomationId).Trim().ToLowerInvariant()
+        if ($currentAutomationId -ne $selectorAutomationId) { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorClassName)) {
+        if (-not (Test-DawnTextMatch ([string]$current.ClassName) $selectorClassName)) { return $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorControlType)) {
+        $controlType = ([string]$current.ControlType.ProgrammaticName).Trim().ToLowerInvariant()
+        if ($controlType.StartsWith("controltype.")) {
+            $controlType = $controlType.Substring(12)
+        }
+        if ($controlType -ne $selectorControlType) { return $false }
+    }
+    return $true
+}
+
+function Get-DawnMatchScore($element, [int]$depth) {
+    $current = $element.Current
+    $score = 0
+    if (-not [string]::IsNullOrWhiteSpace($selectorAutomationId)) {
+        $score += 120
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorName)) {
+        $normalizedName = ([string]$current.Name).Trim().ToLowerInvariant()
+        switch ($matchMode) {
+            "exact" { $score += 90 }
+            "starts_with" { $score += 75 }
+            default {
+                if ($normalizedName -eq $selectorName) {
+                    $score += 80
+                } elseif ($normalizedName.StartsWith($selectorName)) {
+                    $score += 70
+                } else {
+                    $score += 55
+                }
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorClassName)) {
+        $score += 35
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selectorControlType)) {
+        $score += 35
+    }
+    if ($preferVisible) {
+        if ($current.IsOffscreen) { $score -= 40 } else { $score += 18 }
+    }
+    if ($preferEnabled) {
+        if ($current.IsEnabled) { $score += 18 } else { $score -= 30 }
+    }
+    $bounds = $current.BoundingRectangle
+    if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+        $score += 10
+    } else {
+        $score -= 10
+    }
+    $score += [Math]::Max(0, 12 - $depth)
+    return [int]$score
+}
+
+$stack = New-Object System.Collections.Generic.Stack[object]
+$stack.Push([pscustomobject]@{ element = $root; depth = 0 })
+$visitedNodes = 0
+$matches = New-Object System.Collections.Generic.List[object]
+while ($stack.Count -gt 0 -and $visitedNodes -lt $nodeLimit) {
+    $frame = $stack.Pop()
+    $element = $frame.element
+    $depth = [int]$frame.depth
+    $visitedNodes += 1
+    if (Test-DawnAutomationMatch $element) {
+        $matchScore = Get-DawnMatchScore $element $depth
+        $matches.Add((Convert-DawnAutomationSummary $element $depth $matchScore))
+    }
+    if ($depth -ge $maxDepth) {
+        continue
+    }
+    $children = New-Object System.Collections.Generic.List[object]
+    $child = $walker.GetFirstChild($element)
+    while ($child -ne $null) {
+        $children.Add($child)
+        $child = $walker.GetNextSibling($child)
+    }
+    for ($index = $children.Count - 1; $index -ge 0; $index -= 1) {
+        $stack.Push([pscustomobject]@{ element = $children[$index]; depth = ($depth + 1) })
+    }
+}
+
+$sortedMatches = @(
+    $matches | Sort-Object -Property `
+        @{ Expression = { $_.matchScore }; Descending = $true }, `
+        @{ Expression = { if ($_.isOffscreen -eq $true) { 1 } else { 0 } }; Descending = $false }, `
+        @{ Expression = { if ($_.isEnabled -eq $false) { 1 } else { 0 } }; Descending = $false }, `
+        @{ Expression = { $_.depth }; Descending = $false }
+) | Select-Object -First $matchLimit
+
+[pscustomobject]@{
+    visitedNodes = $visitedNodes
+    matches = @($sortedMatches)
+} | ConvertTo-Json -Depth 8 -Compress
+"#;
+    let stdout = run_windows_powershell_capture(
+        script,
+        &[
+            ("DAWN_ACCESSIBILITY_HANDLE", window.handle.clone()),
+            (
+                "DAWN_ACCESSIBILITY_NAME",
+                node_selector.name.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_AUTOMATION_ID",
+                node_selector.automation_id.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_CLASS_NAME",
+                node_selector.class_name.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_CONTROL_TYPE",
+                node_selector.control_type.clone().unwrap_or_default(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_MATCH_MODE",
+                node_selector.match_mode.clone(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_PREFER_VISIBLE",
+                node_selector.prefer_visible.to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_PREFER_ENABLED",
+                node_selector.prefer_enabled.to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_SEARCH_DEPTH",
+                search_depth.max(1).to_string(),
+            ),
+            (
+                "DAWN_ACCESSIBILITY_NODE_LIMIT",
+                node_limit.max(1).to_string(),
+            ),
+            ("DAWN_ACCESSIBILITY_MATCH_LIMIT", limit.max(1).to_string()),
+        ],
+    )
+    .await?;
+    let result = serde_json::from_str(&stdout)
+        .context("failed to parse desktop accessibility query JSON")?;
+    Ok((window, result))
+}
+
+async fn wait_for_desktop_accessibility_node(
+    title: Option<&str>,
+    handle: Option<&str>,
+    process_name: Option<&str>,
+    node_selector: &DesktopAccessibilityNodeSelector,
+    search_depth: usize,
+    node_limit: usize,
+    timeout_ms: u64,
+    poll_ms: u64,
+) -> anyhow::Result<(DesktopWindowEntry, DesktopAccessibilityQueryResult)> {
+    let started = SystemTime::now();
+    loop {
+        let (window, query) = query_desktop_accessibility_nodes(
+            title,
+            handle,
+            process_name,
+            node_selector,
+            search_depth,
+            node_limit,
+            1,
+        )
+        .await?;
+        if !query.matches.is_empty() {
+            return Ok((window, query));
+        }
+        if started.elapsed().unwrap_or_default() >= Duration::from_millis(timeout_ms.max(1)) {
+            anyhow::bail!(
+                "timed out after {} ms waiting for a desktop accessibility node matching the requested selector",
+                timeout_ms
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(poll_ms.max(50))).await;
+    }
+}
+
 fn matches_desktop_window(
     window: &DesktopWindowEntry,
     title: Option<&str>,
@@ -4593,6 +9751,145 @@ fn desktop_window_selector_from_payload(payload: &Value) -> DesktopWindowSelecto
             .map(normalize_desktop_process_name)
             .filter(|value| !value.is_empty()),
     }
+}
+
+fn desktop_accessibility_node_selector_from_payload(
+    payload: &Value,
+) -> DesktopAccessibilityNodeSelector {
+    let mut selector = DesktopAccessibilityNodeSelector::default();
+    selector.name = payload
+        .get("name")
+        .or_else(|| payload.get("label"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    selector.automation_id = payload
+        .get("automationId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    selector.class_name = payload
+        .get("className")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    selector.control_type = payload
+        .get("controlType")
+        .and_then(Value::as_str)
+        .map(normalize_desktop_accessibility_control_type)
+        .filter(|value| !value.is_empty());
+    if let Some(match_mode) = payload
+        .get("matchMode")
+        .or_else(|| payload.get("nameMatchMode"))
+        .and_then(Value::as_str)
+    {
+        selector.match_mode = normalize_desktop_accessibility_match_mode(match_mode);
+    }
+    if let Some(prefer_visible) = payload.get("preferVisible").and_then(Value::as_bool) {
+        selector.prefer_visible = prefer_visible;
+    }
+    if let Some(prefer_enabled) = payload.get("preferEnabled").and_then(Value::as_bool) {
+        selector.prefer_enabled = prefer_enabled;
+    }
+    selector
+}
+
+fn merge_desktop_accessibility_workflow_step_payload(
+    workflow_payload: &Value,
+    step: &Value,
+) -> anyhow::Result<Value> {
+    let Some(step_object) = step.as_object() else {
+        anyhow::bail!("desktop_accessibility_workflow steps must be JSON objects");
+    };
+    let mut merged = step_object.clone();
+    for key in [
+        "title",
+        "handle",
+        "processName",
+        "app",
+        "target",
+        "args",
+        "name",
+        "automationId",
+        "className",
+        "controlType",
+        "matchMode",
+        "nameMatchMode",
+        "preferVisible",
+        "preferEnabled",
+        "depth",
+        "nodeLimit",
+        "timeoutMs",
+        "pollMs",
+        "delayMs",
+        "clearExisting",
+        "submit",
+        "fallbackToType",
+        "backend",
+        "language",
+        "lang",
+        "x",
+        "y",
+        "width",
+        "height",
+        "keepImage",
+        "button",
+        "doubleClick",
+        "elementIndex",
+        "limit",
+        "value",
+        "text",
+    ] {
+        if !merged.contains_key(key) {
+            if let Some(value) = workflow_payload.get(key) {
+                merged.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Object(merged))
+}
+
+fn desktop_accessibility_workflow_step_kind(payload: &Value) -> anyhow::Result<String> {
+    let kind = payload
+        .get("kind")
+        .or_else(|| payload.get("action"))
+        .or_else(|| payload.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "desktop_accessibility_workflow steps require payload.kind, payload.action, or payload.type"
+            )
+        })?;
+    Ok(kind.to_ascii_lowercase())
+}
+
+fn normalize_desktop_accessibility_control_type(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("ControlType.")
+        .trim_start_matches("controltype.")
+        .to_ascii_lowercase()
+}
+
+fn normalize_desktop_accessibility_match_mode(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "exact" => "exact".to_string(),
+        "starts_with" | "startswith" | "starts-with" | "prefix" => "starts_with".to_string(),
+        _ => "contains".to_string(),
+    }
+}
+
+fn desktop_accessibility_selector_has_predicate(
+    selector: &DesktopAccessibilityNodeSelector,
+) -> bool {
+    selector.name.is_some()
+        || selector.automation_id.is_some()
+        || selector.class_name.is_some()
+        || selector.control_type.is_some()
 }
 
 async fn move_desktop_mouse(x: i32, y: i32) -> anyhow::Result<&'static str> {
@@ -4781,6 +10078,87 @@ async fn run_windows_powershell_capture(
         anyhow::bail!("desktop automation powershell command failed: {detail}");
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn resolve_desktop_ocr_backend(requested: Option<&str>) -> anyhow::Result<&'static str> {
+    let backend = requested
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "auto".to_string());
+    match backend.as_str() {
+        "" | "auto" | "tesseract" => {
+            if desktop_ocr_tesseract_available().await {
+                Ok("tesseract")
+            } else if backend == "auto" {
+                anyhow::bail!(
+                    "desktop_ocr could not find a local OCR backend. Install Tesseract and make `tesseract` available on PATH, or pass payload.imagePath to an external OCR pipeline."
+                )
+            } else {
+                anyhow::bail!(
+                    "desktop_ocr backend `tesseract` is not available on PATH. Install Tesseract or choose a different backend."
+                )
+            }
+        }
+        "windows_ocr" | "winrt" => anyhow::bail!(
+            "desktop_ocr backend `{backend}` is not currently enabled for this unpackaged node runtime; use the Tesseract backend instead"
+        ),
+        other => {
+            anyhow::bail!("unsupported desktop OCR backend `{other}`. Supported: auto, tesseract")
+        }
+    }
+}
+
+async fn desktop_ocr_tesseract_available() -> bool {
+    Command::new("tesseract")
+        .arg("--version")
+        .output()
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+async fn run_tesseract_ocr(
+    image_path: &PathBuf,
+    language: Option<&str>,
+) -> anyhow::Result<DesktopOcrResult> {
+    let mut command = Command::new("tesseract");
+    command
+        .arg(image_path)
+        .arg("stdout")
+        .arg("--dpi")
+        .arg("150");
+    if let Some(language) = language {
+        command.arg("-l").arg(language);
+    }
+    let output = command.output().await.with_context(|| {
+        format!(
+            "failed to launch Tesseract OCR for image {}",
+            image_path.display()
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("status {:?}", output.status.code())
+        };
+        anyhow::bail!("desktop_ocr tesseract command failed: {detail}");
+    }
+    let text = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    Ok(DesktopOcrResult {
+        backend: "tesseract".to_string(),
+        text: text.trim().to_string(),
+        lines,
+    })
 }
 
 fn normalize_desktop_mouse_button(raw: &str) -> anyhow::Result<&'static str> {
@@ -5039,14 +10417,39 @@ fn default_capabilities() -> Vec<String> {
         "echo".to_string(),
         "list_capabilities".to_string(),
         "agent_ping".to_string(),
+        "browser_start".to_string(),
+        "browser_status".to_string(),
+        "browser_stop".to_string(),
         "browser_navigate".to_string(),
+        "browser_new_tab".to_string(),
+        "browser_new_window".to_string(),
         "browser_extract".to_string(),
         "browser_click".to_string(),
         "browser_back".to_string(),
+        "browser_forward".to_string(),
+        "browser_reload".to_string(),
         "browser_focus".to_string(),
         "browser_close".to_string(),
         "browser_tabs".to_string(),
         "browser_snapshot".to_string(),
+        "browser_screenshot".to_string(),
+        "browser_pdf".to_string(),
+        "browser_console_messages".to_string(),
+        "browser_network_requests".to_string(),
+        "browser_trace".to_string(),
+        "browser_trace_export".to_string(),
+        "browser_errors".to_string(),
+        "browser_cookies".to_string(),
+        "browser_storage".to_string(),
+        "browser_storage_set".to_string(),
+        "browser_set_headers".to_string(),
+        "browser_set_offline".to_string(),
+        "browser_set_geolocation".to_string(),
+        "browser_emulate_device".to_string(),
+        "browser_evaluate".to_string(),
+        "browser_wait_for".to_string(),
+        "browser_handle_dialog".to_string(),
+        "browser_press_key".to_string(),
         "browser_type".to_string(),
         "browser_upload".to_string(),
         "browser_download".to_string(),
@@ -5066,7 +10469,16 @@ fn default_capabilities() -> Vec<String> {
         "desktop_mouse_move".to_string(),
         "desktop_mouse_click".to_string(),
         "desktop_screenshot".to_string(),
+        "desktop_ocr".to_string(),
+        "desktop_accessibility_query".to_string(),
+        "desktop_accessibility_click".to_string(),
+        "desktop_accessibility_wait_for".to_string(),
+        "desktop_accessibility_fill".to_string(),
+        "desktop_accessibility_workflow".to_string(),
         "desktop_accessibility_snapshot".to_string(),
+        "desktop_accessibility_focus".to_string(),
+        "desktop_accessibility_invoke".to_string(),
+        "desktop_accessibility_set_value".to_string(),
         "system_info".to_string(),
         "list_directory".to_string(),
         "read_file_preview".to_string(),
@@ -5804,12 +11216,14 @@ mod tests {
             last_action: "navigate".to_string(),
             loaded_at_unix_ms: 42,
             history: Vec::new(),
+            forward_history: Vec::new(),
             pending_form_selector: Some("@form-index:0".to_string()),
             pending_form_fields: BTreeMap::from([(String::from("q"), String::from("openclaw"))]),
             pending_form_uploads: BTreeMap::from([(
                 String::from("attachment"),
                 String::from("C:/tmp/demo.txt"),
             )]),
+            managed: None,
         };
         let snapshot = build_browser_snapshot(
             "browser-default",
@@ -5852,9 +11266,11 @@ mod tests {
                 last_action: "navigate".to_string(),
                 loaded_at_unix_ms: 10,
                 history: Vec::new(),
+                forward_history: Vec::new(),
                 pending_form_selector: None,
                 pending_form_fields: BTreeMap::new(),
                 pending_form_uploads: BTreeMap::new(),
+                managed: None,
             },
         );
         browser_sessions.insert(
@@ -5869,9 +11285,11 @@ mod tests {
                 last_action: "navigate".to_string(),
                 loaded_at_unix_ms: 20,
                 history: Vec::new(),
+                forward_history: Vec::new(),
                 pending_form_selector: None,
                 pending_form_fields: BTreeMap::new(),
                 pending_form_uploads: BTreeMap::new(),
+                managed: None,
             },
         );
         let next = next_active_browser_session_id(
@@ -5880,6 +11298,181 @@ mod tests {
             "browser-secondary",
         );
         assert_eq!(next.as_deref(), Some("browser-default"));
+    }
+
+    #[test]
+    fn derives_browser_back_and_forward_transitions() {
+        let session = BrowserSession {
+            client: new_browser_client().unwrap(),
+            current_url: "https://example.com/c".to_string(),
+            page_html: "<html></html>".to_string(),
+            title: Some("C".to_string()),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            last_action: "navigate".to_string(),
+            loaded_at_unix_ms: 30,
+            history: vec![
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ],
+            forward_history: vec!["https://example.com/d".to_string()],
+            pending_form_selector: None,
+            pending_form_fields: BTreeMap::new(),
+            pending_form_uploads: BTreeMap::new(),
+            managed: None,
+        };
+        let (back_url, back_history, back_forward) = browser_back_transition(&session).unwrap();
+        assert_eq!(back_url, "https://example.com/b");
+        assert_eq!(back_history, vec!["https://example.com/a".to_string()]);
+        assert_eq!(
+            back_forward,
+            vec![
+                "https://example.com/d".to_string(),
+                "https://example.com/c".to_string()
+            ]
+        );
+
+        let (forward_url, forward_history, forward_stack) =
+            browser_forward_transition(&session).unwrap();
+        assert_eq!(forward_url, "https://example.com/d");
+        assert_eq!(
+            forward_history,
+            vec![
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+                "https://example.com/c".to_string()
+            ]
+        );
+        assert!(forward_stack.is_empty());
+    }
+
+    #[test]
+    fn allocates_unique_browser_tab_session_ids() {
+        let sessions = HashMap::from([
+            (
+                "browser-default".to_string(),
+                BrowserSession {
+                    client: new_browser_client().unwrap(),
+                    current_url: "https://example.com".to_string(),
+                    page_html: "<html></html>".to_string(),
+                    title: None,
+                    status_code: 200,
+                    content_type: Some("text/html".to_string()),
+                    last_action: "navigate".to_string(),
+                    loaded_at_unix_ms: 1,
+                    history: Vec::new(),
+                    forward_history: Vec::new(),
+                    pending_form_selector: None,
+                    pending_form_fields: BTreeMap::new(),
+                    pending_form_uploads: BTreeMap::new(),
+                    managed: None,
+                },
+            ),
+            (
+                "browser-default-tab-1".to_string(),
+                BrowserSession {
+                    client: new_browser_client().unwrap(),
+                    current_url: "https://example.com/one".to_string(),
+                    page_html: "<html></html>".to_string(),
+                    title: None,
+                    status_code: 200,
+                    content_type: Some("text/html".to_string()),
+                    last_action: "navigate".to_string(),
+                    loaded_at_unix_ms: 2,
+                    history: Vec::new(),
+                    forward_history: Vec::new(),
+                    pending_form_selector: None,
+                    pending_form_fields: BTreeMap::new(),
+                    pending_form_uploads: BTreeMap::new(),
+                    managed: None,
+                },
+            ),
+        ]);
+        let next = resolve_new_browser_session_id(&sessions, "browser-default", "tab", &json!({}))
+            .unwrap();
+        assert_eq!(next, "browser-default-tab-2");
+    }
+
+    #[test]
+    fn allocates_unique_browser_window_session_ids() {
+        let sessions = HashMap::from([(
+            "browser-default".to_string(),
+            BrowserSession {
+                client: new_browser_client().unwrap(),
+                current_url: "https://example.com".to_string(),
+                page_html: "<html></html>".to_string(),
+                title: None,
+                status_code: 200,
+                content_type: Some("text/html".to_string()),
+                last_action: "navigate".to_string(),
+                loaded_at_unix_ms: 1,
+                history: Vec::new(),
+                forward_history: Vec::new(),
+                pending_form_selector: None,
+                pending_form_fields: BTreeMap::new(),
+                pending_form_uploads: BTreeMap::new(),
+                managed: None,
+            },
+        )]);
+        let next =
+            resolve_new_browser_session_id(&sessions, "browser-default", "window", &json!({}))
+                .unwrap();
+        assert_eq!(next, "browser-default-window-1");
+    }
+
+    #[test]
+    fn browser_start_session_id_prefers_default_when_available() {
+        let sessions = HashMap::new();
+        let next = resolve_browser_start_session_id(&sessions, &json!({})).unwrap();
+        assert_eq!(next, "browser-default");
+    }
+
+    #[test]
+    fn browser_start_session_id_allocates_managed_suffix_when_default_is_taken() {
+        let sessions = HashMap::from([(
+            "browser-default".to_string(),
+            BrowserSession {
+                client: new_browser_client().unwrap(),
+                current_url: "https://example.com".to_string(),
+                page_html: "<html></html>".to_string(),
+                title: None,
+                status_code: 200,
+                content_type: Some("text/html".to_string()),
+                last_action: "navigate".to_string(),
+                loaded_at_unix_ms: 1,
+                history: Vec::new(),
+                forward_history: Vec::new(),
+                pending_form_selector: None,
+                pending_form_fields: BTreeMap::new(),
+                pending_form_uploads: BTreeMap::new(),
+                managed: None,
+            },
+        )]);
+        let next = resolve_browser_start_session_id(&sessions, &json!({})).unwrap();
+        assert_eq!(next, "browser-managed-1");
+    }
+
+    #[test]
+    fn detects_shared_managed_browser_processes() {
+        let left = ManagedBrowserSession {
+            backend: "edge".to_string(),
+            executable: "msedge.exe".to_string(),
+            debug_port: 9222,
+            browser_pid: Some(111),
+            target_id: "page-a".to_string(),
+            websocket_url: "ws://127.0.0.1/devtools/page/a".to_string(),
+            user_data_dir: PathBuf::from("C:/tmp/dawn-browser"),
+        };
+        let right = ManagedBrowserSession {
+            backend: "edge".to_string(),
+            executable: "msedge.exe".to_string(),
+            debug_port: 9222,
+            browser_pid: Some(111),
+            target_id: "page-b".to_string(),
+            websocket_url: "ws://127.0.0.1/devtools/page/b".to_string(),
+            user_data_dir: PathBuf::from("C:/tmp/dawn-browser"),
+        };
+        assert!(managed_browser_sessions_share_process(&left, &right));
     }
 
     #[test]
@@ -5938,16 +11531,180 @@ mod tests {
     }
 
     #[test]
+    fn detects_managed_browser_payload_flags() {
+        assert!(payload_requests_managed_browser(
+            &json!({ "managed": true })
+        ));
+        assert!(payload_requests_managed_browser(
+            &json!({ "runtime": "managed" })
+        ));
+        assert!(!payload_requests_managed_browser(
+            &json!({ "managed": false })
+        ));
+    }
+
+    #[test]
+    fn resolves_browser_screenshot_path_with_png_extension() {
+        let path =
+            resolve_browser_screenshot_path(Some("artifacts/browser/demo"), "browser-default");
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+    }
+
+    #[test]
+    fn resolves_browser_pdf_path_with_pdf_extension() {
+        let path = resolve_browser_pdf_path(Some("artifacts/browser/demo"), "browser-default");
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("pdf")
+        );
+    }
+
+    #[test]
+    fn resolves_browser_trace_path_with_json_extension() {
+        let path =
+            resolve_browser_trace_path(Some("artifacts/browser/demo-trace"), "browser-default");
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
+    }
+
+    #[test]
+    fn normalizes_browser_storage_area_aliases() {
+        assert_eq!(
+            normalize_browser_storage_area("local"),
+            Some("localStorage")
+        );
+        assert_eq!(
+            normalize_browser_storage_area("local_storage"),
+            Some("localStorage")
+        );
+        assert_eq!(
+            normalize_browser_storage_area("session"),
+            Some("sessionStorage")
+        );
+        assert_eq!(
+            normalize_browser_storage_area("sessionStorage"),
+            Some("sessionStorage")
+        );
+        assert_eq!(normalize_browser_storage_area("indexedDb"), None);
+    }
+
+    #[test]
+    fn resolves_browser_device_emulation_presets() {
+        let mobile = resolve_browser_device_emulation_request(&json!({
+            "preset": "iphone-13",
+            "reload": true
+        }))
+        .unwrap();
+        assert_eq!(mobile.width, 390);
+        assert!(mobile.mobile);
+        assert!(mobile.touch);
+        assert!(mobile.reload);
+
+        let desktop = resolve_browser_device_emulation_request(&json!({
+            "preset": "desktop",
+            "width": 1600
+        }))
+        .unwrap();
+        assert_eq!(desktop.width, 1600);
+        assert!(!desktop.mobile);
+
+        let error = resolve_browser_device_emulation_request(&json!({
+            "preset": "gameboy"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unsupported browser_emulate_device preset"));
+    }
+
+    #[test]
     fn default_capabilities_include_browser_session_commands() {
         let capabilities = default_capabilities();
+        assert!(capabilities.iter().any(|value| value == "browser_start"));
+        assert!(capabilities.iter().any(|value| value == "browser_status"));
+        assert!(capabilities.iter().any(|value| value == "browser_stop"));
         assert!(capabilities.iter().any(|value| value == "browser_navigate"));
+        assert!(capabilities.iter().any(|value| value == "browser_new_tab"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_new_window")
+        );
         assert!(capabilities.iter().any(|value| value == "browser_extract"));
         assert!(capabilities.iter().any(|value| value == "browser_click"));
         assert!(capabilities.iter().any(|value| value == "browser_back"));
+        assert!(capabilities.iter().any(|value| value == "browser_forward"));
+        assert!(capabilities.iter().any(|value| value == "browser_reload"));
         assert!(capabilities.iter().any(|value| value == "browser_focus"));
         assert!(capabilities.iter().any(|value| value == "browser_close"));
         assert!(capabilities.iter().any(|value| value == "browser_tabs"));
         assert!(capabilities.iter().any(|value| value == "browser_snapshot"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_screenshot")
+        );
+        assert!(capabilities.iter().any(|value| value == "browser_pdf"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_console_messages")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_network_requests")
+        );
+        assert!(capabilities.iter().any(|value| value == "browser_trace"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_trace_export")
+        );
+        assert!(capabilities.iter().any(|value| value == "browser_errors"));
+        assert!(capabilities.iter().any(|value| value == "browser_cookies"));
+        assert!(capabilities.iter().any(|value| value == "browser_storage"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_storage_set")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_set_headers")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_set_offline")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_set_geolocation")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_emulate_device")
+        );
+        assert!(capabilities.iter().any(|value| value == "browser_evaluate"));
+        assert!(capabilities.iter().any(|value| value == "browser_wait_for"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_handle_dialog")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_press_key")
+        );
         assert!(capabilities.iter().any(|value| value == "browser_type"));
         assert!(capabilities.iter().any(|value| value == "browser_upload"));
         assert!(capabilities.iter().any(|value| value == "browser_download"));
@@ -6017,10 +11774,51 @@ mod tests {
                 .iter()
                 .any(|value| value == "desktop_screenshot")
         );
+        assert!(capabilities.iter().any(|value| value == "desktop_ocr"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_query")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_click")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_wait_for")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_fill")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_workflow")
+        );
         assert!(
             capabilities
                 .iter()
                 .any(|value| value == "desktop_accessibility_snapshot")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_focus")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_invoke")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_accessibility_set_value")
         );
     }
 
@@ -6028,6 +11826,91 @@ mod tests {
     fn encodes_windows_send_keys_text_reserved_characters() {
         let encoded = encode_windows_send_keys_text("+^%~()[]{}\n\t");
         assert_eq!(encoded, "{+}{^}{%}{~}{(}{)}{[}{]}{{}{}}{ENTER}{TAB}");
+    }
+
+    #[test]
+    fn normalizes_desktop_accessibility_control_type_aliases() {
+        assert_eq!(
+            normalize_desktop_accessibility_control_type("ControlType.Edit"),
+            "edit"
+        );
+        assert_eq!(
+            normalize_desktop_accessibility_control_type("button"),
+            "button"
+        );
+    }
+
+    #[test]
+    fn normalizes_desktop_accessibility_match_mode_aliases() {
+        assert_eq!(
+            normalize_desktop_accessibility_match_mode("starts-with"),
+            "starts_with"
+        );
+        assert_eq!(normalize_desktop_accessibility_match_mode("exact"), "exact");
+        assert_eq!(
+            normalize_desktop_accessibility_match_mode("whatever"),
+            "contains"
+        );
+    }
+
+    #[test]
+    fn parses_desktop_accessibility_selector_ranking_preferences() {
+        let selector = desktop_accessibility_node_selector_from_payload(&json!({
+            "name": "Save",
+            "className": "Button",
+            "controlType": "ControlType.Button",
+            "matchMode": "starts-with",
+            "preferVisible": false,
+            "preferEnabled": true
+        }));
+        assert_eq!(selector.name.as_deref(), Some("Save"));
+        assert_eq!(selector.class_name.as_deref(), Some("Button"));
+        assert_eq!(selector.control_type.as_deref(), Some("button"));
+        assert_eq!(selector.match_mode, "starts_with");
+        assert!(!selector.prefer_visible);
+        assert!(selector.prefer_enabled);
+        assert!(desktop_accessibility_selector_has_predicate(&selector));
+    }
+
+    #[test]
+    fn merges_desktop_accessibility_workflow_step_payload_with_defaults() {
+        let workflow_payload = json!({
+            "processName": "notepad",
+            "depth": 4,
+            "className": "RichEditD2DPT",
+            "matchMode": "exact",
+            "preferVisible": true,
+            "clearExisting": true
+        });
+        let step = json!({
+            "kind": "fill",
+            "controlType": "edit",
+            "value": "hello"
+        });
+        let merged = merge_desktop_accessibility_workflow_step_payload(&workflow_payload, &step)
+            .expect("expected workflow step payload to merge");
+        assert_eq!(
+            merged.get("processName").and_then(Value::as_str),
+            Some("notepad")
+        );
+        assert_eq!(merged.get("depth").and_then(Value::as_u64), Some(4));
+        assert_eq!(
+            merged.get("className").and_then(Value::as_str),
+            Some("RichEditD2DPT")
+        );
+        assert_eq!(
+            merged.get("matchMode").and_then(Value::as_str),
+            Some("exact")
+        );
+        assert_eq!(
+            merged.get("preferVisible").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            merged.get("clearExisting").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(merged.get("kind").and_then(Value::as_str), Some("fill"));
     }
 
     #[test]

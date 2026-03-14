@@ -256,7 +256,7 @@ Control Center:
 
 - `GET /console` serves a live dashboard for inbound chat, tasks, nodes, settlements, and agent cards.
 - the dashboard now includes an `Approval Center` feed for pending node-command and AP2 approvals.
-- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_navigate`, `browser_extract`, `browser_click`, `browser_back`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
+- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
 - the current console visual direction is a liquid-glass operations deck rather than a plain admin table, and it now includes command template chips plus a full command-detail inspector for recent node results.
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
 - the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
@@ -841,14 +841,39 @@ Supported node command types in the sample Rust node:
 - `echo`
 - `list_capabilities`
 - `agent_ping`
+- `browser_start`
+- `browser_status`
+- `browser_stop`
 - `browser_navigate`
+- `browser_new_tab`
+- `browser_new_window`
 - `browser_extract`
 - `browser_click`
 - `browser_back`
+- `browser_forward`
+- `browser_reload`
 - `browser_focus`
 - `browser_close`
 - `browser_tabs`
 - `browser_snapshot`
+- `browser_screenshot`
+- `browser_pdf`
+- `browser_console_messages`
+- `browser_network_requests`
+- `browser_trace`
+- `browser_trace_export`
+- `browser_errors`
+- `browser_cookies`
+- `browser_storage`
+- `browser_storage_set`
+- `browser_set_headers`
+- `browser_set_offline`
+- `browser_set_geolocation`
+- `browser_emulate_device`
+- `browser_evaluate`
+- `browser_wait_for`
+- `browser_handle_dialog`
+- `browser_press_key`
 - `browser_type`
 - `browser_upload`
 - `browser_download`
@@ -868,7 +893,16 @@ Supported node command types in the sample Rust node:
 - `desktop_mouse_move`
 - `desktop_mouse_click`
 - `desktop_screenshot`
+- `desktop_ocr`
+- `desktop_accessibility_query`
+- `desktop_accessibility_click`
+- `desktop_accessibility_wait_for`
+- `desktop_accessibility_fill`
+- `desktop_accessibility_workflow`
 - `desktop_accessibility_snapshot`
+- `desktop_accessibility_focus`
+- `desktop_accessibility_invoke`
+- `desktop_accessibility_set_value`
 - `system_info`
 - `list_directory`
 - `read_file_preview`
@@ -886,22 +920,47 @@ Device-facing node behavior:
 - `read_file_preview` reads a bounded UTF-8 preview of a file without requiring shell access.
 - `stat_path` returns basic filesystem metadata for a file or directory.
 - `process_snapshot` returns a bounded process list using `tasklist` on Windows or `ps` on Unix-like hosts.
-- `browser_navigate` fetches an HTTP(S) page into a named lightweight browser session inside the node and stores the latest DOM snapshot.
+- `browser_start` launches a fresh visible Chromium/Edge process under CDP control, registers its first managed Dawn session, and defaults to `about:blank` when no URL is provided.
+- `browser_status` inspects one managed browser process, including its debug port, tracked session group, and currently exposed DevTools targets.
+- `browser_stop` stops one managed browser process and removes every Dawn browser session that shares the same process.
+- `browser_navigate` fetches an HTTP(S) page into a named lightweight browser session inside the node and stores the latest DOM snapshot; with `managed=true`, it launches a visible Chromium/Edge tab under CDP control and stores a live DOM snapshot from that browser.
+- `browser_new_tab` opens a second managed tab inside an existing controlled Chromium/Edge instance and tracks it as its own Dawn browser session.
+- `browser_new_window` opens a second managed browser window inside an existing controlled Chromium/Edge instance and tracks it as its own Dawn browser session.
 - `browser_extract` runs CSS-selector extraction against the stored DOM snapshot and returns bounded text plus resolved links.
-- `browser_click` resolves a link from the stored DOM snapshot and advances the named browser session to the target page.
+- `browser_click` resolves a link from the stored DOM snapshot and advances the named browser session to the target page, or executes a live DOM click in a managed browser session.
 - `browser_back` replays the previous page in browser session history and preserves the same cookie jar.
-- `browser_focus` marks a named lightweight browser session as the active tab for later commands that omit `sessionId`.
-- `browser_close` removes a lightweight browser session and promotes the next active tab deterministically.
-- `browser_tabs` lists the node's currently tracked lightweight browser sessions, which act as Dawn's current tab abstraction.
-- `browser_snapshot` summarizes headings, links, buttons, forms, and pending staged fields from the stored browser session DOM.
-- `browser_type` resolves an input, textarea, or select element back to its owning form, stages the typed value, and can optionally submit the form in one step.
-- `browser_upload` stages a local file path against a file input and can submit the form as a multipart upload through the same session cookie jar.
-- `browser_download` fetches a URL or linked resource through the same browser session cookie jar and saves it to a local file path on the host.
+- `browser_forward` advances to the next page in the tracked forward history after a previous `browser_back`.
+- `browser_reload` reloads the current page while preserving the same tracked browser session and any managed-browser tab identity.
+- `browser_focus` marks a named browser session as the active tab for later commands that omit `sessionId`; managed tabs are also brought to the foreground when possible.
+- `browser_close` removes a tracked browser session, including managed tabs, and promotes the next active tab deterministically.
+- `browser_tabs` lists the node's currently tracked browser sessions, which act as Dawn's current tab abstraction.
+- `browser_snapshot` summarizes headings, links, buttons, forms, and pending staged fields from the stored browser session DOM; managed sessions refresh from the live browser first.
+- `browser_screenshot` captures a PNG screenshot directly from a managed browser tab.
+- `browser_pdf` renders the current managed browser tab to a local PDF file through the Chromium CDP print pipeline.
+- `browser_console_messages` reads recent console, script error, and unhandled-rejection messages captured inside a managed browser tab.
+- `browser_network_requests` reads recent managed-browser fetch/XHR captures plus navigation/resource timing entries so operators can inspect request URLs, methods, statuses, durations, protocol/size fields, content types, and bounded response previews when the page runtime exposes them.
+- `browser_trace` returns a time-ordered trace that merges managed-browser fetch/XHR lifecycle events with recent console activity, giving operators a lightweight event stream without requiring a separate tracing backend.
+- `browser_trace_export` saves that merged managed-browser trace as a local JSON artifact so operators or agents can attach, diff, or archive one trace run without building a separate export pipeline.
+- `browser_errors` aggregates console errors plus failed or suspicious managed-browser network activity into one result so operators can inspect a tab's current fault surface without manually correlating multiple commands.
+- `browser_cookies` reads the cookies currently visible to the managed tab, including domain/path and security metadata when Chromium exposes them.
+- `browser_storage` inspects the current tab's `localStorage` and `sessionStorage`, returning bounded key/value snapshots plus any storage-access errors surfaced by the page.
+- `browser_storage_set` sets or removes a `localStorage` or `sessionStorage` key inside a managed tab and then refreshes the stored DOM snapshot.
+- `browser_set_headers` applies extra HTTP headers to a managed browser tab through CDP and can optionally reload the page so the new request headers take effect immediately.
+- `browser_set_offline` applies offline or throttled network conditions to a managed browser tab and can optionally reload after the override is installed.
+- `browser_set_geolocation` overrides the reported geolocation for a managed browser tab with latitude/longitude/accuracy values.
+- `browser_emulate_device` applies a desktop or mobile device-emulation profile, including viewport, DPR, touch, and user-agent overrides, to a managed browser tab.
+- `browser_evaluate` runs JavaScript inside a managed browser tab and can refresh the stored DOM snapshot after the script runs.
+- `browser_wait_for` polls a managed browser tab until a selector appears, text appears, or text disappears, then refreshes the stored DOM snapshot.
+- `browser_handle_dialog` accepts or dismisses blocking JavaScript dialogs in a managed browser tab and then refreshes the stored DOM snapshot.
+- `browser_press_key` sends a key or shortcut such as `Enter`, `Tab`, or `Control+L` into a managed browser tab and refreshes the stored DOM snapshot.
+- `browser_type` resolves an input, textarea, or select element back to its owning form, stages the typed value, and can optionally submit the form in one step; managed sessions instead drive the live field via JavaScript and update the stored DOM snapshot afterward.
+- `browser_upload` stages a local file path against a file input and can submit the form as a multipart upload through the same session cookie jar; managed sessions instead drive a live file input through CDP and can optionally submit the surrounding form.
+- `browser_download` fetches a URL or linked resource through the same browser session cookie jar and saves it to a local file path on the host; managed sessions resolve the target from the live tab and replay the tab's applicable cookies for the download request.
 - `browser_form_fill` stages named field values against a selected `<form>` inside the browser session so operators or agents can prepare multi-step submits.
 - `browser_form_submit` submits a stored or inline field set through the same browser session cookie jar, with GET/POST derived from the DOM form metadata.
 - `browser_open` normalizes an HTTP(S) target and opens it in the host system's default browser.
 - `browser_search` builds a search URL for `google`, `bing`, `duckduckgo`, or `baidu` and opens it in the default browser.
-- the current browser-session MVP is still HTTP + DOM oriented and does not yet execute page JavaScript or drive a persistent visible browser tab, but it now preserves cookies, tracks multiple named sessions as lightweight tabs, supports active-tab focus/close semantics, and supports bounded field-typing, multipart form upload, form interaction, and cookie-aware downloads on top of the stored DOM.
+- the current browser stack now has two tiers: lightweight HTTP + DOM sessions for cookie-aware fetch/form/download flows, and a visible managed-browser tier for lifecycle/status control, screenshot/PDF capture, cookie/storage inspection, storage mutation, request-header control, offline/geolocation/device emulation, and JS-driven click/type/evaluate/wait/dialog/key/upload/download actions, now with basic managed-session console capture, bounded response-preview network visibility, merged console+network trace output, aggregated error reporting, and shared-process tab/window creation. It still does not yet expose full Playwright-class CDP event streaming or exportable trace-file parity.
 - `desktop_open` launches a local application, file, folder, or URL on the host machine and returns the launcher plus spawned process identifier when available.
 - `desktop_clipboard_set` writes text into the host clipboard; it currently supports Windows and macOS.
 - `desktop_type_text` sends text to the currently focused desktop window; it currently uses Windows `WScript.Shell.SendKeys`.
@@ -914,8 +973,17 @@ Device-facing node behavior:
 - `desktop_mouse_move` moves the host pointer to explicit screen coordinates.
 - `desktop_mouse_click` sends left, right, or middle click input and can optionally move to a target coordinate first.
 - `desktop_screenshot` captures the full desktop, or an explicit rectangular region, into a PNG file on the host machine.
+- `desktop_ocr` runs local OCR over an existing image file or a captured desktop region; the current implementation uses a local `tesseract` CLI backend when it is installed on the host.
+- `desktop_accessibility_query` searches a focused window's accessibility tree for nodes matching `name`, `automationId`, `className`, and `controlType`, then ranks candidates with `matchMode`, `preferVisible`, and `preferEnabled` before returning bounded match metadata.
+- `desktop_accessibility_click` searches a focused window's accessibility tree, resolves the best-ranked matched node's bounding rectangle center, and issues a real mouse click at that point.
+- `desktop_accessibility_wait_for` polls until a ranked accessibility node matching the selector appears inside the target window.
+- `desktop_accessibility_fill` first tries `ValuePattern` on the best-ranked matched accessibility node and, if needed, falls back to `SetFocus + SendKeys` for editable controls.
+- `desktop_accessibility_workflow` runs a bounded multi-step desktop flow by sequencing commands such as `launch_and_focus`, `wait_for_window`, ranked `wait_for`, `fill`, `click`, `focus`, `invoke`, `set_value`, `type_text`, `key_press`, `ocr`, and `sleep`.
 - `desktop_accessibility_snapshot` reads a focused window through the Windows accessibility tree and returns a bounded control-view snapshot with names, automation ids, control types, state, and child nodes.
-- the current desktop-automation MVP now covers launcher, clipboard, keyboard, visible-window targeting, launch-and-focus orchestration, pointer movement, screenshot capture, and accessibility snapshots, but it still does not implement OCR, semantic action planning over accessibility nodes, or full cross-platform desktop automation parity.
+- `desktop_accessibility_focus` finds the best-ranked Windows accessibility node by selector and moves keyboard focus to it.
+- `desktop_accessibility_invoke` finds the best-ranked Windows accessibility node and triggers `InvokePattern`, `SelectionItemPattern`, or `TogglePattern`.
+- `desktop_accessibility_set_value` finds the best-ranked Windows accessibility node with `ValuePattern` and writes text into it.
+- the current desktop-automation MVP now covers launcher, clipboard, keyboard, visible-window targeting, launch-and-focus orchestration, pointer movement, screenshot capture, local OCR, accessibility queries, semantic accessibility clicks, accessibility waits, high-level accessibility fill flows, multi-step accessibility workflows, accessibility snapshots, and basic semantic accessibility actions, but it still does not implement planner-level accessibility reasoning or full cross-platform desktop automation parity.
 
 ## AP2 Flow
 

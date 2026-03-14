@@ -301,6 +301,7 @@ name = "dawn_node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "ed25519-dalek",
  "futures-util",
