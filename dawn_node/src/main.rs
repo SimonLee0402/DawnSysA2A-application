@@ -19,13 +19,14 @@ use managed_browser::{
     collect_managed_browser_network_requests, collect_managed_browser_trace,
     delete_managed_browser_profile, emulate_managed_browser_device,
     emulate_managed_browser_network, evaluate_managed_browser, export_managed_browser_profile,
-    handle_managed_browser_dialog, inspect_managed_browser, inspect_managed_browser_profile,
-    inspect_managed_browser_storage, launch_managed_browser, launch_managed_browser_with_profile,
-    list_managed_browser_profiles, mutate_managed_browser_storage, navigate_managed_browser,
-    open_managed_browser_tab, open_managed_browser_window, prepare_managed_browser_download,
-    press_key_managed_browser, print_to_pdf_managed_browser, refresh_managed_browser,
-    screenshot_managed_browser, set_managed_browser_geolocation, set_managed_browser_headers,
-    type_managed_browser, upload_managed_browser, wait_for_managed_browser,
+    handle_managed_browser_dialog, import_managed_browser_profile, inspect_managed_browser,
+    inspect_managed_browser_profile, inspect_managed_browser_storage, launch_managed_browser,
+    launch_managed_browser_with_profile, list_managed_browser_profiles,
+    mutate_managed_browser_storage, navigate_managed_browser, open_managed_browser_tab,
+    open_managed_browser_window, prepare_managed_browser_download, press_key_managed_browser,
+    print_to_pdf_managed_browser, refresh_managed_browser, screenshot_managed_browser,
+    set_managed_browser_geolocation, set_managed_browser_headers, type_managed_browser,
+    upload_managed_browser, wait_for_managed_browser,
 };
 use reqwest::{Client, Method, Url};
 use scraper::{Html, Selector};
@@ -565,6 +566,9 @@ async fn execute_command(
         "browser_profiles" => execute_browser_profiles_command(runtime_state, envelope).await,
         "browser_profile_inspect" => {
             execute_browser_profile_inspect_command(runtime_state, envelope).await
+        }
+        "browser_profile_import" => {
+            execute_browser_profile_import_command(runtime_state, envelope).await
         }
         "browser_profile_export" => {
             execute_browser_profile_export_command(runtime_state, envelope).await
@@ -3374,6 +3378,114 @@ async fn execute_browser_profile_inspect_command(
                 "runtime": "managed",
                 "action": "browser_profile_inspect",
                 "profile": profile,
+                "inUseBySessions": in_use_by_sessions,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_profile_import_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(source_path_raw) = envelope
+        .payload
+        .get("sourcePath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_profile_import requires payload.sourcePath".to_string()),
+        };
+    };
+    let source_path = PathBuf::from(source_path_raw);
+    let inferred_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToString::to_string)
+        .filter(|value| !value.trim().is_empty());
+    let Some(profile_name) = envelope
+        .payload
+        .get("profileName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or(inferred_name)
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_profile_import requires payload.profileName or a named source directory"
+                    .to_string(),
+            ),
+        };
+    };
+    let overwrite = envelope
+        .payload
+        .get("overwrite")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let in_use_by_sessions = runtime_state
+        .browser_sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            let managed = session.managed.as_ref()?;
+            let candidate = managed.profile_name.as_deref()?;
+            if candidate == profile_name && managed.persistent_profile {
+                return Some(json!({
+                    "sessionId": session_id,
+                    "currentUrl": session.current_url,
+                    "debugPort": managed.debug_port,
+                    "active": runtime_state
+                        .active_browser_session_id
+                        .as_deref()
+                        .map(|active_id| active_id == session_id)
+                        .unwrap_or(false),
+                }));
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    if overwrite && !in_use_by_sessions.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: Some(json!({
+                "profileName": profile_name,
+                "inUseBySessions": in_use_by_sessions,
+            })),
+            error: Some(format!(
+                "managed browser profile `{profile_name}` is still in use by tracked sessions"
+            )),
+        };
+    }
+    match import_managed_browser_profile(&source_path, &profile_name, overwrite).await {
+        Ok(imported) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "runtime": "managed",
+                "action": "browser_profile_import",
+                "profile": imported,
                 "inUseBySessions": in_use_by_sessions,
             })),
             error: None,
@@ -10714,6 +10826,7 @@ fn default_capabilities() -> Vec<String> {
         "browser_start".to_string(),
         "browser_profiles".to_string(),
         "browser_profile_inspect".to_string(),
+        "browser_profile_import".to_string(),
         "browser_profile_export".to_string(),
         "browser_profile_delete".to_string(),
         "browser_status".to_string(),
@@ -11941,6 +12054,11 @@ mod tests {
             capabilities
                 .iter()
                 .any(|value| value == "browser_profile_inspect")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_profile_import")
         );
         assert!(
             capabilities

@@ -844,6 +844,7 @@ Supported node command types in the sample Rust node:
 - `browser_start`
 - `browser_profiles`
 - `browser_profile_inspect`
+- `browser_profile_import`
 - `browser_profile_export`
 - `browser_profile_delete`
 - `browser_status`
@@ -927,6 +928,7 @@ Device-facing node behavior:
 - `browser_start` launches a fresh visible Chromium/Edge process under CDP control, registers its first managed Dawn session, defaults to `about:blank` when no URL is provided, and can reuse a named persistent local profile directory.
 - `browser_profiles` lists persistent managed-browser profiles currently saved on disk so operators can reuse or audit them before launching another managed session.
 - `browser_profile_inspect` inspects one saved managed-browser profile directory and reports its path, file/directory counts, aggregate size, latest modification timestamp, and any tracked sessions still using it.
+- `browser_profile_import` copies an external browser profile directory into Dawn's persistent managed-browser profile store and can overwrite an existing idle profile when explicitly requested.
 - `browser_profile_export` copies one saved managed-browser profile directory to a local export path so operators can archive it or move it to another host without touching the original profile.
 - `browser_profile_delete` removes one saved managed-browser profile directory, but only when no tracked session is still using that profile.
 - `browser_status` inspects one managed browser process, including its debug port, tracked session group, and currently exposed DevTools targets.

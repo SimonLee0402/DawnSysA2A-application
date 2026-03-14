@@ -714,6 +714,18 @@ pub struct ManagedBrowserProfileExportResult {
     pub total_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedBrowserProfileImportResult {
+    pub profile_name: String,
+    pub source_path: String,
+    pub profile_path: String,
+    pub directory_count: usize,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub overwritten: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedBrowserDownloadRequest {
     pub source_url: String,
@@ -1187,6 +1199,49 @@ pub fn export_managed_browser_profile(
         directory_count: inspected.directory_count,
         file_count: inspected.file_count,
         total_bytes: inspected.total_bytes,
+    })
+}
+
+pub async fn import_managed_browser_profile(
+    source_path: &Path,
+    profile_name: &str,
+    overwrite: bool,
+) -> anyhow::Result<ManagedBrowserProfileImportResult> {
+    if !source_path.exists() {
+        anyhow::bail!(
+            "managed browser profile source {} does not exist",
+            source_path.display()
+        );
+    }
+    if !source_path.is_dir() {
+        anyhow::bail!(
+            "managed browser profile source {} is not a directory",
+            source_path.display()
+        );
+    }
+    let profile_name = sanitize_managed_browser_profile_name(profile_name);
+    let profile_path = managed_browser_profile_root().join(&profile_name);
+    let existed = profile_path.exists();
+    if existed && !overwrite {
+        anyhow::bail!(
+            "managed browser profile `{}` already exists at {}",
+            profile_name,
+            profile_path.display()
+        );
+    }
+    if existed {
+        remove_managed_browser_profile_dir(&profile_path).await?;
+    }
+    copy_managed_browser_profile_dir(source_path, &profile_path)?;
+    let inspected = inspect_managed_browser_profile(&profile_name)?;
+    Ok(ManagedBrowserProfileImportResult {
+        profile_name: inspected.profile_name,
+        source_path: source_path.display().to_string(),
+        profile_path: inspected.profile_path,
+        directory_count: inspected.directory_count,
+        file_count: inspected.file_count,
+        total_bytes: inspected.total_bytes,
+        overwritten: existed,
     })
 }
 
@@ -3416,8 +3471,8 @@ mod tests {
     use super::{
         ManagedBrowserCookie, build_managed_browser_cookie_header, close_managed_browser,
         collect_managed_browser_trace, cookie_query_params, delete_managed_browser_profile,
-        evaluate_managed_browser, export_managed_browser_profile, inspect_managed_browser_profile,
-        launch_managed_browser, parse_managed_browser_key_spec,
+        evaluate_managed_browser, export_managed_browser_profile, import_managed_browser_profile,
+        inspect_managed_browser_profile, launch_managed_browser, parse_managed_browser_key_spec,
         resolve_managed_browser_user_data_dir, sanitize_managed_browser_profile_name,
         validate_managed_browser_download_source,
     };
@@ -3576,6 +3631,29 @@ mod tests {
         assert!(export_root.join("Default").join("Cookies").exists());
         std::fs::remove_dir_all(path).expect("expected test profile cleanup");
         std::fs::remove_dir_all(export_root).expect("expected export cleanup");
+    }
+
+    #[tokio::test]
+    async fn imports_managed_browser_profile_dir() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let source_root = env::temp_dir().join(format!("profile-import-source-{suffix}"));
+        let profile_name = format!("import-profile-{suffix}");
+        std::fs::create_dir_all(source_root.join("Default")).expect("expected source dir");
+        std::fs::write(source_root.join("Preferences"), "{\"b\":2}").expect("expected source file");
+        std::fs::write(source_root.join("Default").join("Cookies"), "sqlite")
+            .expect("expected nested source file");
+        let imported = import_managed_browser_profile(&source_root, &profile_name, false)
+            .await
+            .expect("expected profile import to succeed");
+        let imported_root = resolve_managed_browser_user_data_dir(Some(&profile_name), true, 9222);
+        assert_eq!(imported.profile_name, profile_name);
+        assert!(imported_root.join("Preferences").exists());
+        assert!(imported_root.join("Default").join("Cookies").exists());
+        std::fs::remove_dir_all(source_root).expect("expected source cleanup");
+        std::fs::remove_dir_all(imported_root).expect("expected imported cleanup");
     }
 
     #[tokio::test]
