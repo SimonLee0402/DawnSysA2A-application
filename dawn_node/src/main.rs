@@ -606,6 +606,9 @@ async fn execute_command(
             execute_browser_trace_export_command(runtime_state, envelope).await
         }
         "browser_errors" => execute_browser_errors_command(runtime_state, envelope).await,
+        "browser_errors_export" => {
+            execute_browser_errors_export_command(runtime_state, envelope).await
+        }
         "browser_cookies" => execute_browser_cookies_command(runtime_state, envelope).await,
         "browser_storage" => execute_browser_storage_command(runtime_state, envelope).await,
         "browser_storage_set" => execute_browser_storage_set_command(runtime_state, envelope).await,
@@ -5344,6 +5347,147 @@ async fn execute_browser_errors_command(
     }
 }
 
+async fn execute_browser_errors_export_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_errors_export requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let console_limit = envelope
+        .payload
+        .get("consoleLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(100);
+    let network_limit = envelope
+        .payload
+        .get("networkLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(100);
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let export_path = resolve_browser_errors_export_path(requested_path, &session_id);
+
+    match collect_managed_browser_errors(&managed, console_limit, network_limit).await {
+        Ok(errors) => {
+            let encoded = match serde_json::to_vec_pretty(&errors) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(format!(
+                            "failed to serialize managed browser errors log: {error}"
+                        )),
+                    };
+                }
+            };
+            if let Some(parent) = export_path.parent() {
+                if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(format!(
+                            "failed to create errors export directory {}: {error}",
+                            parent.display()
+                        )),
+                    };
+                }
+            }
+            if let Err(error) = tokio::fs::write(&export_path, &encoded).await {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "failed to save managed browser errors log to {}: {error}",
+                        export_path.display()
+                    )),
+                };
+            }
+            let page = match refresh_managed_browser(&managed).await {
+                Ok(page) => {
+                    let refreshed = preserve_browser_forward_history(
+                        build_managed_browser_session(
+                            session.client.clone(),
+                            managed.clone(),
+                            page,
+                            "errors_export",
+                            session.history.clone(),
+                        ),
+                        &session,
+                    );
+                    let summary = browser_session_summary(&session_id, &refreshed);
+                    runtime_state
+                        .browser_sessions
+                        .insert(session_id.clone(), refreshed);
+                    summary
+                }
+                Err(_) => browser_session_summary(&session_id, &session),
+            };
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_errors_export",
+                    "errorsPath": export_path.display().to_string(),
+                    "bytesWritten": encoded.len(),
+                    "errors": {
+                        "currentUrl": errors.current_url,
+                        "consoleCount": errors.console_count,
+                        "networkCount": errors.network_count,
+                    },
+                    "page": page,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 async fn execute_browser_cookies_command(
     runtime_state: &mut NodeRuntimeState,
     envelope: GatewayCommandEnvelope,
@@ -8020,6 +8164,23 @@ fn resolve_browser_network_export_path(requested: Option<&str>, session_id: &str
         .unwrap_or_else(|| {
             env::temp_dir().join(format!(
                 "dawn-browser-network-{}-{}.json",
+                session_id,
+                unix_timestamp_ms()
+            ))
+        });
+    if path.extension().is_none() {
+        path.set_extension("json");
+    }
+    path
+}
+
+fn resolve_browser_errors_export_path(requested: Option<&str>, session_id: &str) -> PathBuf {
+    let mut path = requested
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::temp_dir().join(format!(
+                "dawn-browser-errors-{}-{}.json",
                 session_id,
                 unix_timestamp_ms()
             ))
@@ -11007,6 +11168,7 @@ fn default_capabilities() -> Vec<String> {
         "browser_trace".to_string(),
         "browser_trace_export".to_string(),
         "browser_errors".to_string(),
+        "browser_errors_export".to_string(),
         "browser_cookies".to_string(),
         "browser_storage".to_string(),
         "browser_storage_set".to_string(),
@@ -12147,6 +12309,18 @@ mod tests {
     }
 
     #[test]
+    fn resolves_browser_errors_export_path_with_json_extension() {
+        let path = resolve_browser_errors_export_path(
+            Some("artifacts/browser/errors-log"),
+            "browser-default",
+        );
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
+    }
+
+    #[test]
     fn resolves_browser_trace_path_with_json_extension() {
         let path =
             resolve_browser_trace_path(Some("artifacts/browser/demo-trace"), "browser-default");
@@ -12285,6 +12459,11 @@ mod tests {
                 .any(|value| value == "browser_trace_export")
         );
         assert!(capabilities.iter().any(|value| value == "browser_errors"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_errors_export")
+        );
         assert!(capabilities.iter().any(|value| value == "browser_cookies"));
         assert!(capabilities.iter().any(|value| value == "browser_storage"));
         assert!(

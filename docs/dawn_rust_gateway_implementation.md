@@ -869,6 +869,7 @@ Supported node command types in the sample Rust node:
 - `browser_trace`
 - `browser_trace_export`
 - `browser_errors`
+- `browser_errors_export`
 - `browser_cookies`
 - `browser_storage`
 - `browser_storage_set`
@@ -954,6 +955,7 @@ Device-facing node behavior:
 - `browser_trace` returns a time-ordered trace that merges managed-browser fetch/XHR lifecycle events with recent console activity, giving operators a lightweight event stream without requiring a separate tracing backend.
 - `browser_trace_export` saves that merged managed-browser trace as a local JSON artifact so operators or agents can attach, diff, or archive one trace run without building a separate export pipeline.
 - `browser_errors` aggregates console errors plus failed or suspicious managed-browser network activity into one result so operators can inspect a tab's current fault surface without manually correlating multiple commands.
+- `browser_errors_export` saves that aggregated managed-browser error view as a local JSON artifact so operators can attach one fault snapshot to debugging or incident workflows.
 - `browser_cookies` reads the cookies currently visible to the managed tab, including domain/path and security metadata when Chromium exposes them.
 - `browser_storage` inspects the current tab's `localStorage` and `sessionStorage`, returning bounded key/value snapshots plus any storage-access errors surfaced by the page.
 - `browser_storage_set` sets or removes a `localStorage` or `sessionStorage` key inside a managed tab and then refreshes the stored DOM snapshot.

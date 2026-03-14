@@ -3717,6 +3717,7 @@ fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
         "browser_trace".to_string(),
         "browser_trace_export".to_string(),
         "browser_errors".to_string(),
+        "browser_errors_export".to_string(),
         "browser_cookies".to_string(),
         "browser_storage".to_string(),
         "browser_storage_set".to_string(),
