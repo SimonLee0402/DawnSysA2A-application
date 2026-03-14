@@ -256,7 +256,7 @@ Control Center:
 
 - `GET /console` serves a live dashboard for inbound chat, tasks, nodes, settlements, and agent cards.
 - the dashboard now includes an `Approval Center` feed for pending node-command and AP2 approvals.
-- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
+- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_profiles`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
 - the current console visual direction is a liquid-glass operations deck rather than a plain admin table, and it now includes command template chips plus a full command-detail inspector for recent node results.
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
 - the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
@@ -842,6 +842,7 @@ Supported node command types in the sample Rust node:
 - `list_capabilities`
 - `agent_ping`
 - `browser_start`
+- `browser_profiles`
 - `browser_status`
 - `browser_stop`
 - `browser_navigate`
@@ -920,7 +921,8 @@ Device-facing node behavior:
 - `read_file_preview` reads a bounded UTF-8 preview of a file without requiring shell access.
 - `stat_path` returns basic filesystem metadata for a file or directory.
 - `process_snapshot` returns a bounded process list using `tasklist` on Windows or `ps` on Unix-like hosts.
-- `browser_start` launches a fresh visible Chromium/Edge process under CDP control, registers its first managed Dawn session, and defaults to `about:blank` when no URL is provided.
+- `browser_start` launches a fresh visible Chromium/Edge process under CDP control, registers its first managed Dawn session, defaults to `about:blank` when no URL is provided, and can reuse a named persistent local profile directory.
+- `browser_profiles` lists persistent managed-browser profiles currently saved on disk so operators can reuse or audit them before launching another managed session.
 - `browser_status` inspects one managed browser process, including its debug port, tracked session group, and currently exposed DevTools targets.
 - `browser_stop` stops one managed browser process and removes every Dawn browser session that shares the same process.
 - `browser_navigate` fetches an HTTP(S) page into a named lightweight browser session inside the node and stores the latest DOM snapshot; with `managed=true`, it launches a visible Chromium/Edge tab under CDP control and stores a live DOM snapshot from that browser.

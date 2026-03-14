@@ -372,6 +372,8 @@ pub struct ManagedBrowserSession {
     pub executable: String,
     pub debug_port: u16,
     pub browser_pid: Option<u32>,
+    pub profile_name: Option<String>,
+    pub persistent_profile: bool,
     pub target_id: String,
     pub websocket_url: String,
     pub user_data_dir: PathBuf,
@@ -666,11 +668,20 @@ pub struct ManagedBrowserStatus {
     pub executable: String,
     pub debug_port: u16,
     pub browser_pid: Option<u32>,
+    pub profile_name: Option<String>,
+    pub persistent_profile: bool,
     pub user_data_dir: String,
     pub current_target_id: String,
     pub target_count: usize,
     pub page_target_count: usize,
     pub targets: Vec<ManagedBrowserTargetSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedBrowserProfileSummary {
+    pub profile_name: String,
+    pub profile_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -824,13 +835,26 @@ impl CdpConnection {
 pub async fn launch_managed_browser(
     url: &str,
 ) -> anyhow::Result<(ManagedBrowserSession, ManagedBrowserPageState)> {
+    launch_managed_browser_with_profile(url, None, false).await
+}
+
+pub async fn launch_managed_browser_with_profile(
+    url: &str,
+    profile_name: Option<&str>,
+    persistent_profile: bool,
+) -> anyhow::Result<(ManagedBrowserSession, ManagedBrowserPageState)> {
     let executable = detect_browser_executable()?;
     let debug_port = reserve_debug_port()?;
-    let user_data_dir = env::temp_dir().join(format!(
-        "dawn-managed-browser-{}-{}",
+    let normalized_profile_name = profile_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(sanitize_managed_browser_profile_name)
+        .or_else(|| persistent_profile.then(|| "default".to_string()));
+    let user_data_dir = resolve_managed_browser_user_data_dir(
+        normalized_profile_name.as_deref(),
+        persistent_profile,
         debug_port,
-        unix_timestamp_ms()
-    ));
+    );
     std::fs::create_dir_all(&user_data_dir).with_context(|| {
         format!(
             "failed to create managed browser profile directory {}",
@@ -861,6 +885,8 @@ pub async fn launch_managed_browser(
         executable,
         debug_port,
         browser_pid,
+        profile_name: normalized_profile_name,
+        persistent_profile,
         target_id: target.id,
         websocket_url: target.web_socket_debugger_url,
         user_data_dir,
@@ -928,6 +954,8 @@ async fn open_managed_browser_target(
         executable: session.executable.clone(),
         debug_port: session.debug_port,
         browser_pid: session.browser_pid,
+        profile_name: session.profile_name.clone(),
+        persistent_profile: session.persistent_profile,
         target_id: target.id,
         websocket_url: target.web_socket_debugger_url,
         user_data_dir: session.user_data_dir.clone(),
@@ -979,6 +1007,8 @@ pub async fn inspect_managed_browser(
         executable: session.executable.clone(),
         debug_port: session.debug_port,
         browser_pid: session.browser_pid,
+        profile_name: session.profile_name.clone(),
+        persistent_profile: session.persistent_profile,
         user_data_dir: session.user_data_dir.display().to_string(),
         current_target_id: session.target_id.clone(),
         target_count: targets.len(),
@@ -1009,7 +1039,7 @@ pub async fn close_managed_browser(
         if let Some(pid) = session.browser_pid {
             terminate_browser_process(pid).await?;
         }
-        if session.user_data_dir.exists() {
+        if session.user_data_dir.exists() && !session.persistent_profile {
             tokio::fs::remove_dir_all(&session.user_data_dir)
                 .await
                 .with_context(|| {
@@ -1021,6 +1051,34 @@ pub async fn close_managed_browser(
         }
     }
     Ok(())
+}
+
+pub fn list_managed_browser_profiles() -> anyhow::Result<Vec<ManagedBrowserProfileSummary>> {
+    let root = managed_browser_profile_root();
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut profiles = std::fs::read_dir(&root)
+        .with_context(|| {
+            format!(
+                "failed to read managed browser profile root {}",
+                root.display()
+            )
+        })?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            Some(ManagedBrowserProfileSummary {
+                profile_name: entry.file_name().to_string_lossy().to_string(),
+                profile_path: path.display().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    profiles.sort_by(|left, right| left.profile_name.cmp(&right.profile_name));
+    Ok(profiles)
 }
 
 pub async fn click_managed_browser(
@@ -2626,6 +2684,66 @@ async fn terminate_browser_process(pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn managed_browser_profile_root() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("DawnNode")
+                .join("managed-browser-profiles");
+        }
+    } else if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".dawn")
+            .join("managed-browser-profiles");
+    }
+    env::temp_dir().join("dawn-managed-browser-profiles")
+}
+
+fn sanitize_managed_browser_profile_name(profile_name: &str) -> String {
+    let sanitized = profile_name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if sanitized.is_empty() {
+        "default".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn resolve_managed_browser_user_data_dir(
+    profile_name: Option<&str>,
+    persistent_profile: bool,
+    debug_port: u16,
+) -> PathBuf {
+    if persistent_profile {
+        let profile_name = profile_name
+            .filter(|value| !value.trim().is_empty())
+            .map(sanitize_managed_browser_profile_name)
+            .unwrap_or_else(|| "default".to_string());
+        return managed_browser_profile_root().join(profile_name);
+    }
+    let prefix = profile_name
+        .filter(|value| !value.trim().is_empty())
+        .map(sanitize_managed_browser_profile_name)
+        .unwrap_or_else(|| "session".to_string());
+    env::temp_dir().join(format!(
+        "dawn-managed-browser-{}-{}-{}",
+        prefix,
+        debug_port,
+        unix_timestamp_ms()
+    ))
+}
+
 fn detect_browser_executable() -> anyhow::Result<String> {
     if let Ok(explicit) = env::var("DAWN_MANAGED_BROWSER_BIN") {
         let explicit = explicit.trim();
@@ -3068,6 +3186,7 @@ mod tests {
         ManagedBrowserCookie, build_managed_browser_cookie_header, close_managed_browser,
         collect_managed_browser_trace, cookie_query_params, evaluate_managed_browser,
         launch_managed_browser, parse_managed_browser_key_spec,
+        resolve_managed_browser_user_data_dir, sanitize_managed_browser_profile_name,
         validate_managed_browser_download_source,
     };
     use serde_json::json;
@@ -3136,6 +3255,30 @@ mod tests {
         let error = validate_managed_browser_download_source("file:///tmp/demo.txt")
             .expect_err("expected non-http managed download URL to fail");
         assert!(error.to_string().contains("only supports http/https"));
+    }
+
+    #[test]
+    fn sanitizes_managed_browser_profile_names() {
+        assert_eq!(
+            sanitize_managed_browser_profile_name("  Sales Team / QA  "),
+            "Sales-Team---QA"
+        );
+        assert_eq!(sanitize_managed_browser_profile_name(""), "default");
+    }
+
+    #[test]
+    fn resolves_persistent_managed_browser_profile_dir() {
+        let path = resolve_managed_browser_user_data_dir(Some("ops"), true, 9222);
+        assert!(
+            path.to_string_lossy().contains("managed-browser-profiles"),
+            "expected persistent profile root in {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name()
+                .map(|value| value.to_string_lossy().to_string()),
+            Some("ops".to_string())
+        );
     }
 
     #[tokio::test]

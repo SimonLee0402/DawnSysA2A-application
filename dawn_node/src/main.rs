@@ -19,11 +19,12 @@ use managed_browser::{
     collect_managed_browser_network_requests, collect_managed_browser_trace,
     emulate_managed_browser_device, emulate_managed_browser_network, evaluate_managed_browser,
     handle_managed_browser_dialog, inspect_managed_browser, inspect_managed_browser_storage,
-    launch_managed_browser, mutate_managed_browser_storage, navigate_managed_browser,
-    open_managed_browser_tab, open_managed_browser_window, prepare_managed_browser_download,
-    press_key_managed_browser, print_to_pdf_managed_browser, refresh_managed_browser,
-    screenshot_managed_browser, set_managed_browser_geolocation, set_managed_browser_headers,
-    type_managed_browser, upload_managed_browser, wait_for_managed_browser,
+    launch_managed_browser, launch_managed_browser_with_profile, list_managed_browser_profiles,
+    mutate_managed_browser_storage, navigate_managed_browser, open_managed_browser_tab,
+    open_managed_browser_window, prepare_managed_browser_download, press_key_managed_browser,
+    print_to_pdf_managed_browser, refresh_managed_browser, screenshot_managed_browser,
+    set_managed_browser_geolocation, set_managed_browser_headers, type_managed_browser,
+    upload_managed_browser, wait_for_managed_browser,
 };
 use reqwest::{Client, Method, Url};
 use scraper::{Html, Selector};
@@ -560,6 +561,7 @@ async fn execute_command(
         "stat_path" => execute_stat_path_command(envelope).await,
         "process_snapshot" => execute_process_snapshot_command(envelope).await,
         "browser_start" => execute_browser_start_command(runtime_state, envelope).await,
+        "browser_profiles" => execute_browser_profiles_command(runtime_state, envelope).await,
         "browser_status" => execute_browser_status_command(runtime_state, envelope).await,
         "browser_stop" => execute_browser_stop_command(runtime_state, envelope).await,
         "browser_navigate" => execute_browser_navigate_command(runtime_state, envelope).await,
@@ -3187,7 +3189,25 @@ async fn execute_browser_start_command(
             };
         }
     };
-    match launch_managed_browser(&launch_url).await {
+    let profile_name = envelope
+        .payload
+        .get("profileName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let persistent_profile = envelope
+        .payload
+        .get("persistProfile")
+        .and_then(Value::as_bool)
+        .unwrap_or(profile_name.is_some());
+    match launch_managed_browser_with_profile(
+        &launch_url,
+        profile_name.as_deref(),
+        persistent_profile,
+    )
+    .await
+    {
         Ok((managed, page)) => {
             let session = match new_browser_client() {
                 Ok(client) => build_managed_browser_session(
@@ -3229,11 +3249,58 @@ async fn execute_browser_start_command(
                     "sessionId": session_id,
                     "runtime": "managed",
                     "action": "browser_start",
+                    "profileName": managed.profile_name,
+                    "persistentProfile": managed.persistent_profile,
                     "page": summary,
                     "tabs": browser_tab_summaries(
                         &runtime_state.browser_sessions,
                         runtime_state.active_browser_session_id.as_deref(),
                     ),
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_profiles_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    match list_managed_browser_profiles() {
+        Ok(profiles) => {
+            let active_profiles = runtime_state
+                .browser_sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    let managed = session.managed.as_ref()?;
+                    let profile_name = managed.profile_name.as_ref()?;
+                    Some(json!({
+                        "sessionId": session_id,
+                        "profileName": profile_name,
+                        "persistentProfile": managed.persistent_profile,
+                        "debugPort": managed.debug_port,
+                        "currentUrl": session.current_url,
+                    }))
+                })
+                .collect::<Vec<_>>();
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "runtime": "managed",
+                    "action": "browser_profiles",
+                    "profileCount": profiles.len(),
+                    "profiles": profiles,
+                    "activeProfiles": active_profiles,
                 })),
                 error: None,
             }
@@ -10418,6 +10485,7 @@ fn default_capabilities() -> Vec<String> {
         "list_capabilities".to_string(),
         "agent_ping".to_string(),
         "browser_start".to_string(),
+        "browser_profiles".to_string(),
         "browser_status".to_string(),
         "browser_stop".to_string(),
         "browser_navigate".to_string(),
@@ -11459,6 +11527,8 @@ mod tests {
             executable: "msedge.exe".to_string(),
             debug_port: 9222,
             browser_pid: Some(111),
+            profile_name: Some("ops".to_string()),
+            persistent_profile: true,
             target_id: "page-a".to_string(),
             websocket_url: "ws://127.0.0.1/devtools/page/a".to_string(),
             user_data_dir: PathBuf::from("C:/tmp/dawn-browser"),
@@ -11468,6 +11538,8 @@ mod tests {
             executable: "msedge.exe".to_string(),
             debug_port: 9222,
             browser_pid: Some(111),
+            profile_name: Some("ops".to_string()),
+            persistent_profile: true,
             target_id: "page-b".to_string(),
             websocket_url: "ws://127.0.0.1/devtools/page/b".to_string(),
             user_data_dir: PathBuf::from("C:/tmp/dawn-browser"),
@@ -11625,6 +11697,7 @@ mod tests {
     fn default_capabilities_include_browser_session_commands() {
         let capabilities = default_capabilities();
         assert!(capabilities.iter().any(|value| value == "browser_start"));
+        assert!(capabilities.iter().any(|value| value == "browser_profiles"));
         assert!(capabilities.iter().any(|value| value == "browser_status"));
         assert!(capabilities.iter().any(|value| value == "browser_stop"));
         assert!(capabilities.iter().any(|value| value == "browser_navigate"));

@@ -1397,7 +1397,8 @@ async fn dashboard() -> Html<&'static str> {
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
-      browser_start: { sessionId: "browser-managed-1", url: "https://example.com", approvalRequired: true },
+      browser_start: { sessionId: "browser-managed-1", url: "https://example.com", profileName: "ops", persistProfile: true, approvalRequired: true },
+      browser_profiles: { approvalRequired: true },
       browser_status: { sessionId: "browser-managed-1", approvalRequired: true },
       browser_stop: { sessionId: "browser-managed-1", approvalRequired: true },
       browser_navigate: { sessionId: "browser-default", url: "https://example.com", managed: true, approvalRequired: true },
@@ -1469,7 +1470,8 @@ async fn dashboard() -> Html<&'static str> {
     const commandTemplateDescriptions = {
       agent_ping: "Fast liveness probe",
       list_capabilities: "Attested capability list",
-      browser_start: "Launch a fresh managed Chromium or Edge process and register its first controlled session",
+      browser_start: "Launch a fresh managed Chromium or Edge process, optionally backed by a reusable local profile directory",
+      browser_profiles: "List the managed browser profiles currently saved on disk and any tracked sessions using them",
       browser_status: "Inspect one managed browser process, including its tracked Dawn sessions and live CDP targets",
       browser_stop: "Stop a managed browser process and remove every tracked Dawn session that shares it",
       browser_navigate: "Fetch a browser page into a lightweight HTTP session, or launch a visible managed browser tab when payload.managed=true",
