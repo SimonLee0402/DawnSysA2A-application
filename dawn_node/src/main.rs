@@ -19,8 +19,8 @@ use managed_browser::{
     collect_managed_browser_network_requests, collect_managed_browser_trace,
     delete_managed_browser_profile, emulate_managed_browser_device,
     emulate_managed_browser_network, evaluate_managed_browser, handle_managed_browser_dialog,
-    inspect_managed_browser, inspect_managed_browser_storage, launch_managed_browser,
-    launch_managed_browser_with_profile, list_managed_browser_profiles,
+    inspect_managed_browser, inspect_managed_browser_profile, inspect_managed_browser_storage,
+    launch_managed_browser, launch_managed_browser_with_profile, list_managed_browser_profiles,
     mutate_managed_browser_storage, navigate_managed_browser, open_managed_browser_tab,
     open_managed_browser_window, prepare_managed_browser_download, press_key_managed_browser,
     print_to_pdf_managed_browser, refresh_managed_browser, screenshot_managed_browser,
@@ -563,6 +563,9 @@ async fn execute_command(
         "process_snapshot" => execute_process_snapshot_command(envelope).await,
         "browser_start" => execute_browser_start_command(runtime_state, envelope).await,
         "browser_profiles" => execute_browser_profiles_command(runtime_state, envelope).await,
+        "browser_profile_inspect" => {
+            execute_browser_profile_inspect_command(runtime_state, envelope).await
+        }
         "browser_profile_delete" => {
             execute_browser_profile_delete_command(runtime_state, envelope).await
         }
@@ -3309,6 +3312,69 @@ async fn execute_browser_profiles_command(
                 error: None,
             }
         }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_browser_profile_inspect_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(profile_name) = envelope
+        .payload
+        .get("profileName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("browser_profile_inspect requires payload.profileName".to_string()),
+        };
+    };
+    let in_use_by_sessions = runtime_state
+        .browser_sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            let managed = session.managed.as_ref()?;
+            let candidate = managed.profile_name.as_deref()?;
+            if candidate == profile_name && managed.persistent_profile {
+                return Some(json!({
+                    "sessionId": session_id,
+                    "currentUrl": session.current_url,
+                    "debugPort": managed.debug_port,
+                    "active": runtime_state
+                        .active_browser_session_id
+                        .as_deref()
+                        .map(|active_id| active_id == session_id)
+                        .unwrap_or(false),
+                }));
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    match inspect_managed_browser_profile(profile_name) {
+        Ok(profile) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "runtime": "managed",
+                "action": "browser_profile_inspect",
+                "profile": profile,
+                "inUseBySessions": in_use_by_sessions,
+            })),
+            error: None,
+        },
         Err(error) => CommandResultEnvelope {
             message_type: "command_result",
             command_id: envelope.command_id,
@@ -10561,6 +10627,7 @@ fn default_capabilities() -> Vec<String> {
         "agent_ping".to_string(),
         "browser_start".to_string(),
         "browser_profiles".to_string(),
+        "browser_profile_inspect".to_string(),
         "browser_profile_delete".to_string(),
         "browser_status".to_string(),
         "browser_stop".to_string(),
@@ -11774,6 +11841,11 @@ mod tests {
         let capabilities = default_capabilities();
         assert!(capabilities.iter().any(|value| value == "browser_start"));
         assert!(capabilities.iter().any(|value| value == "browser_profiles"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_profile_inspect")
+        );
         assert!(
             capabilities
                 .iter()

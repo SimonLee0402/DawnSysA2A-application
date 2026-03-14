@@ -692,6 +692,17 @@ pub struct ManagedBrowserProfileDeleteResult {
     pub deleted: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedBrowserProfileInspectResult {
+    pub profile_name: String,
+    pub profile_path: String,
+    pub directory_count: usize,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub last_modified_unix_ms: Option<u128>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedBrowserDownloadRequest {
     pub source_url: String,
@@ -741,6 +752,14 @@ struct ManagedBrowserActiveElement {
     tag: String,
     field_type: Option<String>,
     name: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ManagedBrowserProfileStats {
+    directory_count: usize,
+    file_count: usize,
+    total_bytes: u64,
+    last_modified_unix_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1107,6 +1126,30 @@ pub async fn delete_managed_browser_profile(
         profile_name,
         profile_path: profile_path.display().to_string(),
         deleted: true,
+    })
+}
+
+pub fn inspect_managed_browser_profile(
+    profile_name: &str,
+) -> anyhow::Result<ManagedBrowserProfileInspectResult> {
+    let profile_name = sanitize_managed_browser_profile_name(profile_name);
+    let profile_path = managed_browser_profile_root().join(&profile_name);
+    if !profile_path.exists() {
+        anyhow::bail!(
+            "managed browser profile `{}` does not exist at {}",
+            profile_name,
+            profile_path.display()
+        );
+    }
+    let mut stats = ManagedBrowserProfileStats::default();
+    collect_managed_browser_profile_stats(&profile_path, &mut stats)?;
+    Ok(ManagedBrowserProfileInspectResult {
+        profile_name,
+        profile_path: profile_path.display().to_string(),
+        directory_count: stats.directory_count,
+        file_count: stats.file_count,
+        total_bytes: stats.total_bytes,
+        last_modified_unix_ms: stats.last_modified_unix_ms,
     })
 }
 
@@ -2773,6 +2816,58 @@ fn resolve_managed_browser_user_data_dir(
     ))
 }
 
+fn collect_managed_browser_profile_stats(
+    path: &Path,
+    stats: &mut ManagedBrowserProfileStats,
+) -> anyhow::Result<()> {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "failed to stat managed browser profile path {}",
+            path.display()
+        )
+    })?;
+    if metadata.is_dir() {
+        stats.directory_count += 1;
+        update_managed_browser_profile_modified(stats, metadata.modified().ok());
+        for entry in std::fs::read_dir(path).with_context(|| {
+            format!(
+                "failed to read managed browser profile path {}",
+                path.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to read one managed browser profile entry in {}",
+                    path.display()
+                )
+            })?;
+            collect_managed_browser_profile_stats(&entry.path(), stats)?;
+        }
+        return Ok(());
+    }
+    stats.file_count += 1;
+    stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
+    update_managed_browser_profile_modified(stats, metadata.modified().ok());
+    Ok(())
+}
+
+fn update_managed_browser_profile_modified(
+    stats: &mut ManagedBrowserProfileStats,
+    modified: Option<std::time::SystemTime>,
+) {
+    let modified_ms = modified
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_millis());
+    if let Some(candidate) = modified_ms {
+        stats.last_modified_unix_ms = Some(
+            stats
+                .last_modified_unix_ms
+                .map(|current| current.max(candidate))
+                .unwrap_or(candidate),
+        );
+    }
+}
+
 async fn remove_managed_browser_profile_dir(path: &Path) -> anyhow::Result<()> {
     let mut last_error = None;
     for attempt in 0..5 {
@@ -3237,9 +3332,9 @@ mod tests {
     use super::{
         ManagedBrowserCookie, build_managed_browser_cookie_header, close_managed_browser,
         collect_managed_browser_trace, cookie_query_params, delete_managed_browser_profile,
-        evaluate_managed_browser, launch_managed_browser, parse_managed_browser_key_spec,
-        resolve_managed_browser_user_data_dir, sanitize_managed_browser_profile_name,
-        validate_managed_browser_download_source,
+        evaluate_managed_browser, inspect_managed_browser_profile, launch_managed_browser,
+        parse_managed_browser_key_spec, resolve_managed_browser_user_data_dir,
+        sanitize_managed_browser_profile_name, validate_managed_browser_download_source,
     };
     use serde_json::json;
     use std::{
@@ -3350,6 +3445,29 @@ mod tests {
             .expect("expected profile deletion to succeed");
         assert_eq!(deleted.profile_name, profile_name);
         assert!(!path.exists(), "expected profile directory to be removed");
+    }
+
+    #[test]
+    fn inspects_managed_browser_profile_dir() {
+        let profile_name = format!(
+            "inspect-profile-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let path = resolve_managed_browser_user_data_dir(Some(&profile_name), true, 9222);
+        std::fs::create_dir_all(path.join("Default")).expect("expected nested profile dir");
+        std::fs::write(path.join("Preferences"), "{}").expect("expected root file");
+        std::fs::write(path.join("Default").join("Cookies"), "sqlite")
+            .expect("expected nested file");
+        let inspected = inspect_managed_browser_profile(&profile_name)
+            .expect("expected profile inspect to succeed");
+        assert_eq!(inspected.profile_name, profile_name);
+        assert!(inspected.directory_count >= 2);
+        assert!(inspected.file_count >= 2);
+        assert!(inspected.total_bytes >= 8);
+        std::fs::remove_dir_all(path).expect("expected test profile cleanup");
     }
 
     #[tokio::test]
