@@ -684,6 +684,14 @@ pub struct ManagedBrowserProfileSummary {
     pub profile_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedBrowserProfileDeleteResult {
+    pub profile_name: String,
+    pub profile_path: String,
+    pub deleted: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedBrowserDownloadRequest {
     pub source_url: String,
@@ -1079,6 +1087,41 @@ pub fn list_managed_browser_profiles() -> anyhow::Result<Vec<ManagedBrowserProfi
         .collect::<Vec<_>>();
     profiles.sort_by(|left, right| left.profile_name.cmp(&right.profile_name));
     Ok(profiles)
+}
+
+pub async fn delete_managed_browser_profile(
+    profile_name: &str,
+) -> anyhow::Result<ManagedBrowserProfileDeleteResult> {
+    let profile_name = sanitize_managed_browser_profile_name(profile_name);
+    let profile_path = managed_browser_profile_root().join(&profile_name);
+    let exists = tokio::fs::try_exists(&profile_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect managed browser profile {}",
+                profile_path.display()
+            )
+        })?;
+    if !exists {
+        anyhow::bail!(
+            "managed browser profile `{}` does not exist at {}",
+            profile_name,
+            profile_path.display()
+        );
+    }
+    tokio::fs::remove_dir_all(&profile_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to remove managed browser profile {}",
+                profile_path.display()
+            )
+        })?;
+    Ok(ManagedBrowserProfileDeleteResult {
+        profile_name,
+        profile_path: profile_path.display().to_string(),
+        deleted: true,
+    })
 }
 
 pub async fn click_managed_browser(
@@ -3184,8 +3227,8 @@ fn parse_managed_browser_key_spec(key_spec: &str) -> anyhow::Result<ManagedBrows
 mod tests {
     use super::{
         ManagedBrowserCookie, build_managed_browser_cookie_header, close_managed_browser,
-        collect_managed_browser_trace, cookie_query_params, evaluate_managed_browser,
-        launch_managed_browser, parse_managed_browser_key_spec,
+        collect_managed_browser_trace, cookie_query_params, delete_managed_browser_profile,
+        evaluate_managed_browser, launch_managed_browser, parse_managed_browser_key_spec,
         resolve_managed_browser_user_data_dir, sanitize_managed_browser_profile_name,
         validate_managed_browser_download_source,
     };
@@ -3279,6 +3322,25 @@ mod tests {
                 .map(|value| value.to_string_lossy().to_string()),
             Some("ops".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn deletes_managed_browser_profile_dir() {
+        let profile_name = format!(
+            "test-profile-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let path = resolve_managed_browser_user_data_dir(Some(&profile_name), true, 9222);
+        std::fs::create_dir_all(&path).expect("expected profile directory to be created");
+        std::fs::write(path.join("Preferences"), "{}").expect("expected profile file to write");
+        let deleted = delete_managed_browser_profile(&profile_name)
+            .await
+            .expect("expected profile deletion to succeed");
+        assert_eq!(deleted.profile_name, profile_name);
+        assert!(!path.exists(), "expected profile directory to be removed");
     }
 
     #[tokio::test]

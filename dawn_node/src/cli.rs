@@ -3691,6 +3691,7 @@ fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
         "agent_ping".to_string(),
         "browser_start".to_string(),
         "browser_profiles".to_string(),
+        "browser_profile_delete".to_string(),
         "browser_status".to_string(),
         "browser_stop".to_string(),
         "browser_navigate".to_string(),

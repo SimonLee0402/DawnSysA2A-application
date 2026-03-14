@@ -843,6 +843,7 @@ Supported node command types in the sample Rust node:
 - `agent_ping`
 - `browser_start`
 - `browser_profiles`
+- `browser_profile_delete`
 - `browser_status`
 - `browser_stop`
 - `browser_navigate`
@@ -923,6 +924,7 @@ Device-facing node behavior:
 - `process_snapshot` returns a bounded process list using `tasklist` on Windows or `ps` on Unix-like hosts.
 - `browser_start` launches a fresh visible Chromium/Edge process under CDP control, registers its first managed Dawn session, defaults to `about:blank` when no URL is provided, and can reuse a named persistent local profile directory.
 - `browser_profiles` lists persistent managed-browser profiles currently saved on disk so operators can reuse or audit them before launching another managed session.
+- `browser_profile_delete` removes one saved managed-browser profile directory, but only when no tracked session is still using that profile.
 - `browser_status` inspects one managed browser process, including its debug port, tracked session group, and currently exposed DevTools targets.
 - `browser_stop` stops one managed browser process and removes every Dawn browser session that shares the same process.
 - `browser_navigate` fetches an HTTP(S) page into a named lightweight browser session inside the node and stores the latest DOM snapshot; with `managed=true`, it launches a visible Chromium/Edge tab under CDP control and stores a live DOM snapshot from that browser.
