@@ -3713,6 +3713,7 @@ fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
         "browser_pdf".to_string(),
         "browser_console_messages".to_string(),
         "browser_network_requests".to_string(),
+        "browser_network_export".to_string(),
         "browser_trace".to_string(),
         "browser_trace_export".to_string(),
         "browser_errors".to_string(),

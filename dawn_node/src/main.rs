@@ -598,6 +598,9 @@ async fn execute_command(
         "browser_network_requests" => {
             execute_browser_network_requests_command(runtime_state, envelope).await
         }
+        "browser_network_export" => {
+            execute_browser_network_export_command(runtime_state, envelope).await
+        }
         "browser_trace" => execute_browser_trace_command(runtime_state, envelope).await,
         "browser_trace_export" => {
             execute_browser_trace_export_command(runtime_state, envelope).await
@@ -4913,6 +4916,142 @@ async fn execute_browser_network_requests_command(
     }
 }
 
+async fn execute_browser_network_export_command(
+    runtime_state: &mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let session_id = resolve_browser_session_id(runtime_state, &envelope.payload);
+    let Some(session) = runtime_state.browser_sessions.get(&session_id).cloned() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "browser session `{session_id}` not found. Run browser_navigate first."
+            )),
+        };
+    };
+    let Some(managed) = session.managed.clone() else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "browser_network_export requires a managed browser session. Run browser_navigate with payload.managed=true first."
+                    .to_string(),
+            ),
+        };
+    };
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(100);
+    let requested_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let export_path = resolve_browser_network_export_path(requested_path, &session_id);
+
+    match collect_managed_browser_network_requests(&managed, limit).await {
+        Ok(network) => {
+            let encoded = match serde_json::to_vec_pretty(&network) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(format!(
+                            "failed to serialize managed browser network log: {error}"
+                        )),
+                    };
+                }
+            };
+            if let Some(parent) = export_path.parent() {
+                if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                    return CommandResultEnvelope {
+                        message_type: "command_result",
+                        command_id: envelope.command_id,
+                        status: "failed",
+                        result: None,
+                        error: Some(format!(
+                            "failed to create network export directory {}: {error}",
+                            parent.display()
+                        )),
+                    };
+                }
+            }
+            if let Err(error) = tokio::fs::write(&export_path, &encoded).await {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(format!(
+                        "failed to save managed browser network log to {}: {error}",
+                        export_path.display()
+                    )),
+                };
+            }
+            let page = match refresh_managed_browser(&managed).await {
+                Ok(page) => {
+                    let refreshed = preserve_browser_forward_history(
+                        build_managed_browser_session(
+                            session.client.clone(),
+                            managed.clone(),
+                            page,
+                            "network_export",
+                            session.history.clone(),
+                        ),
+                        &session,
+                    );
+                    let summary = browser_session_summary(&session_id, &refreshed);
+                    runtime_state
+                        .browser_sessions
+                        .insert(session_id.clone(), refreshed);
+                    summary
+                }
+                Err(_) => browser_session_summary(&session_id, &session),
+            };
+            set_active_browser_session(runtime_state, &session_id);
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "sessionId": session_id,
+                    "runtime": "managed",
+                    "action": "browser_network_export",
+                    "networkPath": export_path.display().to_string(),
+                    "bytesWritten": encoded.len(),
+                    "network": {
+                        "currentUrl": network.current_url,
+                        "navigationCount": network.navigation_count,
+                        "resourceCount": network.resource_count,
+                        "entryCount": network.entries.len(),
+                    },
+                    "page": page,
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 async fn execute_browser_trace_command(
     runtime_state: &mut NodeRuntimeState,
     envelope: GatewayCommandEnvelope,
@@ -7870,6 +8009,23 @@ fn resolve_browser_pdf_path(requested: Option<&str>, session_id: &str) -> PathBu
         });
     if path.extension().is_none() {
         path.set_extension("pdf");
+    }
+    path
+}
+
+fn resolve_browser_network_export_path(requested: Option<&str>, session_id: &str) -> PathBuf {
+    let mut path = requested
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::temp_dir().join(format!(
+                "dawn-browser-network-{}-{}.json",
+                session_id,
+                unix_timestamp_ms()
+            ))
+        });
+    if path.extension().is_none() {
+        path.set_extension("json");
     }
     path
 }
@@ -10847,6 +11003,7 @@ fn default_capabilities() -> Vec<String> {
         "browser_pdf".to_string(),
         "browser_console_messages".to_string(),
         "browser_network_requests".to_string(),
+        "browser_network_export".to_string(),
         "browser_trace".to_string(),
         "browser_trace_export".to_string(),
         "browser_errors".to_string(),
@@ -11978,6 +12135,18 @@ mod tests {
     }
 
     #[test]
+    fn resolves_browser_network_export_path_with_json_extension() {
+        let path = resolve_browser_network_export_path(
+            Some("artifacts/browser/network-log"),
+            "browser-default",
+        );
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
+    }
+
+    #[test]
     fn resolves_browser_trace_path_with_json_extension() {
         let path =
             resolve_browser_trace_path(Some("artifacts/browser/demo-trace"), "browser-default");
@@ -12103,6 +12272,11 @@ mod tests {
             capabilities
                 .iter()
                 .any(|value| value == "browser_network_requests")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "browser_network_export")
         );
         assert!(capabilities.iter().any(|value| value == "browser_trace"));
         assert!(

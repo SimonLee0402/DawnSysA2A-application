@@ -865,6 +865,7 @@ Supported node command types in the sample Rust node:
 - `browser_pdf`
 - `browser_console_messages`
 - `browser_network_requests`
+- `browser_network_export`
 - `browser_trace`
 - `browser_trace_export`
 - `browser_errors`
@@ -949,6 +950,7 @@ Device-facing node behavior:
 - `browser_pdf` renders the current managed browser tab to a local PDF file through the Chromium CDP print pipeline.
 - `browser_console_messages` reads recent console, script error, and unhandled-rejection messages captured inside a managed browser tab.
 - `browser_network_requests` reads recent managed-browser fetch/XHR captures plus navigation/resource timing entries so operators can inspect request URLs, methods, statuses, durations, protocol/size fields, content types, and bounded response previews when the page runtime exposes them.
+- `browser_network_export` saves that managed-browser network log as a local JSON artifact so operators can archive one sampling run or attach it to debugging workflows.
 - `browser_trace` returns a time-ordered trace that merges managed-browser fetch/XHR lifecycle events with recent console activity, giving operators a lightweight event stream without requiring a separate tracing backend.
 - `browser_trace_export` saves that merged managed-browser trace as a local JSON artifact so operators or agents can attach, diff, or archive one trace run without building a separate export pipeline.
 - `browser_errors` aggregates console errors plus failed or suspicious managed-browser network activity into one result so operators can inspect a tab's current fault surface without manually correlating multiple commands.
