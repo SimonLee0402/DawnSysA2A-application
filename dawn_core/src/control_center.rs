@@ -93,6 +93,7 @@ async fn dashboard() -> Html<&'static str> {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Dawn 网关控制台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2369d6ff'/%3E%3Cstop offset='100%25' stop-color='%23ffd77b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%2308111a'/%3E%3Cpath d='M15 46V18h11.5c8.8 0 15.2 5.5 15.2 13.8S35.3 46 26.5 46H15zm8.4-7.1h2.6c4.4 0 7.2-2.7 7.2-7.1 0-4.4-2.8-7.1-7.2-7.1h-2.6v14.2z' fill='url(%23g)'/%3E%3Ccircle cx='47' cy='21' r='5' fill='%238ff7ca'/%3E%3C/svg%3E" />
   <style>
     :root {
       --bg: #08111a;
@@ -1445,6 +1446,7 @@ async fn dashboard() -> Html<&'static str> {
       browser_open: { url: "https://example.com", approvalRequired: true },
       browser_search: { query: "Dawn browser control MVP", engine: "google", approvalRequired: true },
       desktop_open: { target: "notepad", args: [], approvalRequired: true },
+      desktop_notification: { title: "Dawn Node", subtitle: "Agent task", message: "Desktop notification pipeline is live.", urgency: "info", durationMs: 4000, approvalRequired: true },
       desktop_clipboard_set: { text: "hello from dawn", approvalRequired: true },
       desktop_type_text: { text: "hello from dawn", delayMs: 250, approvalRequired: true },
       desktop_key_press: { keys: "CTRL+L", delayMs: 150, approvalRequired: true },
@@ -1524,6 +1526,7 @@ async fn dashboard() -> Html<&'static str> {
       browser_open: "Open an HTTP(S) URL in the default browser",
       browser_search: "Launch a browser search via the default browser",
       desktop_open: "Open a local app, file, folder, or URL on the host desktop",
+      desktop_notification: "Emit a host-level desktop notification through the local operating system",
       desktop_clipboard_set: "Write text into the host clipboard",
       desktop_type_text: "Type text into the currently focused desktop window",
       desktop_key_press: "Send a keyboard shortcut to the currently focused desktop window",
@@ -3596,7 +3599,7 @@ async fn dashboard() -> Html<&'static str> {
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJson("/api/gateway/agent-cards/settlements"),
-        fetchJson("/api/gateway/agent-cards/"),
+        fetchJson("/api/gateway/agent-cards"),
         fetchJson("/api/gateway/ingress/events?limit=8"),
         fetchJson("/api/gateway/approvals?status=pending"),
         fetchJson("/api/gateway/agent-cards/invocations"),
@@ -3623,7 +3626,9 @@ async fn dashboard() -> Html<&'static str> {
       const rollouts = await Promise.all(
         nodes.slice(0, 8).map(async (node) => ({
           nodeId: node.nodeId,
-          rollout: await fetchJsonOptional(`/api/gateway/control-plane/nodes/${encodeURIComponent(node.nodeId)}/rollout`)
+          rollout: node.connected
+            ? await fetchJsonOptional(`/api/gateway/control-plane/nodes/${encodeURIComponent(node.nodeId)}/rollout`)
+            : null
         }))
       );
       const selectedNodeId =

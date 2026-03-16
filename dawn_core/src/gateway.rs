@@ -86,6 +86,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "openai",
             "anthropic",
             "google",
+            "bedrock",
+            "cloudflare_ai_gateway",
             "openrouter",
             "groq",
             "together",

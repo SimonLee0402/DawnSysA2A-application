@@ -634,6 +634,7 @@ async fn execute_command(
         "browser_open" => execute_browser_open_command(envelope).await,
         "browser_search" => execute_browser_search_command(envelope).await,
         "desktop_open" => execute_desktop_open_command(envelope).await,
+        "desktop_notification" => execute_desktop_notification_command(envelope).await,
         "desktop_clipboard_set" => execute_desktop_clipboard_set_command(envelope).await,
         "desktop_type_text" => execute_desktop_type_text_command(envelope).await,
         "desktop_key_press" => execute_desktop_key_press_command(envelope).await,
@@ -1286,6 +1287,103 @@ async fn execute_desktop_open_command(envelope: GatewayCommandEnvelope) -> Comma
                 "launcher": result.launcher,
                 "mode": result.mode,
                 "pid": result.pid,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_notification_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let title = envelope
+        .payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Dawn Node")
+        .to_string();
+    let message = envelope
+        .payload
+        .get("message")
+        .or_else(|| envelope.payload.get("text"))
+        .or_else(|| envelope.payload.get("body"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if message.is_empty() {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(
+                "desktop_notification requires payload.message, payload.text, or payload.body"
+                    .to_string(),
+            ),
+        };
+    }
+    let subtitle = envelope
+        .payload
+        .get("subtitle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let app_name = envelope
+        .payload
+        .get("appName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Dawn Node")
+        .to_string();
+    let urgency = normalize_desktop_notification_urgency(
+        envelope
+            .payload
+            .get("urgency")
+            .and_then(Value::as_str)
+            .unwrap_or("info"),
+    );
+    let duration_ms = envelope
+        .payload
+        .get("durationMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(4_000)
+        .max(1_000);
+
+    match show_desktop_notification(
+        &title,
+        &subtitle,
+        &message,
+        &app_name,
+        &urgency,
+        duration_ms,
+    )
+    .await
+    {
+        Ok(launcher) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "desktop_notification",
+                "title": title,
+                "subtitle": subtitle,
+                "appName": app_name,
+                "urgency": urgency,
+                "durationMs": duration_ms,
+                "launcher": launcher,
+                "messageLength": message.chars().count(),
             })),
             error: None,
         },
@@ -9405,6 +9503,107 @@ async fn set_desktop_clipboard(text: &str) -> anyhow::Result<&'static str> {
     }
 }
 
+async fn show_desktop_notification(
+    title: &str,
+    subtitle: &str,
+    message: &str,
+    app_name: &str,
+    urgency: &str,
+    duration_ms: u64,
+) -> anyhow::Result<&'static str> {
+    if cfg!(target_os = "windows") {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$notify = New-Object System.Windows.Forms.NotifyIcon
+$notify.Icon = switch ($env:DAWN_NOTIFY_URGENCY) {
+    'warning' { [System.Drawing.SystemIcons]::Warning }
+    'error' { [System.Drawing.SystemIcons]::Error }
+    default { [System.Drawing.SystemIcons]::Information }
+}
+$notify.Text = if ([string]::IsNullOrWhiteSpace($env:DAWN_NOTIFY_APP_NAME)) { 'Dawn Node' } else { $env:DAWN_NOTIFY_APP_NAME.Substring(0, [Math]::Min($env:DAWN_NOTIFY_APP_NAME.Length, 63)) }
+$notify.BalloonTipTitle = if ([string]::IsNullOrWhiteSpace($env:DAWN_NOTIFY_SUBTITLE)) { $env:DAWN_NOTIFY_TITLE } else { '{0} [{1}]' -f $env:DAWN_NOTIFY_TITLE, $env:DAWN_NOTIFY_SUBTITLE }
+$notify.BalloonTipText = $env:DAWN_NOTIFY_MESSAGE
+$notify.Visible = $true
+$notify.ShowBalloonTip([Math]::Max([int]$env:DAWN_NOTIFY_DURATION_MS, 1000))
+Start-Sleep -Milliseconds ([Math]::Max([int]$env:DAWN_NOTIFY_DURATION_MS, 1500))
+$notify.Dispose()
+"#;
+        let mut command = Command::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(script)
+            .env("DAWN_NOTIFY_TITLE", title)
+            .env("DAWN_NOTIFY_SUBTITLE", subtitle)
+            .env("DAWN_NOTIFY_MESSAGE", message)
+            .env("DAWN_NOTIFY_APP_NAME", app_name)
+            .env("DAWN_NOTIFY_URGENCY", urgency)
+            .env("DAWN_NOTIFY_DURATION_MS", duration_ms.to_string());
+        let status = command.status().await?;
+        if !status.success() {
+            anyhow::bail!(
+                "desktop notification exited with status {:?}",
+                status.code()
+            );
+        }
+        return Ok("powershell:System.Windows.Forms.NotifyIcon");
+    }
+    if cfg!(target_os = "macos") {
+        let script = if subtitle.is_empty() {
+            "display notification (system attribute \"DAWN_NOTIFY_MESSAGE\") with title (system attribute \"DAWN_NOTIFY_TITLE\")"
+        } else {
+            "display notification (system attribute \"DAWN_NOTIFY_MESSAGE\") with title (system attribute \"DAWN_NOTIFY_TITLE\") subtitle (system attribute \"DAWN_NOTIFY_SUBTITLE\")"
+        };
+        let mut command = Command::new("osascript");
+        command
+            .arg("-e")
+            .arg(script)
+            .env("DAWN_NOTIFY_TITLE", title)
+            .env("DAWN_NOTIFY_SUBTITLE", subtitle)
+            .env("DAWN_NOTIFY_MESSAGE", message);
+        let status = command.status().await?;
+        if !status.success() {
+            anyhow::bail!(
+                "desktop notification exited with status {:?}",
+                status.code()
+            );
+        }
+        return Ok("osascript:display notification");
+    }
+    if cfg!(target_os = "linux") {
+        let urgency_flag = match urgency {
+            "error" => "critical",
+            "warning" => "normal",
+            _ => "low",
+        };
+        let body = if subtitle.is_empty() {
+            message.to_string()
+        } else {
+            format!("{subtitle}\n{message}")
+        };
+        let status = Command::new("notify-send")
+            .arg("-u")
+            .arg(urgency_flag)
+            .arg("-t")
+            .arg(duration_ms.to_string())
+            .arg("-a")
+            .arg(app_name)
+            .arg(title)
+            .arg(body)
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!(
+                "desktop notification exited with status {:?}",
+                status.code()
+            );
+        }
+        return Ok("notify-send");
+    }
+    anyhow::bail!("desktop_notification is not implemented for this operating system")
+}
+
 async fn send_desktop_text(text: &str, delay_ms: u64) -> anyhow::Result<&'static str> {
     if cfg!(target_os = "windows") {
         let send_keys = encode_windows_send_keys_text(text);
@@ -9461,6 +9660,14 @@ fn encode_windows_send_keys_text(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn normalize_desktop_notification_urgency(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "warn" | "warning" => "warning".to_string(),
+        "err" | "error" | "critical" => "error".to_string(),
+        _ => "info".to_string(),
+    }
 }
 
 fn build_windows_send_keys_combo(keys: &str) -> anyhow::Result<String> {
@@ -11188,6 +11395,7 @@ fn default_capabilities() -> Vec<String> {
         "browser_open".to_string(),
         "browser_search".to_string(),
         "desktop_open".to_string(),
+        "desktop_notification".to_string(),
         "desktop_clipboard_set".to_string(),
         "desktop_type_text".to_string(),
         "desktop_key_press".to_string(),
@@ -12520,6 +12728,11 @@ mod tests {
         assert!(
             capabilities
                 .iter()
+                .any(|value| value == "desktop_notification")
+        );
+        assert!(
+            capabilities
+                .iter()
                 .any(|value| value == "desktop_clipboard_set")
         );
         assert!(
@@ -12617,6 +12830,16 @@ mod tests {
             capabilities
                 .iter()
                 .any(|value| value == "desktop_accessibility_set_value")
+        );
+    }
+
+    #[test]
+    fn normalizes_desktop_notification_urgency_variants() {
+        assert_eq!(normalize_desktop_notification_urgency("warning"), "warning");
+        assert_eq!(normalize_desktop_notification_urgency("critical"), "error");
+        assert_eq!(
+            normalize_desktop_notification_urgency("anything-else"),
+            "info"
         );
     }
 

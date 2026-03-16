@@ -1774,6 +1774,46 @@ fn connector_prompt_specs(is_models: bool, target: &str) -> Vec<SetupFieldSpec> 
                 default_value: None,
             },
         ],
+        (true, "bedrock") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "Runtime endpoint, /openai/v1 base URL, or /chat/completions URL",
+                required: true,
+                default_value: Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::ApiKey,
+                label: "API key",
+                required: true,
+                default_value: None,
+            },
+        ],
+        (true, "cloudflare_ai_gateway") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::ApiKey,
+                label: "Upstream API key",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::AppId,
+                label: "Cloudflare account ID",
+                required: false,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::EndpointId,
+                label: "Gateway ID",
+                required: false,
+                default_value: Some("default"),
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "Gateway base URL or /chat/completions URL (optional)",
+                required: false,
+                default_value: None,
+            },
+        ],
         (true, "litellm") => vec![
             SetupFieldSpec {
                 kind: SetupFieldKind::BaseUrl,
@@ -1903,7 +1943,26 @@ fn connector_existing_value(
         (true, "openai", SetupFieldKind::ApiKey) => &["OPENAI_API_KEY"],
         (true, "anthropic", SetupFieldKind::ApiKey) => &["ANTHROPIC_API_KEY"],
         (true, "google", SetupFieldKind::ApiKey) => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        (true, "bedrock", SetupFieldKind::ApiKey) => &["BEDROCK_API_KEY"],
+        (true, "bedrock", SetupFieldKind::BaseUrl) => &[
+            "BEDROCK_CHAT_COMPLETIONS_URL",
+            "BEDROCK_BASE_URL",
+            "BEDROCK_RUNTIME_ENDPOINT",
+        ],
         (true, "openrouter", SetupFieldKind::ApiKey) => &["OPENROUTER_API_KEY"],
+        (true, "cloudflare_ai_gateway", SetupFieldKind::ApiKey) => {
+            &["CLOUDFLARE_AI_GATEWAY_API_KEY"]
+        }
+        (true, "cloudflare_ai_gateway", SetupFieldKind::AppId) => {
+            &["CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID"]
+        }
+        (true, "cloudflare_ai_gateway", SetupFieldKind::EndpointId) => {
+            &["CLOUDFLARE_AI_GATEWAY_ID"]
+        }
+        (true, "cloudflare_ai_gateway", SetupFieldKind::BaseUrl) => &[
+            "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+            "CLOUDFLARE_AI_GATEWAY_BASE_URL",
+        ],
         (true, "groq", SetupFieldKind::ApiKey) => &["GROQ_API_KEY"],
         (true, "together", SetupFieldKind::ApiKey) => &["TOGETHER_API_KEY"],
         (true, "vllm", SetupFieldKind::ApiKey) => &["VLLM_API_KEY"],
@@ -1982,7 +2041,27 @@ fn connector_requirement_groups(is_models: bool, target: &str) -> Vec<Vec<&'stat
         (true, "openai") => vec![vec!["OPENAI_API_KEY"]],
         (true, "anthropic") => vec![vec!["ANTHROPIC_API_KEY"]],
         (true, "google") => vec![vec!["GEMINI_API_KEY"], vec!["GOOGLE_API_KEY"]],
+        (true, "bedrock") => vec![
+            vec!["BEDROCK_API_KEY", "BEDROCK_CHAT_COMPLETIONS_URL"],
+            vec!["BEDROCK_API_KEY", "BEDROCK_BASE_URL"],
+            vec!["BEDROCK_API_KEY", "BEDROCK_RUNTIME_ENDPOINT"],
+        ],
         (true, "openrouter") => vec![vec!["OPENROUTER_API_KEY"]],
+        (true, "cloudflare_ai_gateway") => vec![
+            vec![
+                "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+            ],
+            vec![
+                "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                "CLOUDFLARE_AI_GATEWAY_BASE_URL",
+            ],
+            vec![
+                "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                "CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID",
+                "CLOUDFLARE_AI_GATEWAY_ID",
+            ],
+        ],
         (true, "groq") => vec![vec!["GROQ_API_KEY"]],
         (true, "together") => vec![vec!["TOGETHER_API_KEY"]],
         (true, "vllm") => vec![vec!["VLLM_BASE_URL"]],
@@ -2036,6 +2115,7 @@ fn connector_is_live_configured(connectors_status: &Value, target: &str) -> bool
 
 fn connector_configured_key(target: &str) -> &str {
     match target {
+        "cloudflare_ai_gateway" => "cloudflareAiGateway",
         "google_chat" => "googleChat",
         "wecom_bot" => "wecomBot",
         "wechat_official_account" => "wechatOfficialAccount",
@@ -4370,6 +4450,11 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
         match normalized.as_str() {
             "claude" => "anthropic".to_string(),
             "gemini" => "google".to_string(),
+            "aws-bedrock" | "aws_bedrock" => "bedrock".to_string(),
+            "cloudflare-gateway"
+            | "cloudflare_gateway"
+            | "cloudflare-ai-gateway"
+            | "cloudflare_ai_gateway" => "cloudflare_ai_gateway".to_string(),
             "grok" => "groq".to_string(),
             "togetherai" => "together".to_string(),
             "openai-local" | "local-openai" => "vllm".to_string(),
@@ -4409,6 +4494,54 @@ fn connector_secret_pairs(
         (true, "google") => {
             insert_if_some(&mut pairs, "GEMINI_API_KEY", args.api_key.as_deref());
             insert_if_some(&mut pairs, "GOOGLE_API_KEY", args.api_key.as_deref());
+        }
+        (true, "bedrock") => {
+            insert_if_some(&mut pairs, "BEDROCK_API_KEY", args.api_key.as_deref());
+            if let Some(base_or_url) = args.base_url.as_deref() {
+                if base_or_url.contains("/chat/completions") {
+                    insert_if_some(
+                        &mut pairs,
+                        "BEDROCK_CHAT_COMPLETIONS_URL",
+                        Some(base_or_url),
+                    );
+                } else if base_or_url.contains("/openai/v1") {
+                    insert_if_some(&mut pairs, "BEDROCK_BASE_URL", Some(base_or_url));
+                } else {
+                    insert_if_some(&mut pairs, "BEDROCK_RUNTIME_ENDPOINT", Some(base_or_url));
+                }
+            }
+        }
+        (true, "cloudflare_ai_gateway") => {
+            insert_if_some(
+                &mut pairs,
+                "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                args.api_key.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID",
+                args.app_id.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "CLOUDFLARE_AI_GATEWAY_ID",
+                args.endpoint_id.as_deref(),
+            );
+            if let Some(base_or_url) = args.base_url.as_deref() {
+                if base_or_url.contains("/chat/completions") {
+                    insert_if_some(
+                        &mut pairs,
+                        "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+                        Some(base_or_url),
+                    );
+                } else {
+                    insert_if_some(
+                        &mut pairs,
+                        "CLOUDFLARE_AI_GATEWAY_BASE_URL",
+                        Some(base_or_url),
+                    );
+                }
+            }
         }
         (true, "openrouter") => {
             insert_if_some(&mut pairs, "OPENROUTER_API_KEY", args.api_key.as_deref());
@@ -4823,6 +4956,7 @@ fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
         "browser_open".to_string(),
         "browser_search".to_string(),
         "desktop_open".to_string(),
+        "desktop_notification".to_string(),
         "desktop_clipboard_set".to_string(),
         "desktop_type_text".to_string(),
         "desktop_key_press".to_string(),
@@ -4946,8 +5080,9 @@ mod tests {
     use super::{
         ApprovalRequestSummary, PaymentRecordSummary, build_ap2_signature_payload,
         build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
-        extract_text_from_value, find_pending_approval_record, format_payment_approval_summary,
-        normalize_connector_target, resolve_ap2_mcu_seed_hex, sign_ap2_payload, update_values,
+        default_requested_capabilities, extract_text_from_value, find_pending_approval_record,
+        format_payment_approval_summary, normalize_connector_target, resolve_ap2_mcu_seed_hex,
+        sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
     use serde_json::json;
@@ -5121,6 +5256,11 @@ mod tests {
     #[test]
     fn normalizes_connector_aliases_for_new_targets() {
         assert_eq!(normalize_connector_target(true, "gemini"), "google");
+        assert_eq!(normalize_connector_target(true, "aws-bedrock"), "bedrock");
+        assert_eq!(
+            normalize_connector_target(true, "cloudflare-ai-gateway"),
+            "cloudflare_ai_gateway"
+        );
         assert_eq!(normalize_connector_target(true, "grok"), "groq");
         assert_eq!(normalize_connector_target(true, "togetherai"), "together");
         assert_eq!(normalize_connector_target(true, "local-openai"), "vllm");
@@ -5141,7 +5281,18 @@ mod tests {
     }
 
     #[test]
-    fn builds_secret_pairs_for_google_openrouter_groq_together_vllm_mistral_nvidia_and_litellm() {
+    fn requested_capabilities_include_desktop_notification() {
+        let capabilities = default_requested_capabilities(false);
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_notification")
+        );
+    }
+
+    #[test]
+    fn builds_secret_pairs_for_google_bedrock_cloudflare_openrouter_groq_together_vllm_mistral_nvidia_and_litellm()
+     {
         let google_args = super::ConnectorConnectArgs {
             target: "google".to_string(),
             gateway: None,
@@ -5164,6 +5315,67 @@ mod tests {
         assert_eq!(
             google_pairs.get("GOOGLE_API_KEY").map(String::as_str),
             Some("google-key")
+        );
+
+        let bedrock_args = super::ConnectorConnectArgs {
+            target: "bedrock".to_string(),
+            gateway: None,
+            api_key: Some("bedrock-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://bedrock-runtime.us-west-2.amazonaws.com".to_string()),
+            env: Vec::new(),
+        };
+        let bedrock_pairs =
+            connector_secret_pairs(true, "bedrock", &bedrock_args).expect("bedrock secrets");
+        assert_eq!(
+            bedrock_pairs.get("BEDROCK_API_KEY").map(String::as_str),
+            Some("bedrock-key")
+        );
+        assert_eq!(
+            bedrock_pairs
+                .get("BEDROCK_RUNTIME_ENDPOINT")
+                .map(String::as_str),
+            Some("https://bedrock-runtime.us-west-2.amazonaws.com")
+        );
+
+        let cloudflare_gateway_args = super::ConnectorConnectArgs {
+            target: "cloudflare_ai_gateway".to_string(),
+            gateway: None,
+            api_key: Some("openai-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: Some("cf-account".to_string()),
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: Some("gateway-main".to_string()),
+            base_url: None,
+            env: Vec::new(),
+        };
+        let cloudflare_gateway_pairs =
+            connector_secret_pairs(true, "cloudflare_ai_gateway", &cloudflare_gateway_args)
+                .expect("cloudflare ai gateway secrets");
+        assert_eq!(
+            cloudflare_gateway_pairs
+                .get("CLOUDFLARE_AI_GATEWAY_API_KEY")
+                .map(String::as_str),
+            Some("openai-key")
+        );
+        assert_eq!(
+            cloudflare_gateway_pairs
+                .get("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID")
+                .map(String::as_str),
+            Some("cf-account")
+        );
+        assert_eq!(
+            cloudflare_gateway_pairs
+                .get("CLOUDFLARE_AI_GATEWAY_ID")
+                .map(String::as_str),
+            Some("gateway-main")
         );
 
         let openrouter_args = super::ConnectorConnectArgs {

@@ -27,6 +27,8 @@ struct ConfiguredConnectors {
     openai: bool,
     anthropic: bool,
     google: bool,
+    bedrock: bool,
+    cloudflare_ai_gateway: bool,
     openrouter: bool,
     groq: bool,
     together: bool,
@@ -163,6 +165,8 @@ pub async fn execute_model_connector(
         "openai" => execute_openai_response(request).await,
         "anthropic" => execute_anthropic_response(request).await,
         "google" => execute_google_response(request).await,
+        "bedrock" => execute_bedrock_response(request).await,
+        "cloudflare_ai_gateway" => execute_cloudflare_ai_gateway_response(request).await,
         "openrouter" => execute_openrouter_response(request).await,
         "groq" => execute_groq_response(request).await,
         "together" => execute_together_response(request).await,
@@ -281,6 +285,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/model/openai/respond", post(openai_respond))
         .route("/model/anthropic/respond", post(anthropic_respond))
         .route("/model/google/respond", post(google_respond))
+        .route("/model/bedrock/respond", post(bedrock_respond))
+        .route(
+            "/model/cloudflare-ai-gateway/respond",
+            post(cloudflare_ai_gateway_respond),
+        )
         .route("/model/openrouter/respond", post(openrouter_respond))
         .route("/model/groq/respond", post(groq_respond))
         .route("/model/together/respond", post(together_respond))
@@ -319,6 +328,19 @@ async fn status() -> Json<ConnectorStatusReport> {
             openai: std::env::var("OPENAI_API_KEY").is_ok(),
             anthropic: std::env::var("ANTHROPIC_API_KEY").is_ok(),
             google: resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]).is_some(),
+            bedrock: resolve_first_present_env(&["BEDROCK_API_KEY"]).is_some()
+                && (std::env::var("BEDROCK_CHAT_COMPLETIONS_URL").is_ok()
+                    || std::env::var("BEDROCK_BASE_URL").is_ok()
+                    || std::env::var("BEDROCK_RUNTIME_ENDPOINT").is_ok()),
+            cloudflare_ai_gateway: resolve_first_present_env(&[
+                "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                "OPENAI_API_KEY",
+            ])
+            .is_some()
+                && (std::env::var("CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok()
+                    || std::env::var("CLOUDFLARE_AI_GATEWAY_BASE_URL").is_ok()
+                    || (std::env::var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID").is_ok()
+                        && std::env::var("CLOUDFLARE_AI_GATEWAY_ID").is_ok())),
             openrouter: std::env::var("OPENROUTER_API_KEY").is_ok(),
             groq: std::env::var("GROQ_API_KEY").is_ok(),
             together: std::env::var("TOGETHER_API_KEY").is_ok(),
@@ -367,6 +389,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "google",
                 region: "global",
                 integration_mode: "live_generate_content",
+            },
+            ModelProviderSupport {
+                provider: "bedrock",
+                region: "global",
+                integration_mode: "live_openai_compatible_bedrock",
+            },
+            ModelProviderSupport {
+                provider: "cloudflare_ai_gateway",
+                region: "global",
+                integration_mode: "live_openai_compatible_gateway",
             },
             ModelProviderSupport {
                 provider: "openrouter",
@@ -534,6 +566,26 @@ async fn google_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_google_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn bedrock_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_bedrock_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn cloudflare_ai_gateway_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_cloudflare_ai_gateway_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -974,6 +1026,28 @@ async fn execute_google_response(
     })
 }
 
+async fn execute_bedrock_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let endpoint = resolve_openai_style_endpoint(
+        &[
+            "BEDROCK_CHAT_COMPLETIONS_URL",
+            "BEDROCK_BASE_URL",
+            "BEDROCK_RUNTIME_ENDPOINT",
+        ],
+        "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
+        "/openai/v1/chat/completions",
+    );
+    execute_openai_compatible_chat_response_with_custom_endpoint(
+        "bedrock",
+        request,
+        resolve_first_present_env(&["BEDROCK_MODEL"]).as_deref(),
+        &["BEDROCK_API_KEY"],
+        &endpoint,
+    )
+    .await
+}
+
 async fn execute_openrouter_response(
     request: OpenAIResponseRequest,
 ) -> anyhow::Result<ModelResponseResult> {
@@ -1187,6 +1261,22 @@ async fn execute_litellm_response(
         output_text: extract_chat_completion_text(&raw_response),
         raw_response: Some(raw_response),
     })
+}
+
+async fn execute_cloudflare_ai_gateway_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let endpoint = resolve_cloudflare_ai_gateway_endpoint()?;
+    execute_openai_compatible_chat_response_with_custom_endpoint(
+        "cloudflare_ai_gateway",
+        request,
+        resolve_first_present_env(&["CLOUDFLARE_AI_GATEWAY_MODEL", "OPENAI_MODEL"])
+            .as_deref()
+            .or(Some("gpt-4.1-mini")),
+        &["CLOUDFLARE_AI_GATEWAY_API_KEY", "OPENAI_API_KEY"],
+        endpoint.as_str(),
+    )
+    .await
 }
 
 async fn execute_deepseek_response(
@@ -1686,12 +1776,34 @@ async fn execute_openai_compatible_chat_response(
     endpoint_env_var: Option<&str>,
     default_endpoint: &str,
 ) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response_with_custom_endpoint(
+        provider,
+        request,
+        Some(default_model),
+        api_key_env_vars,
+        &resolve_endpoint(endpoint_env_var, default_endpoint),
+    )
+    .await
+}
+
+async fn execute_openai_compatible_chat_response_with_custom_endpoint(
+    provider: &'static str,
+    request: OpenAIResponseRequest,
+    default_model: Option<&str>,
+    api_key_env_vars: &[&str],
+    endpoint: &str,
+) -> anyhow::Result<ModelResponseResult> {
     let OpenAIResponseRequest {
         input,
         model,
         instructions,
     } = request;
-    let model = model.unwrap_or_else(|| default_model.to_string());
+    let model = match model {
+        Some(model) => model,
+        None => default_model.map(str::to_string).ok_or_else(|| {
+            anyhow::anyhow!("{provider} requires an explicit model or configured default model")
+        })?,
+    };
     let Some(api_key) = resolve_first_present_env(api_key_env_vars) else {
         let env_names = api_key_env_vars.join(" or ");
         return Ok(ModelResponseResult {
@@ -1704,7 +1816,6 @@ async fn execute_openai_compatible_chat_response(
             raw_response: None,
         });
     };
-    let endpoint = resolve_endpoint(endpoint_env_var, default_endpoint);
 
     info!("Dispatching live {provider} chat completion request through gateway connector");
     let body = json!({
@@ -1713,7 +1824,7 @@ async fn execute_openai_compatible_chat_response(
         "stream": false
     });
     let response = Client::new()
-        .post(&endpoint)
+        .post(endpoint)
         .bearer_auth(api_key)
         .json(&body)
         .send()
@@ -1732,6 +1843,56 @@ async fn execute_openai_compatible_chat_response(
         output_text: extract_chat_completion_text(&raw_response),
         raw_response: Some(raw_response),
     })
+}
+
+fn resolve_openai_style_endpoint(
+    env_vars: &[&str],
+    default_endpoint: &str,
+    suffix: &str,
+) -> String {
+    resolve_first_present_env(env_vars)
+        .map(|value| {
+            let trimmed = value.trim().trim_end_matches('/');
+            if trimmed.ends_with("/chat/completions") {
+                trimmed.to_string()
+            } else {
+                format!("{trimmed}{suffix}")
+            }
+        })
+        .unwrap_or_else(|| default_endpoint.to_string())
+}
+
+fn resolve_cloudflare_ai_gateway_endpoint() -> anyhow::Result<String> {
+    if let Ok(endpoint) = std::env::var("CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL") {
+        let trimmed = endpoint.trim().trim_end_matches('/').to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+    if let Ok(base_url) = std::env::var("CLOUDFLARE_AI_GATEWAY_BASE_URL") {
+        let trimmed = base_url.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return Ok(format!("{trimmed}/chat/completions"));
+        }
+    }
+    let account_id = std::env::var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID")
+        .map(|value| value.trim().to_string())
+        .ok();
+    let gateway_id = std::env::var("CLOUDFLARE_AI_GATEWAY_ID")
+        .map(|value| value.trim().to_string())
+        .ok();
+    match (account_id, gateway_id) {
+        (Some(account_id), Some(gateway_id))
+            if !account_id.is_empty() && !gateway_id.is_empty() =>
+        {
+            Ok(format!(
+                "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completions"
+            ))
+        }
+        _ => anyhow::bail!(
+            "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL or CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID + CLOUDFLARE_AI_GATEWAY_ID is required"
+        ),
+    }
 }
 
 fn build_wechat_official_account_payload(open_id: &str, text: &str) -> Value {
@@ -2029,7 +2190,8 @@ mod tests {
         build_matrix_send_endpoint, build_matrix_text_payload, build_qq_message_payload,
         build_wechat_official_account_payload, build_whatsapp_text_payload, extract_anthropic_text,
         extract_chat_completion_text, extract_google_text, extract_ollama_text,
-        extract_openai_text, normalize_qq_target_type,
+        extract_openai_text, normalize_qq_target_type, resolve_cloudflare_ai_gateway_endpoint,
+        resolve_openai_style_endpoint,
     };
 
     #[test]
@@ -2273,5 +2435,57 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(payload, json!({ "text": "hello" }));
+    }
+
+    #[test]
+    fn resolves_openai_style_endpoint_from_runtime_base() {
+        let endpoint = resolve_openai_style_endpoint(
+            &[],
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
+            "/openai/v1/chat/completions",
+        );
+        assert_eq!(
+            endpoint,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions"
+        );
+
+        let computed = {
+            unsafe {
+                std::env::set_var(
+                    "TEST_OPENAI_STYLE_BASE",
+                    "https://bedrock-runtime.us-west-2.amazonaws.com",
+                );
+            }
+            let value = resolve_openai_style_endpoint(
+                &["TEST_OPENAI_STYLE_BASE"],
+                "https://example.com/chat/completions",
+                "/openai/v1/chat/completions",
+            );
+            unsafe {
+                std::env::remove_var("TEST_OPENAI_STYLE_BASE");
+            }
+            value
+        };
+        assert_eq!(
+            computed,
+            "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn resolves_cloudflare_ai_gateway_endpoint_from_ids() {
+        unsafe {
+            std::env::set_var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID", "cf-account");
+            std::env::set_var("CLOUDFLARE_AI_GATEWAY_ID", "gateway-main");
+        }
+        let endpoint = resolve_cloudflare_ai_gateway_endpoint().expect("cloudflare endpoint");
+        unsafe {
+            std::env::remove_var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID");
+            std::env::remove_var("CLOUDFLARE_AI_GATEWAY_ID");
+        }
+        assert_eq!(
+            endpoint,
+            "https://gateway.ai.cloudflare.com/v1/cf-account/gateway-main/openai/chat/completions"
+        );
     }
 }

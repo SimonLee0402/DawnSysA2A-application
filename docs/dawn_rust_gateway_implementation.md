@@ -42,6 +42,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - OpenAI Responses API
     - Anthropic Messages API
     - Google Gemini GenerateContent API
+    - Amazon Bedrock OpenAI-compatible Chat Completions
+    - Cloudflare AI Gateway OpenAI-compatible Chat Completions
     - OpenRouter Chat Completions
     - Groq Chat Completions
     - Together Chat Completions
@@ -107,6 +109,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/model/openai/respond`
 - `POST /api/gateway/connectors/model/anthropic/respond`
 - `POST /api/gateway/connectors/model/google/respond`
+- `POST /api/gateway/connectors/model/bedrock/respond`
+- `POST /api/gateway/connectors/model/cloudflare-ai-gateway/respond`
 - `POST /api/gateway/connectors/model/openrouter/respond`
 - `POST /api/gateway/connectors/model/groq/respond`
 - `POST /api/gateway/connectors/model/together/respond`
@@ -287,7 +291,7 @@ Control Center:
 
 - `GET /console` serves a live dashboard for inbound chat, tasks, nodes, settlements, and agent cards.
 - the dashboard now includes an `Approval Center` feed for pending node-command and AP2 approvals.
-- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_profiles`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
+- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_profiles`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_notification`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
 - the current console visual direction is a liquid-glass operations deck rather than a plain admin table, and it now includes command template chips plus a full command-detail inspector for recent node results.
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
 - the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
@@ -928,6 +932,7 @@ Supported node command types in the sample Rust node:
 - `browser_open`
 - `browser_search`
 - `desktop_open`
+- `desktop_notification`
 - `desktop_clipboard_set`
 - `desktop_type_text`
 - `desktop_key_press`
@@ -1015,6 +1020,7 @@ Device-facing node behavior:
 - `browser_search` builds a search URL for `google`, `bing`, `duckduckgo`, or `baidu` and opens it in the default browser.
 - the current browser stack now has two tiers: lightweight HTTP + DOM sessions for cookie-aware fetch/form/download flows, and a visible managed-browser tier for lifecycle/status control, screenshot/PDF capture, cookie/storage inspection, storage mutation, request-header control, offline/geolocation/device emulation, and JS-driven click/type/evaluate/wait/dialog/key/upload/download actions, now with basic managed-session console capture, bounded response-preview network visibility, merged console+network trace output, aggregated error reporting, and shared-process tab/window creation. It still does not yet expose full Playwright-class CDP event streaming or exportable trace-file parity.
 - `desktop_open` launches a local application, file, folder, or URL on the host machine and returns the launcher plus spawned process identifier when available.
+- `desktop_notification` emits a host-level desktop notification using platform-native delivery (`NotifyIcon` balloon tip on Windows, Notification Center on macOS, `notify-send` on Linux) so a user or operator can receive a local prompt outside the browser.
 - `desktop_clipboard_set` writes text into the host clipboard; it currently supports Windows and macOS.
 - `desktop_type_text` sends text to the currently focused desktop window; it currently uses Windows `WScript.Shell.SendKeys`.
 - `desktop_key_press` sends a keyboard shortcut such as `CTRL+L` or `ALT+TAB` to the currently focused desktop window; it currently uses Windows `WScript.Shell.SendKeys`.
