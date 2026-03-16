@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    io::{self, Write},
+};
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
@@ -34,6 +37,7 @@ enum Commands {
     Run,
     Login(LoginArgs),
     Onboard(OnboardArgs),
+    Setup(SetupArgs),
     Doctor(DoctorArgs),
     Logout,
     Status,
@@ -93,6 +97,42 @@ struct OnboardArgs {
     allow_shell: bool,
     #[arg(long)]
     no_claim: bool,
+}
+
+#[derive(Args)]
+struct SetupArgs {
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long, default_value = "dawn-dev-bootstrap")]
+    bootstrap_token: String,
+    #[arg(long)]
+    operator_name: Option<String>,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[arg(long)]
+    tenant_id: Option<String>,
+    #[arg(long)]
+    project_id: Option<String>,
+    #[arg(long)]
+    region: Option<String>,
+    #[arg(long)]
+    model: Vec<String>,
+    #[arg(long)]
+    channel: Vec<String>,
+    #[arg(long)]
+    skill: Vec<String>,
+    #[arg(long)]
+    federated_skills: bool,
+    #[arg(long)]
+    allow_unsigned_skills: bool,
+    #[arg(long)]
+    allow_shell: bool,
+    #[arg(long)]
+    no_claim: bool,
+    #[arg(long)]
+    yes: bool,
+    #[arg(long)]
+    env: Vec<String>,
 }
 
 #[derive(Args)]
@@ -816,6 +856,34 @@ struct SignedAp2Payload {
     mcu_signature: String,
 }
 
+#[derive(Debug, Clone)]
+struct SetupSkillCandidate {
+    skill_id: String,
+    version: String,
+    federated: bool,
+    label: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SetupFieldKind {
+    ApiKey,
+    AccessToken,
+    WebhookUrl,
+    AppId,
+    AppSecret,
+    ClientSecret,
+    EndpointId,
+    BaseUrl,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SetupFieldSpec {
+    kind: SetupFieldKind,
+    label: &'static str,
+    required: bool,
+    default_value: Option<&'static str>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MarketplaceCatalog {
@@ -1002,6 +1070,10 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
             onboard(args).await?;
             Ok(CliOutcome::Exit)
         }
+        Commands::Setup(args) => {
+            setup(args).await?;
+            Ok(CliOutcome::Exit)
+        }
         Commands::Doctor(args) => {
             doctor(args).await?;
             Ok(CliOutcome::Exit)
@@ -1184,6 +1256,868 @@ async fn onboard(args: OnboardArgs) -> anyhow::Result<()> {
     }
     println!("Profile saved: {}", path.display());
     Ok(())
+}
+
+async fn setup(args: SetupArgs) -> anyhow::Result<()> {
+    let mut profile = load_profile_or_default();
+    let gateway_base_url = resolve_gateway_base_url(args.gateway.as_deref(), &profile);
+    let client = GatewayClient::new(gateway_base_url.clone())?;
+    let interactive = !args.yes;
+    let parsed_env = parse_env_assignments(&args.env)?;
+    for (key, value) in parsed_env {
+        profile.connector_env.insert(key, value);
+    }
+
+    let default_operator = args
+        .operator_name
+        .clone()
+        .or_else(|| profile.operator_name.clone())
+        .unwrap_or_else(|| "desktop-operator".to_string());
+    let operator_name = prompt_setup_text(
+        "Operator name",
+        args.operator_name.as_deref(),
+        Some(default_operator.as_str()),
+        interactive,
+    )?;
+    let response = bootstrap_session(&client, &args.bootstrap_token, &operator_name).await?;
+
+    profile.gateway_base_url = Some(gateway_base_url.clone());
+    profile.session_token = Some(response.session_token.clone());
+    profile.operator_name = Some(response.session.operator_name.clone());
+    profile.bootstrap_mode = Some(response.bootstrap_mode.clone());
+
+    let workspace: WorkspaceProfileRecord =
+        client.get_json("/api/gateway/identity/workspace").await?;
+    let connectors_status: Value = client.get_json("/api/gateway/connectors/status").await?;
+    let supported_models =
+        connector_targets_from_status(&connectors_status, "supportedModelProviders", "provider");
+    let supported_channels =
+        connector_targets_from_status(&connectors_status, "supportedChatPlatforms", "platform");
+
+    println!("Bootstrapped operator session against {gateway_base_url}");
+    println!("Current workspace: {}", workspace.display_name);
+
+    let selected_models = choose_setup_targets(
+        "Default model providers",
+        &args.model,
+        &supported_models,
+        &workspace.default_model_providers,
+        true,
+        interactive,
+    )?;
+    let selected_channels = choose_setup_targets(
+        "Default chat platforms",
+        &args.channel,
+        &supported_channels,
+        &workspace.default_chat_platforms,
+        false,
+        interactive,
+    )?;
+
+    let mut staged_env = profile.connector_env.clone();
+    for target in &selected_models {
+        ensure_setup_connector_ready(
+            &mut staged_env,
+            &connectors_status,
+            true,
+            target,
+            interactive,
+            args.gateway.as_deref(),
+        )?;
+    }
+    for target in &selected_channels {
+        ensure_setup_connector_ready(
+            &mut staged_env,
+            &connectors_status,
+            false,
+            target,
+            interactive,
+            args.gateway.as_deref(),
+        )?;
+    }
+
+    let display_name = prompt_setup_text(
+        "Workspace display name",
+        args.display_name.as_deref(),
+        Some(workspace.display_name.as_str()),
+        interactive,
+    )?;
+    let tenant_id = prompt_setup_text(
+        "Tenant ID",
+        args.tenant_id.as_deref(),
+        Some(workspace.tenant_id.as_str()),
+        interactive,
+    )?;
+    let project_id = prompt_setup_text(
+        "Project ID",
+        args.project_id.as_deref(),
+        Some(workspace.project_id.as_str()),
+        interactive,
+    )?;
+    let region = prompt_setup_text(
+        "Region",
+        args.region.as_deref(),
+        Some(workspace.region.as_str()),
+        interactive,
+    )?;
+
+    let updated_workspace = upsert_workspace(
+        &client,
+        &response.session_token,
+        WorkspaceProfileUpdateRequest {
+            session_token: response.session_token.clone(),
+            tenant_id,
+            project_id,
+            display_name,
+            region,
+            default_model_providers: selected_models.clone(),
+            default_chat_platforms: selected_channels.clone(),
+            onboarding_status: Some("configured".to_string()),
+        },
+    )
+    .await?;
+
+    let selected_skills = if !args.skill.is_empty() {
+        args.skill
+            .iter()
+            .map(|skill_id| SetupSkillCandidate {
+                skill_id: skill_id.trim().to_string(),
+                version: "latest".to_string(),
+                federated: args.federated_skills,
+                label: skill_id.trim().to_string(),
+            })
+            .collect::<Vec<_>>()
+    } else if interactive {
+        prompt_setup_skills(&client).await?
+    } else {
+        Vec::new()
+    };
+
+    profile.connector_env = staged_env;
+    let mut installed_skills = Vec::new();
+    for skill in &selected_skills {
+        let install_args = SkillInstallArgs {
+            skill_id: skill.skill_id.clone(),
+            version: if skill.version == "latest" {
+                None
+            } else {
+                Some(skill.version.clone())
+            },
+            gateway: Some(gateway_base_url.clone()),
+            federated: skill.federated,
+            all: true,
+            allow_unsigned: args.allow_unsigned_skills,
+            no_activate: false,
+        };
+        install_skill(install_args).await?;
+        installed_skills.push(skill.label.clone());
+    }
+
+    let should_claim = if args.no_claim {
+        false
+    } else if interactive {
+        prompt_confirm("Issue a local node claim now", true)?
+    } else {
+        true
+    };
+    let allow_shell = if should_claim && interactive && !args.allow_shell {
+        prompt_confirm("Allow shell_exec capability for this node", false)?
+    } else {
+        args.allow_shell
+    };
+    if should_claim {
+        let node_id = profile
+            .node_id
+            .clone()
+            .unwrap_or_else(|| "node-local".to_string());
+        let node_name = profile
+            .node_name
+            .clone()
+            .unwrap_or_else(|| "Dawn Local Node".to_string());
+        let requested_capabilities = default_requested_capabilities(allow_shell);
+        let claim = issue_node_claim(
+            &client,
+            &response.session_token,
+            &node_id,
+            &node_name,
+            requested_capabilities.clone(),
+            1800,
+        )
+        .await?;
+        profile.node_id = Some(claim.claim.node_id.clone());
+        profile.node_name = Some(claim.claim.display_name.clone());
+        profile.claim_token = Some(claim.claim_token.clone());
+        profile.requested_capabilities = requested_capabilities;
+        println!(
+            "Issued node claim for {}. claimToken hint: {}",
+            claim.claim.node_id, claim.token_hint
+        );
+    }
+
+    let path = save_profile(&profile)?;
+    println!("Setup complete.");
+    println!(
+        "Workspace defaults: models = {}; channels = {}",
+        updated_workspace.default_model_providers.join(", "),
+        updated_workspace.default_chat_platforms.join(", ")
+    );
+    if installed_skills.is_empty() {
+        println!("Skills: <none installed during setup>");
+    } else {
+        println!("Skills installed: {}", installed_skills.join(", "));
+    }
+    println!("Profile saved: {}", path.display());
+    println!("Next: run `dawn-node gateway start` or `dawn-node run`.");
+    Ok(())
+}
+
+fn prompt_setup_text(
+    label: &str,
+    provided: Option<&str>,
+    default: Option<&str>,
+    interactive: bool,
+) -> anyhow::Result<String> {
+    if let Some(value) = provided.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(value.to_string());
+    }
+    if !interactive {
+        return default
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("{label} is required"));
+    }
+    loop {
+        let prompt = match default.filter(|value| !value.is_empty()) {
+            Some(default) => format!("{label} [{default}]: "),
+            None => format!("{label}: "),
+        };
+        let input = prompt_line(&prompt)?;
+        let value = if input.trim().is_empty() {
+            default.unwrap_or("")
+        } else {
+            input.trim()
+        };
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+        println!("{label} is required.");
+    }
+}
+
+fn prompt_confirm(label: &str, default: bool) -> anyhow::Result<bool> {
+    loop {
+        let suffix = if default { "[Y/n]" } else { "[y/N]" };
+        let input = prompt_line(&format!("{label} {suffix}: "))?;
+        let normalized = input.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Ok(default);
+        }
+        match normalized.as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => println!("Enter y or n."),
+        }
+    }
+}
+
+fn prompt_line(prompt: &str) -> anyhow::Result<String> {
+    print!("{prompt}");
+    io::stdout().flush().context("failed to flush stdout")?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed to read from stdin")?;
+    Ok(input.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn choose_setup_targets(
+    label: &str,
+    provided: &[String],
+    supported: &[String],
+    current: &[String],
+    is_models: bool,
+    interactive: bool,
+) -> anyhow::Result<Vec<String>> {
+    if !provided.is_empty() {
+        return Ok(unique_targets(
+            provided
+                .iter()
+                .map(|value| normalize_connector_target(is_models, value))
+                .collect(),
+        ));
+    }
+    if !interactive {
+        return Ok(unique_targets(current.to_vec()));
+    }
+    if supported.is_empty() {
+        return Ok(unique_targets(current.to_vec()));
+    }
+    println!("{label}:");
+    for (index, option) in supported.iter().enumerate() {
+        println!("  {}. {}", index + 1, option);
+    }
+    let default_display = if current.is_empty() {
+        "<none>".to_string()
+    } else {
+        current.join(", ")
+    };
+    let input = prompt_line(&format!(
+        "{label} (comma-separated names or indices, blank keeps {default_display}): "
+    ))?;
+    if input.trim().is_empty() {
+        return Ok(unique_targets(current.to_vec()));
+    }
+    parse_named_selection(&input, supported)
+}
+
+async fn prompt_setup_skills(client: &GatewayClient) -> anyhow::Result<Vec<SetupSkillCandidate>> {
+    let local = fetch_local_catalog(client, None, true)
+        .await
+        .unwrap_or(MarketplaceCatalog {
+            skills: vec![],
+            agent_cards: vec![],
+        });
+    let federated =
+        fetch_federated_catalog(client, None, true)
+            .await
+            .unwrap_or(FederatedMarketplaceCatalog {
+                skills: vec![],
+                agent_cards: vec![],
+            });
+    let mut candidates = Vec::new();
+    candidates.extend(local.skills.into_iter().map(|skill| SetupSkillCandidate {
+        skill_id: skill.skill_id.clone(),
+        version: skill.version.clone(),
+        federated: false,
+        label: format!(
+            "{}@{} [local] {}",
+            skill.skill_id, skill.version, skill.display_name
+        ),
+    }));
+    candidates.extend(
+        federated
+            .skills
+            .into_iter()
+            .map(|skill| SetupSkillCandidate {
+                skill_id: skill.entry.skill_id.clone(),
+                version: skill.entry.version.clone(),
+                federated: true,
+                label: format!(
+                    "{}@{} [federated {}:{}] {}",
+                    skill.entry.skill_id,
+                    skill.entry.version,
+                    skill.source_display_name,
+                    skill.source_peer_id,
+                    skill.entry.display_name
+                ),
+            }),
+    );
+    if candidates.is_empty() {
+        println!("No installable skills found in the local or federated catalog.");
+        return Ok(Vec::new());
+    }
+    println!("Available skills:");
+    for (index, skill) in candidates.iter().enumerate() {
+        println!("  {}. {}", index + 1, skill.label);
+    }
+    let input =
+        prompt_line("Skills to install (comma-separated indices, blank skips installation): ")?;
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    parse_index_selection(&input, &candidates)
+}
+
+fn ensure_setup_connector_ready(
+    staged_env: &mut BTreeMap<String, String>,
+    connectors_status: &Value,
+    is_models: bool,
+    target: &str,
+    interactive: bool,
+    gateway: Option<&str>,
+) -> anyhow::Result<()> {
+    if connector_env_ready(is_models, target, staged_env)
+        || connector_is_live_configured(connectors_status, target)
+    {
+        return Ok(());
+    }
+    if !interactive {
+        bail!(
+            "selected {} `{}` is not configured on the gateway and no staged credentials were provided",
+            if is_models {
+                "model provider"
+            } else {
+                "chat platform"
+            },
+            target
+        );
+    }
+    println!(
+        "Configure {} `{}`",
+        if is_models {
+            "model provider"
+        } else {
+            "chat platform"
+        },
+        target
+    );
+    let prompt_args = prompt_connector_connect_args(is_models, target, staged_env, gateway)?;
+    let env_pairs = connector_secret_pairs(is_models, target, &prompt_args)?;
+    for (key, value) in env_pairs {
+        staged_env.insert(key, value);
+    }
+    if !connector_env_ready(is_models, target, staged_env)
+        && !connector_is_live_configured(connectors_status, target)
+    {
+        bail!(
+            "credentials for {} `{}` are still incomplete",
+            if is_models {
+                "model provider"
+            } else {
+                "chat platform"
+            },
+            target
+        );
+    }
+    Ok(())
+}
+
+fn prompt_connector_connect_args(
+    is_models: bool,
+    target: &str,
+    staged_env: &BTreeMap<String, String>,
+    gateway: Option<&str>,
+) -> anyhow::Result<ConnectorConnectArgs> {
+    let mut args = ConnectorConnectArgs {
+        target: target.to_string(),
+        gateway: gateway.map(str::to_string),
+        api_key: None,
+        access_token: None,
+        webhook_url: None,
+        app_id: None,
+        app_secret: None,
+        client_secret: None,
+        endpoint_id: None,
+        base_url: None,
+        env: vec![],
+    };
+    for spec in connector_prompt_specs(is_models, target) {
+        let existing = connector_existing_value(is_models, target, spec.kind, staged_env);
+        let value = prompt_connector_field(target, spec, existing.as_deref())?;
+        if let Some(value) = value {
+            apply_setup_field(&mut args, spec.kind, value);
+        }
+    }
+    Ok(args)
+}
+
+fn prompt_connector_field(
+    target: &str,
+    spec: SetupFieldSpec,
+    existing: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    loop {
+        let mut prompt = format!("  {} for {}", spec.label, target);
+        if existing.is_some() {
+            prompt.push_str(" [stored; press Enter to keep]");
+        } else if let Some(default) = spec.default_value {
+            prompt.push_str(&format!(" [{default}]"));
+        }
+        prompt.push_str(": ");
+        let input = prompt_line(&prompt)?;
+        if input.trim().is_empty() {
+            if existing.is_some() {
+                return Ok(None);
+            }
+            if let Some(default) = spec.default_value {
+                return Ok(Some(default.to_string()));
+            }
+            if spec.required {
+                println!("  {} is required.", spec.label);
+                continue;
+            }
+            return Ok(None);
+        }
+        return Ok(Some(input.trim().to_string()));
+    }
+}
+
+fn connector_prompt_specs(is_models: bool, target: &str) -> Vec<SetupFieldSpec> {
+    match (is_models, target) {
+        (true, "openai")
+        | (true, "anthropic")
+        | (true, "google")
+        | (true, "openrouter")
+        | (true, "groq")
+        | (true, "together")
+        | (true, "mistral")
+        | (true, "nvidia")
+        | (true, "deepseek")
+        | (true, "qwen")
+        | (true, "zhipu")
+        | (true, "moonshot") => vec![SetupFieldSpec {
+            kind: SetupFieldKind::ApiKey,
+            label: "API key",
+            required: true,
+            default_value: None,
+        }],
+        (true, "vllm") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "Base URL",
+                required: true,
+                default_value: Some("http://127.0.0.1:8000/v1"),
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::ApiKey,
+                label: "API key (optional)",
+                required: false,
+                default_value: None,
+            },
+        ],
+        (true, "litellm") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "LiteLLM base URL or /chat/completions URL",
+                required: true,
+                default_value: Some("http://127.0.0.1:4000"),
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::ApiKey,
+                label: "API key (optional)",
+                required: false,
+                default_value: None,
+            },
+        ],
+        (true, "doubao") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::ApiKey,
+                label: "API key",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::EndpointId,
+                label: "Endpoint ID",
+                required: true,
+                default_value: None,
+            },
+        ],
+        (true, "ollama") => vec![SetupFieldSpec {
+            kind: SetupFieldKind::BaseUrl,
+            label: "Base URL",
+            required: true,
+            default_value: Some("http://127.0.0.1:11434"),
+        }],
+        (false, "telegram") => vec![SetupFieldSpec {
+            kind: SetupFieldKind::AccessToken,
+            label: "Bot token",
+            required: true,
+            default_value: None,
+        }],
+        (false, "slack")
+        | (false, "discord")
+        | (false, "mattermost")
+        | (false, "msteams")
+        | (false, "google_chat")
+        | (false, "feishu")
+        | (false, "dingtalk")
+        | (false, "wecom_bot") => vec![SetupFieldSpec {
+            kind: SetupFieldKind::WebhookUrl,
+            label: "Webhook URL",
+            required: true,
+            default_value: None,
+        }],
+        (false, "whatsapp") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::AccessToken,
+                label: "Access token",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::AppId,
+                label: "Phone number ID",
+                required: true,
+                default_value: None,
+            },
+        ],
+        (false, "line") => vec![SetupFieldSpec {
+            kind: SetupFieldKind::AccessToken,
+            label: "Channel access token",
+            required: true,
+            default_value: None,
+        }],
+        (false, "matrix") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::AccessToken,
+                label: "Access token",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "Homeserver URL",
+                required: true,
+                default_value: Some("https://matrix-client.matrix.org"),
+            },
+        ],
+        (false, "wechat_official_account") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::AppId,
+                label: "App ID",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::AppSecret,
+                label: "App secret",
+                required: true,
+                default_value: None,
+            },
+        ],
+        (false, "qq") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::AppId,
+                label: "App ID",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::ClientSecret,
+                label: "Client secret",
+                required: true,
+                default_value: None,
+            },
+        ],
+        _ => vec![],
+    }
+}
+
+fn connector_existing_value(
+    is_models: bool,
+    target: &str,
+    kind: SetupFieldKind,
+    staged_env: &BTreeMap<String, String>,
+) -> Option<String> {
+    let keys: &[&str] = match (is_models, target, kind) {
+        (true, "openai", SetupFieldKind::ApiKey) => &["OPENAI_API_KEY"],
+        (true, "anthropic", SetupFieldKind::ApiKey) => &["ANTHROPIC_API_KEY"],
+        (true, "google", SetupFieldKind::ApiKey) => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        (true, "openrouter", SetupFieldKind::ApiKey) => &["OPENROUTER_API_KEY"],
+        (true, "groq", SetupFieldKind::ApiKey) => &["GROQ_API_KEY"],
+        (true, "together", SetupFieldKind::ApiKey) => &["TOGETHER_API_KEY"],
+        (true, "vllm", SetupFieldKind::ApiKey) => &["VLLM_API_KEY"],
+        (true, "vllm", SetupFieldKind::BaseUrl) => &["VLLM_BASE_URL"],
+        (true, "mistral", SetupFieldKind::ApiKey) => &["MISTRAL_API_KEY"],
+        (true, "nvidia", SetupFieldKind::ApiKey) => &["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"],
+        (true, "litellm", SetupFieldKind::ApiKey) => &["LITELLM_API_KEY"],
+        (true, "litellm", SetupFieldKind::BaseUrl) => {
+            &["LITELLM_CHAT_COMPLETIONS_URL", "LITELLM_BASE_URL"]
+        }
+        (true, "deepseek", SetupFieldKind::ApiKey) => &["DEEPSEEK_API_KEY"],
+        (true, "qwen", SetupFieldKind::ApiKey) => &["QWEN_API_KEY"],
+        (true, "zhipu", SetupFieldKind::ApiKey) => &["ZHIPU_API_KEY"],
+        (true, "moonshot", SetupFieldKind::ApiKey) => &["MOONSHOT_API_KEY"],
+        (true, "doubao", SetupFieldKind::ApiKey) => &["DOUBAO_API_KEY"],
+        (true, "doubao", SetupFieldKind::EndpointId) => &["DOUBAO_ENDPOINT_ID"],
+        (true, "ollama", SetupFieldKind::BaseUrl) => &["OLLAMA_BASE_URL"],
+        (false, "telegram", SetupFieldKind::AccessToken) => &["TELEGRAM_BOT_TOKEN"],
+        (false, "slack", SetupFieldKind::WebhookUrl) => &["SLACK_BOT_WEBHOOK_URL"],
+        (false, "discord", SetupFieldKind::WebhookUrl) => &["DISCORD_BOT_WEBHOOK_URL"],
+        (false, "mattermost", SetupFieldKind::WebhookUrl) => &["MATTERMOST_BOT_WEBHOOK_URL"],
+        (false, "msteams", SetupFieldKind::WebhookUrl) => &["MSTEAMS_BOT_WEBHOOK_URL"],
+        (false, "whatsapp", SetupFieldKind::AccessToken) => &["WHATSAPP_ACCESS_TOKEN"],
+        (false, "whatsapp", SetupFieldKind::AppId) => &["WHATSAPP_PHONE_NUMBER_ID"],
+        (false, "line", SetupFieldKind::AccessToken) => &["LINE_CHANNEL_ACCESS_TOKEN"],
+        (false, "matrix", SetupFieldKind::AccessToken) => &["MATRIX_ACCESS_TOKEN"],
+        (false, "matrix", SetupFieldKind::BaseUrl) => &["MATRIX_HOMESERVER_URL"],
+        (false, "google_chat", SetupFieldKind::WebhookUrl) => &["GOOGLE_CHAT_BOT_WEBHOOK_URL"],
+        (false, "feishu", SetupFieldKind::WebhookUrl) => &["FEISHU_BOT_WEBHOOK_URL"],
+        (false, "dingtalk", SetupFieldKind::WebhookUrl) => &["DINGTALK_BOT_WEBHOOK_URL"],
+        (false, "wecom_bot", SetupFieldKind::WebhookUrl) => &["WECOM_BOT_WEBHOOK_URL"],
+        (false, "wechat_official_account", SetupFieldKind::AppId) => {
+            &["WECHAT_OFFICIAL_ACCOUNT_APP_ID"]
+        }
+        (false, "wechat_official_account", SetupFieldKind::AppSecret) => {
+            &["WECHAT_OFFICIAL_ACCOUNT_APP_SECRET"]
+        }
+        (false, "qq", SetupFieldKind::AppId) => &["QQ_BOT_APP_ID"],
+        (false, "qq", SetupFieldKind::ClientSecret) => &["QQ_BOT_CLIENT_SECRET"],
+        _ => &[],
+    };
+    keys.iter().find_map(|key| staged_env.get(*key).cloned())
+}
+
+fn apply_setup_field(args: &mut ConnectorConnectArgs, kind: SetupFieldKind, value: String) {
+    match kind {
+        SetupFieldKind::ApiKey => args.api_key = Some(value),
+        SetupFieldKind::AccessToken => args.access_token = Some(value),
+        SetupFieldKind::WebhookUrl => args.webhook_url = Some(value),
+        SetupFieldKind::AppId => args.app_id = Some(value),
+        SetupFieldKind::AppSecret => args.app_secret = Some(value),
+        SetupFieldKind::ClientSecret => args.client_secret = Some(value),
+        SetupFieldKind::EndpointId => args.endpoint_id = Some(value),
+        SetupFieldKind::BaseUrl => args.base_url = Some(value),
+    }
+}
+
+fn connector_env_ready(
+    is_models: bool,
+    target: &str,
+    staged_env: &BTreeMap<String, String>,
+) -> bool {
+    connector_requirement_groups(is_models, target)
+        .iter()
+        .any(|group| {
+            group.iter().all(|key| {
+                staged_env
+                    .get(*key)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        })
+}
+
+fn connector_requirement_groups(is_models: bool, target: &str) -> Vec<Vec<&'static str>> {
+    match (is_models, target) {
+        (true, "openai") => vec![vec!["OPENAI_API_KEY"]],
+        (true, "anthropic") => vec![vec!["ANTHROPIC_API_KEY"]],
+        (true, "google") => vec![vec!["GEMINI_API_KEY"], vec!["GOOGLE_API_KEY"]],
+        (true, "openrouter") => vec![vec!["OPENROUTER_API_KEY"]],
+        (true, "groq") => vec![vec!["GROQ_API_KEY"]],
+        (true, "together") => vec![vec!["TOGETHER_API_KEY"]],
+        (true, "vllm") => vec![vec!["VLLM_BASE_URL"]],
+        (true, "mistral") => vec![vec!["MISTRAL_API_KEY"]],
+        (true, "nvidia") => vec![vec!["NVIDIA_API_KEY"], vec!["NVIDIA_NIM_API_KEY"]],
+        (true, "litellm") => {
+            vec![
+                vec!["LITELLM_CHAT_COMPLETIONS_URL"],
+                vec!["LITELLM_BASE_URL"],
+            ]
+        }
+        (true, "deepseek") => vec![vec!["DEEPSEEK_API_KEY"]],
+        (true, "qwen") => vec![vec!["QWEN_API_KEY"]],
+        (true, "zhipu") => vec![vec!["ZHIPU_API_KEY"]],
+        (true, "moonshot") => vec![vec!["MOONSHOT_API_KEY"]],
+        (true, "doubao") => vec![vec!["DOUBAO_API_KEY", "DOUBAO_ENDPOINT_ID"]],
+        (true, "ollama") => vec![vec!["OLLAMA_BASE_URL"]],
+        (false, "telegram") => vec![vec!["TELEGRAM_BOT_TOKEN"]],
+        (false, "slack") => vec![vec!["SLACK_BOT_WEBHOOK_URL"]],
+        (false, "discord") => vec![vec!["DISCORD_BOT_WEBHOOK_URL"]],
+        (false, "mattermost") => vec![vec!["MATTERMOST_BOT_WEBHOOK_URL"]],
+        (false, "msteams") => vec![vec!["MSTEAMS_BOT_WEBHOOK_URL"]],
+        (false, "whatsapp") => {
+            vec![vec!["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"]]
+        }
+        (false, "line") => vec![vec!["LINE_CHANNEL_ACCESS_TOKEN"]],
+        (false, "matrix") => vec![vec!["MATRIX_ACCESS_TOKEN", "MATRIX_HOMESERVER_URL"]],
+        (false, "google_chat") => vec![vec!["GOOGLE_CHAT_BOT_WEBHOOK_URL"]],
+        (false, "feishu") => vec![vec!["FEISHU_BOT_WEBHOOK_URL"]],
+        (false, "dingtalk") => vec![vec!["DINGTALK_BOT_WEBHOOK_URL"]],
+        (false, "wecom_bot") => vec![vec!["WECOM_BOT_WEBHOOK_URL"]],
+        (false, "wechat_official_account") => vec![
+            vec!["WECHAT_OFFICIAL_ACCOUNT_ACCESS_TOKEN"],
+            vec![
+                "WECHAT_OFFICIAL_ACCOUNT_APP_ID",
+                "WECHAT_OFFICIAL_ACCOUNT_APP_SECRET",
+            ],
+        ],
+        (false, "qq") => vec![vec!["QQ_BOT_APP_ID", "QQ_BOT_CLIENT_SECRET"]],
+        _ => vec![vec![]],
+    }
+}
+
+fn connector_is_live_configured(connectors_status: &Value, target: &str) -> bool {
+    let configured_key = connector_configured_key(target);
+    connectors_status["configured"]
+        .get(configured_key)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn connector_configured_key(target: &str) -> &str {
+    match target {
+        "google_chat" => "googleChat",
+        "wecom_bot" => "wecomBot",
+        "wechat_official_account" => "wechatOfficialAccount",
+        other => other,
+    }
+}
+
+fn connector_targets_from_status(status: &Value, key: &str, field: &str) -> Vec<String> {
+    status[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry[field].as_str().map(ToString::to_string))
+        .collect()
+}
+
+fn parse_named_selection(input: &str, options: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw in input.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let value = if let Ok(index) = token.parse::<usize>() {
+            options
+                .get(index.saturating_sub(1))
+                .ok_or_else(|| anyhow!("selection index {index} is out of range"))?
+                .clone()
+        } else {
+            let normalized = token.to_ascii_lowercase();
+            options
+                .iter()
+                .find(|option| option.eq_ignore_ascii_case(&normalized))
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown selection `{token}`"))?
+        };
+        if seen.insert(value.clone()) {
+            selected.push(value);
+        }
+    }
+    Ok(selected)
+}
+
+fn parse_index_selection(
+    input: &str,
+    options: &[SetupSkillCandidate],
+) -> anyhow::Result<Vec<SetupSkillCandidate>> {
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw in input.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let index = token
+            .parse::<usize>()
+            .with_context(|| format!("invalid selection `{token}`; expected numeric indices"))?;
+        let candidate = options
+            .get(index.saturating_sub(1))
+            .cloned()
+            .ok_or_else(|| anyhow!("selection index {index} is out of range"))?;
+        let key = format!(
+            "{}:{}:{}",
+            candidate.skill_id, candidate.version, candidate.federated
+        );
+        if seen.insert(key) {
+            selected.push(candidate);
+        }
+    }
+    Ok(selected)
+}
+
+fn unique_targets(values: Vec<String>) -> Vec<String> {
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            selected.push(value);
+        }
+    }
+    selected
 }
 
 async fn doctor(args: DoctorArgs) -> anyhow::Result<()> {

@@ -338,6 +338,7 @@ Identity And Onboarding:
 - `POST /api/gateway/identity/node-claims`
 - `POST /api/gateway/identity/node-claims/{claim_id}/revoke`
 - `POST /api/gateway/identity/node-claims/{claim_id}/reissue`
+- the desktop CLI now exposes a top-level `dawn-node setup` flow that bootstraps an operator session, lets the user choose default model providers and chat platforms, stages connector secrets locally, installs selected skills, and optionally issues a first local node claim in one pass
 - `GET /api/gateway/identity/status` now also returns a durable readiness summary with `completionPercent`, `nextStep`, per-surface checklist items, and counts for sessions, nodes, default connectors, ingress, and end-user approval backlog
 - the control-center `Setup Navigator` and `Identity & Onboarding` panels now consume that readiness payload so the operator sees concrete onboarding gaps instead of only raw forms
 - `POST /api/gateway/identity/setup-verifications` records a persistent verification receipt for one setup target (`model`, `chat`, or `ingress`) and captures the operator, endpoint, env-key gap, and whether the target belongs to the current workspace default path
