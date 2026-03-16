@@ -27,6 +27,7 @@ struct ConfiguredConnectors {
     anthropic: bool,
     google: bool,
     openrouter: bool,
+    groq: bool,
     deepseek: bool,
     qwen: bool,
     zhipu: bool,
@@ -38,6 +39,7 @@ struct ConfiguredConnectors {
     discord: bool,
     mattermost: bool,
     msteams: bool,
+    google_chat: bool,
     feishu: bool,
     dingtalk: bool,
     wecom_bot: bool,
@@ -146,6 +148,7 @@ pub async fn execute_model_connector(
         "anthropic" => execute_anthropic_response(request).await,
         "google" => execute_google_response(request).await,
         "openrouter" => execute_openrouter_response(request).await,
+        "groq" => execute_groq_response(request).await,
         "deepseek" => execute_deepseek_response(request).await,
         "qwen" => execute_qwen_response(request).await,
         "zhipu" => execute_zhipu_response(request).await,
@@ -181,6 +184,9 @@ pub async fn execute_chat_connector(
         }
         "msteams" => {
             send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text).await
+        }
+        "google_chat" => {
+            send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text).await
         }
         "feishu" => send_webhook_connector("feishu", "FEISHU_BOT_WEBHOOK_URL", request.text).await,
         "dingtalk" => {
@@ -225,6 +231,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/model/anthropic/respond", post(anthropic_respond))
         .route("/model/google/respond", post(google_respond))
         .route("/model/openrouter/respond", post(openrouter_respond))
+        .route("/model/groq/respond", post(groq_respond))
         .route("/model/deepseek/respond", post(deepseek_respond))
         .route("/model/qwen/respond", post(qwen_respond))
         .route("/model/zhipu/respond", post(zhipu_respond))
@@ -236,6 +243,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/chat/discord/send", post(send_discord_message))
         .route("/chat/mattermost/send", post(send_mattermost_message))
         .route("/chat/msteams/send", post(send_msteams_message))
+        .route("/chat/google-chat/send", post(send_google_chat_message))
         .route("/chat/feishu/send", post(send_feishu_message))
         .route("/chat/dingtalk/send", post(send_dingtalk_message))
         .route("/chat/wecom/send", post(send_wecom_message))
@@ -253,6 +261,7 @@ async fn status() -> Json<ConnectorStatusReport> {
             anthropic: std::env::var("ANTHROPIC_API_KEY").is_ok(),
             google: resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]).is_some(),
             openrouter: std::env::var("OPENROUTER_API_KEY").is_ok(),
+            groq: std::env::var("GROQ_API_KEY").is_ok(),
             deepseek: std::env::var("DEEPSEEK_API_KEY").is_ok(),
             qwen: resolve_first_present_env(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]).is_some(),
             zhipu: std::env::var("ZHIPU_API_KEY").is_ok(),
@@ -265,6 +274,7 @@ async fn status() -> Json<ConnectorStatusReport> {
             discord: std::env::var("DISCORD_BOT_WEBHOOK_URL").is_ok(),
             mattermost: std::env::var("MATTERMOST_BOT_WEBHOOK_URL").is_ok(),
             msteams: std::env::var("MSTEAMS_BOT_WEBHOOK_URL").is_ok(),
+            google_chat: std::env::var("GOOGLE_CHAT_BOT_WEBHOOK_URL").is_ok(),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
             wecom_bot: std::env::var("WECOM_BOT_WEBHOOK_URL").is_ok(),
@@ -289,6 +299,11 @@ async fn status() -> Json<ConnectorStatusReport> {
             },
             ModelProviderSupport {
                 provider: "openrouter",
+                region: "global",
+                integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "groq",
                 region: "global",
                 integration_mode: "live_openai_compatible",
             },
@@ -346,6 +361,11 @@ async fn status() -> Json<ConnectorStatusReport> {
             },
             ChatPlatformSupport {
                 platform: "msteams",
+                region: "global",
+                integration_mode: "live_webhook",
+            },
+            ChatPlatformSupport {
+                platform: "google_chat",
                 region: "global",
                 integration_mode: "live_webhook",
             },
@@ -413,6 +433,16 @@ async fn openrouter_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_openrouter_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn groq_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_groq_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -523,6 +553,16 @@ async fn send_msteams_message(
     Json(request): Json<WebhookTextRequest>,
 ) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
     send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_google_chat_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<WebhookTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -798,6 +838,20 @@ async fn execute_openrouter_response(
     })
 }
 
+async fn execute_groq_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "groq",
+        request,
+        "llama-3.3-70b-versatile",
+        &["GROQ_API_KEY"],
+        Some("GROQ_CHAT_COMPLETIONS_URL"),
+        "https://api.groq.com/openai/v1/chat/completions",
+    )
+    .await
+}
+
 async fn execute_deepseek_response(
     request: OpenAIResponseRequest,
 ) -> anyhow::Result<ModelResponseResult> {
@@ -961,7 +1015,7 @@ async fn send_webhook_connector(
     text: String,
 ) -> anyhow::Result<ChatSendResult> {
     let payload = match platform {
-        "slack" | "mattermost" | "msteams" => json!({
+        "slack" | "mattermost" | "msteams" | "google_chat" => json!({
             "text": text
         }),
         "discord" => json!({
@@ -1603,8 +1657,8 @@ mod tests {
 
     #[test]
     fn webhook_like_platforms_use_plain_text_shape() {
-        let payload = match "mattermost" {
-            "slack" | "mattermost" | "msteams" => json!({ "text": "hello" }),
+        let payload = match "google_chat" {
+            "slack" | "mattermost" | "msteams" | "google_chat" => json!({ "text": "hello" }),
             _ => unreachable!(),
         };
         assert_eq!(payload, json!({ "text": "hello" }));

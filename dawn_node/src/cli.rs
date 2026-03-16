@@ -1731,6 +1731,7 @@ fn build_channel_send_request(
         "discord" => "/api/gateway/connectors/chat/discord/send",
         "mattermost" => "/api/gateway/connectors/chat/mattermost/send",
         "msteams" => "/api/gateway/connectors/chat/msteams/send",
+        "google_chat" => "/api/gateway/connectors/chat/google-chat/send",
         "feishu" => "/api/gateway/connectors/chat/feishu/send",
         "dingtalk" => "/api/gateway/connectors/chat/dingtalk/send",
         "wecom_bot" => "/api/gateway/connectors/chat/wecom/send",
@@ -1752,7 +1753,8 @@ fn build_channel_send_request(
                 "disableNotification": args.disable_notification,
             })
         }
-        "slack" | "discord" | "mattermost" | "msteams" | "feishu" | "dingtalk" | "wecom_bot" => {
+        "slack" | "discord" | "mattermost" | "msteams" | "google_chat" | "feishu" | "dingtalk"
+        | "wecom_bot" => {
             json!({
                 "text": args.text,
             })
@@ -3421,12 +3423,14 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
         match normalized.as_str() {
             "claude" => "anthropic".to_string(),
             "gemini" => "google".to_string(),
+            "grok" => "groq".to_string(),
             other => other.to_string(),
         }
     } else {
         match normalized.as_str() {
             "wecom" => "wecom_bot".to_string(),
             "teams" | "microsoft_teams" | "microsoft-teams" => "msteams".to_string(),
+            "googlechat" | "google-chat" | "gchat" => "google_chat".to_string(),
             other => other.to_string(),
         }
     }
@@ -3456,6 +3460,14 @@ fn connector_secret_pairs(
             insert_if_some(
                 &mut pairs,
                 "OPENROUTER_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
+        }
+        (true, "groq") => {
+            insert_if_some(&mut pairs, "GROQ_API_KEY", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "GROQ_CHAT_COMPLETIONS_URL",
                 args.base_url.as_deref(),
             );
         }
@@ -3512,6 +3524,13 @@ fn connector_secret_pairs(
             insert_if_some(
                 &mut pairs,
                 "MSTEAMS_BOT_WEBHOOK_URL",
+                args.webhook_url.as_deref(),
+            );
+        }
+        (false, "google_chat") => {
+            insert_if_some(
+                &mut pairs,
+                "GOOGLE_CHAT_BOT_WEBHOOK_URL",
                 args.webhook_url.as_deref(),
             );
         }
@@ -4067,11 +4086,16 @@ mod tests {
     #[test]
     fn normalizes_connector_aliases_for_new_targets() {
         assert_eq!(normalize_connector_target(true, "gemini"), "google");
+        assert_eq!(normalize_connector_target(true, "grok"), "groq");
         assert_eq!(normalize_connector_target(false, "teams"), "msteams");
+        assert_eq!(
+            normalize_connector_target(false, "google-chat"),
+            "google_chat"
+        );
     }
 
     #[test]
-    fn builds_secret_pairs_for_google_and_openrouter() {
+    fn builds_secret_pairs_for_google_openrouter_and_groq() {
         let google_args = super::ConnectorConnectArgs {
             target: "google".to_string(),
             gateway: None,
@@ -4123,6 +4147,31 @@ mod tests {
                 .map(String::as_str),
             Some("https://openrouter.ai/api/v1/chat/completions")
         );
+
+        let groq_args = super::ConnectorConnectArgs {
+            target: "groq".to_string(),
+            gateway: None,
+            api_key: Some("groq-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://api.groq.com/openai/v1/chat/completions".to_string()),
+            env: Vec::new(),
+        };
+        let groq_pairs = connector_secret_pairs(true, "groq", &groq_args).expect("groq secrets");
+        assert_eq!(
+            groq_pairs.get("GROQ_API_KEY").map(String::as_str),
+            Some("groq-key")
+        );
+        assert_eq!(
+            groq_pairs
+                .get("GROQ_CHAT_COMPLETIONS_URL")
+                .map(String::as_str),
+            Some("https://api.groq.com/openai/v1/chat/completions")
+        );
     }
 
     #[test]
@@ -4149,6 +4198,11 @@ mod tests {
         let (path, body) =
             build_channel_send_request("msteams", &args).expect("msteams send request");
         assert_eq!(path, "/api/gateway/connectors/chat/msteams/send");
+        assert_eq!(body, json!({ "text": "hello channel" }));
+
+        let (path, body) =
+            build_channel_send_request("google_chat", &args).expect("google chat send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/google-chat/send");
         assert_eq!(body, json!({ "text": "hello channel" }));
     }
 }

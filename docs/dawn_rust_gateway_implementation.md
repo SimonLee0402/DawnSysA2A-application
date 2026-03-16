@@ -43,6 +43,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - Anthropic Messages API
     - Google Gemini GenerateContent API
     - OpenRouter Chat Completions
+    - Groq Chat Completions
     - DeepSeek Chat Completions
     - Qwen via DashScope OpenAI-compatible Chat Completions
     - Zhipu BigModel Chat Completions
@@ -54,6 +55,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - Discord webhook bot
     - Mattermost incoming webhook bot
     - Microsoft Teams incoming webhook bot
+    - Google Chat incoming webhook bot
     - Feishu webhook bot
     - DingTalk webhook bot
     - WeCom webhook bot
@@ -98,6 +100,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/model/anthropic/respond`
 - `POST /api/gateway/connectors/model/google/respond`
 - `POST /api/gateway/connectors/model/openrouter/respond`
+- `POST /api/gateway/connectors/model/groq/respond`
 - `POST /api/gateway/connectors/model/deepseek/respond`
 - `POST /api/gateway/connectors/model/qwen/respond`
 - `POST /api/gateway/connectors/model/zhipu/respond`
@@ -109,6 +112,7 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/chat/discord/send`
 - `POST /api/gateway/connectors/chat/mattermost/send`
 - `POST /api/gateway/connectors/chat/msteams/send`
+- `POST /api/gateway/connectors/chat/google-chat/send`
 - `POST /api/gateway/connectors/chat/feishu/send`
 - `POST /api/gateway/connectors/chat/dingtalk/send`
 - `POST /api/gateway/connectors/chat/wecom/send`
