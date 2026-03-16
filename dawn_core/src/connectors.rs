@@ -5,10 +5,11 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::info;
+use uuid::Uuid;
 
 use crate::app_state::AppState;
 
@@ -32,6 +33,7 @@ struct ConfiguredConnectors {
     vllm: bool,
     mistral: bool,
     nvidia: bool,
+    litellm: bool,
     deepseek: bool,
     qwen: bool,
     zhipu: bool,
@@ -45,6 +47,7 @@ struct ConfiguredConnectors {
     msteams: bool,
     whatsapp: bool,
     line: bool,
+    matrix: bool,
     google_chat: bool,
     feishu: bool,
     dingtalk: bool,
@@ -166,6 +169,7 @@ pub async fn execute_model_connector(
         "vllm" => execute_vllm_response(request).await,
         "mistral" => execute_mistral_response(request).await,
         "nvidia" => execute_nvidia_response(request).await,
+        "litellm" => execute_litellm_response(request).await,
         "deepseek" => execute_deepseek_response(request).await,
         "qwen" => execute_qwen_response(request).await,
         "zhipu" => execute_zhipu_response(request).await,
@@ -222,6 +226,16 @@ pub async fn execute_chat_connector(
             })
             .await
         }
+        "matrix" => {
+            let chat_id = request
+                .chat_id
+                .ok_or_else(|| anyhow::anyhow!("matrix connector requires chatId"))?;
+            send_matrix_connector(ChatTargetTextRequest {
+                chat_id,
+                text: request.text,
+            })
+            .await
+        }
         "google_chat" => {
             send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text).await
         }
@@ -273,6 +287,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/model/vllm/respond", post(vllm_respond))
         .route("/model/mistral/respond", post(mistral_respond))
         .route("/model/nvidia/respond", post(nvidia_respond))
+        .route("/model/litellm/respond", post(litellm_respond))
         .route("/model/deepseek/respond", post(deepseek_respond))
         .route("/model/qwen/respond", post(qwen_respond))
         .route("/model/zhipu/respond", post(zhipu_respond))
@@ -286,6 +301,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/chat/msteams/send", post(send_msteams_message))
         .route("/chat/whatsapp/send", post(send_whatsapp_message))
         .route("/chat/line/send", post(send_line_message))
+        .route("/chat/matrix/send", post(send_matrix_message))
         .route("/chat/google-chat/send", post(send_google_chat_message))
         .route("/chat/feishu/send", post(send_feishu_message))
         .route("/chat/dingtalk/send", post(send_dingtalk_message))
@@ -310,6 +326,8 @@ async fn status() -> Json<ConnectorStatusReport> {
                 || std::env::var("VLLM_BASE_URL").is_ok(),
             mistral: std::env::var("MISTRAL_API_KEY").is_ok(),
             nvidia: resolve_first_present_env(&["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"]).is_some(),
+            litellm: std::env::var("LITELLM_CHAT_COMPLETIONS_URL").is_ok()
+                || std::env::var("LITELLM_BASE_URL").is_ok(),
             deepseek: std::env::var("DEEPSEEK_API_KEY").is_ok(),
             qwen: resolve_first_present_env(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]).is_some(),
             zhipu: std::env::var("ZHIPU_API_KEY").is_ok(),
@@ -325,6 +343,8 @@ async fn status() -> Json<ConnectorStatusReport> {
             whatsapp: std::env::var("WHATSAPP_ACCESS_TOKEN").is_ok()
                 && std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok(),
             line: std::env::var("LINE_CHANNEL_ACCESS_TOKEN").is_ok(),
+            matrix: std::env::var("MATRIX_ACCESS_TOKEN").is_ok()
+                && std::env::var("MATRIX_HOMESERVER_URL").is_ok(),
             google_chat: std::env::var("GOOGLE_CHAT_BOT_WEBHOOK_URL").is_ok(),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
@@ -377,6 +397,11 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "nvidia",
                 region: "global",
                 integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "litellm",
+                region: "global",
+                integration_mode: "live_openai_compatible_gateway",
             },
             ModelProviderSupport {
                 provider: "deepseek",
@@ -444,6 +469,11 @@ async fn status() -> Json<ConnectorStatusReport> {
                 platform: "line",
                 region: "global",
                 integration_mode: "live_push_text",
+            },
+            ChatPlatformSupport {
+                platform: "matrix",
+                region: "global",
+                integration_mode: "live_client_api",
             },
             ChatPlatformSupport {
                 platform: "google_chat",
@@ -564,6 +594,16 @@ async fn nvidia_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_nvidia_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn litellm_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_litellm_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -694,6 +734,16 @@ async fn send_line_message(
     Json(request): Json<ChatTargetTextRequest>,
 ) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
     send_line_connector(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_matrix_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<ChatTargetTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_matrix_connector(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -1082,6 +1132,63 @@ async fn execute_nvidia_response(
     .await
 }
 
+async fn execute_litellm_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model
+        .or_else(|| resolve_first_present_env(&["LITELLM_MODEL"]))
+        .unwrap_or_else(|| "openai/gpt-4.1-mini".to_string());
+    let Some(endpoint) = std::env::var("LITELLM_CHAT_COMPLETIONS_URL")
+        .ok()
+        .or_else(|| {
+            std::env::var("LITELLM_BASE_URL")
+                .ok()
+                .map(|base| format!("{}/chat/completions", base.trim_end_matches('/')))
+        })
+    else {
+        return Ok(ModelResponseResult {
+            mode: "dry_run",
+            provider: "litellm",
+            model,
+            output_text: format!(
+                "LITELLM_CHAT_COMPLETIONS_URL or LITELLM_BASE_URL is not configured. Dry-run request would send input: {input}"
+            ),
+            raw_response: None,
+        });
+    };
+    let body = json!({
+        "model": model,
+        "messages": build_chat_completion_messages(&input, instructions.as_deref()),
+        "stream": false
+    });
+
+    info!("Dispatching live LiteLLM chat completion request through gateway connector");
+    let mut request_builder = Client::new().post(&endpoint);
+    if let Ok(api_key) = std::env::var("LITELLM_API_KEY") {
+        request_builder = request_builder.bearer_auth(api_key);
+    }
+    let response = request_builder.json(&body).send().await?;
+    let status = response.status();
+    let raw_response = response.json::<Value>().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("litellm connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "litellm",
+        model: body["model"].as_str().unwrap_or("unknown").to_string(),
+        output_text: extract_chat_completion_text(&raw_response),
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn execute_deepseek_response(
     request: OpenAIResponseRequest,
 ) -> anyhow::Result<ModelResponseResult> {
@@ -1421,6 +1528,53 @@ async fn send_line_connector(request: ChatTargetTextRequest) -> anyhow::Result<C
     })
 }
 
+async fn send_matrix_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let Some(access_token) = std::env::var("MATRIX_ACCESS_TOKEN").ok() else {
+        return Ok(ChatSendResult {
+            mode: "dry_run",
+            platform: "matrix",
+            delivered: false,
+            raw_response: Some(json!({
+                "chatId": request.chat_id,
+                "text": request.text,
+                "reason": "MATRIX_ACCESS_TOKEN is not configured"
+            })),
+        });
+    };
+    let homeserver = std::env::var("MATRIX_HOMESERVER_URL")
+        .unwrap_or_else(|_| "https://matrix-client.matrix.org".to_string());
+    let txn_id = Uuid::new_v4().to_string();
+    let endpoint = build_matrix_send_endpoint(&homeserver, &request.chat_id, &txn_id)?;
+    let payload = build_matrix_text_payload(&request.text);
+
+    info!("Dispatching live Matrix room message through gateway connector");
+    let response = Client::new()
+        .post(endpoint)
+        .bearer_auth(access_token)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status": status.as_u16(),
+            "payloadAccepted": status.is_success()
+        }),
+    };
+
+    if !status.is_success() {
+        anyhow::bail!("matrix connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "matrix",
+        delivered: raw_response.get("event_id").is_some() || status.is_success(),
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn send_wechat_official_account_connector(
     request: WeChatOfficialAccountSendRequest,
 ) -> anyhow::Result<ChatSendResult> {
@@ -1613,6 +1767,32 @@ fn build_line_push_payload(chat_id: &str, text: &str) -> Value {
             }
         ]
     })
+}
+
+fn build_matrix_text_payload(text: &str) -> Value {
+    json!({
+        "msgtype": "m.text",
+        "body": text
+    })
+}
+
+fn build_matrix_send_endpoint(
+    homeserver: &str,
+    room_id: &str,
+    transaction_id: &str,
+) -> anyhow::Result<Url> {
+    let mut url = Url::parse(homeserver)?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid MATRIX_HOMESERVER_URL path"))?;
+        segments.pop_if_empty();
+        segments.extend(["_matrix", "client", "v3", "rooms"]);
+        segments.push(room_id);
+        segments.extend(["send", "m.room.message"]);
+        segments.push(transaction_id);
+    }
+    Ok(url)
 }
 
 fn build_qq_message_payload(text: &str, request: &QQSendRequest) -> Value {
@@ -1846,9 +2026,10 @@ mod tests {
 
     use super::{
         QQSendRequest, build_chat_completion_messages, build_line_push_payload,
-        build_qq_message_payload, build_wechat_official_account_payload,
-        build_whatsapp_text_payload, extract_anthropic_text, extract_chat_completion_text,
-        extract_google_text, extract_ollama_text, extract_openai_text, normalize_qq_target_type,
+        build_matrix_send_endpoint, build_matrix_text_payload, build_qq_message_payload,
+        build_wechat_official_account_payload, build_whatsapp_text_payload, extract_anthropic_text,
+        extract_chat_completion_text, extract_google_text, extract_ollama_text,
+        extract_openai_text, normalize_qq_target_type,
     };
 
     #[test]
@@ -2019,6 +2200,34 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn builds_matrix_text_payload() {
+        let payload = build_matrix_text_payload("hello matrix");
+
+        assert_eq!(
+            payload,
+            json!({
+                "msgtype": "m.text",
+                "body": "hello matrix"
+            })
+        );
+    }
+
+    #[test]
+    fn builds_matrix_send_endpoint() {
+        let endpoint = build_matrix_send_endpoint(
+            "https://matrix-client.matrix.org",
+            "!roomid:matrix.org",
+            "txn-123",
+        )
+        .expect("matrix endpoint");
+
+        assert_eq!(
+            endpoint.as_str(),
+            "https://matrix-client.matrix.org/_matrix/client/v3/rooms/!roomid:matrix.org/send/m.room.message/txn-123"
         );
     }
 

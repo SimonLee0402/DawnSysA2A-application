@@ -1733,6 +1733,7 @@ fn build_channel_send_request(
         "msteams" => "/api/gateway/connectors/chat/msteams/send",
         "whatsapp" => "/api/gateway/connectors/chat/whatsapp/send",
         "line" => "/api/gateway/connectors/chat/line/send",
+        "matrix" => "/api/gateway/connectors/chat/matrix/send",
         "google_chat" => "/api/gateway/connectors/chat/google-chat/send",
         "feishu" => "/api/gateway/connectors/chat/feishu/send",
         "dingtalk" => "/api/gateway/connectors/chat/dingtalk/send",
@@ -1761,7 +1762,7 @@ fn build_channel_send_request(
                 "text": args.text,
             })
         }
-        "whatsapp" | "line" => {
+        "whatsapp" | "line" | "matrix" => {
             let chat_id = args
                 .chat_id
                 .as_deref()
@@ -3440,6 +3441,7 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
             "openai-local" | "local-openai" => "vllm".to_string(),
             "mistralai" => "mistral".to_string(),
             "nvidia-nim" | "nvidia_nim" | "nim" => "nvidia".to_string(),
+            "lite-llm" | "lite_llm" => "litellm".to_string(),
             other => other.to_string(),
         }
     } else {
@@ -3448,6 +3450,7 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
             "teams" | "microsoft_teams" | "microsoft-teams" => "msteams".to_string(),
             "whatsapp-cloud" | "whatsapp_cloud" => "whatsapp".to_string(),
             "line-messaging" => "line".to_string(),
+            "matrix-org" => "matrix".to_string(),
             "googlechat" | "google-chat" | "gchat" => "google_chat".to_string(),
             other => other.to_string(),
         }
@@ -3517,6 +3520,20 @@ fn connector_secret_pairs(
                 "NVIDIA_CHAT_COMPLETIONS_URL",
                 args.base_url.as_deref(),
             );
+        }
+        (true, "litellm") => {
+            insert_if_some(&mut pairs, "LITELLM_API_KEY", args.api_key.as_deref());
+            if let Some(base_or_url) = args.base_url.as_deref() {
+                if base_or_url.contains("/chat/completions") {
+                    insert_if_some(
+                        &mut pairs,
+                        "LITELLM_CHAT_COMPLETIONS_URL",
+                        Some(base_or_url),
+                    );
+                } else {
+                    insert_if_some(&mut pairs, "LITELLM_BASE_URL", Some(base_or_url));
+                }
+            }
         }
         (true, "deepseek") => {
             insert_if_some(&mut pairs, "DEEPSEEK_API_KEY", args.api_key.as_deref())
@@ -3598,6 +3615,18 @@ fn connector_secret_pairs(
                 args.access_token.as_deref(),
             );
             insert_if_some(&mut pairs, "LINE_PUSH_API_URL", args.base_url.as_deref());
+        }
+        (false, "matrix") => {
+            insert_if_some(
+                &mut pairs,
+                "MATRIX_ACCESS_TOKEN",
+                args.access_token.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "MATRIX_HOMESERVER_URL",
+                args.base_url.as_deref(),
+            );
         }
         (false, "google_chat") => {
             insert_if_some(
@@ -4163,12 +4192,14 @@ mod tests {
         assert_eq!(normalize_connector_target(true, "local-openai"), "vllm");
         assert_eq!(normalize_connector_target(true, "mistralai"), "mistral");
         assert_eq!(normalize_connector_target(true, "nim"), "nvidia");
+        assert_eq!(normalize_connector_target(true, "lite-llm"), "litellm");
         assert_eq!(normalize_connector_target(false, "teams"), "msteams");
         assert_eq!(
             normalize_connector_target(false, "whatsapp-cloud"),
             "whatsapp"
         );
         assert_eq!(normalize_connector_target(false, "line-messaging"), "line");
+        assert_eq!(normalize_connector_target(false, "matrix-org"), "matrix");
         assert_eq!(
             normalize_connector_target(false, "google-chat"),
             "google_chat"
@@ -4176,7 +4207,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_secret_pairs_for_google_openrouter_groq_together_vllm_mistral_and_nvidia() {
+    fn builds_secret_pairs_for_google_openrouter_groq_together_vllm_mistral_nvidia_and_litellm() {
         let google_args = super::ConnectorConnectArgs {
             target: "google".to_string(),
             gateway: None,
@@ -4358,10 +4389,34 @@ mod tests {
                 .map(String::as_str),
             Some("https://integrate.api.nvidia.com/v1/chat/completions")
         );
+
+        let litellm_args = super::ConnectorConnectArgs {
+            target: "litellm".to_string(),
+            gateway: None,
+            api_key: Some("litellm-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("http://127.0.0.1:4000/v1".to_string()),
+            env: Vec::new(),
+        };
+        let litellm_pairs =
+            connector_secret_pairs(true, "litellm", &litellm_args).expect("litellm secrets");
+        assert_eq!(
+            litellm_pairs.get("LITELLM_API_KEY").map(String::as_str),
+            Some("litellm-key")
+        );
+        assert_eq!(
+            litellm_pairs.get("LITELLM_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:4000/v1")
+        );
     }
 
     #[test]
-    fn builds_channel_secret_pairs_for_whatsapp_and_line() {
+    fn builds_channel_secret_pairs_for_whatsapp_line_and_matrix() {
         let whatsapp_args = super::ConnectorConnectArgs {
             target: "whatsapp".to_string(),
             gateway: None,
@@ -4420,6 +4475,32 @@ mod tests {
             line_pairs.get("LINE_PUSH_API_URL").map(String::as_str),
             Some("https://api.line.me/v2/bot/message/push")
         );
+
+        let matrix_args = super::ConnectorConnectArgs {
+            target: "matrix".to_string(),
+            gateway: None,
+            api_key: None,
+            access_token: Some("matrix-token".to_string()),
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://matrix-client.matrix.org".to_string()),
+            env: Vec::new(),
+        };
+        let matrix_pairs =
+            connector_secret_pairs(false, "matrix", &matrix_args).expect("matrix secrets");
+        assert_eq!(
+            matrix_pairs.get("MATRIX_ACCESS_TOKEN").map(String::as_str),
+            Some("matrix-token")
+        );
+        assert_eq!(
+            matrix_pairs
+                .get("MATRIX_HOMESERVER_URL")
+                .map(String::as_str),
+            Some("https://matrix-client.matrix.org")
+        );
     }
 
     #[test]
@@ -4477,6 +4558,14 @@ mod tests {
         let (path, body) =
             build_channel_send_request("line", &targeted_args).expect("line send request");
         assert_eq!(path, "/api/gateway/connectors/chat/line/send");
+        assert_eq!(
+            body,
+            json!({ "chatId": "15551234567", "text": "hello channel" })
+        );
+
+        let (path, body) =
+            build_channel_send_request("matrix", &targeted_args).expect("matrix send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/matrix/send");
         assert_eq!(
             body,
             json!({ "chatId": "15551234567", "text": "hello channel" })
