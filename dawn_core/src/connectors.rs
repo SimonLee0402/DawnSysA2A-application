@@ -41,6 +41,8 @@ struct ConfiguredConnectors {
     discord: bool,
     mattermost: bool,
     msteams: bool,
+    whatsapp: bool,
+    line: bool,
     google_chat: bool,
     feishu: bool,
     dingtalk: bool,
@@ -111,6 +113,13 @@ pub struct TelegramSendRequest {
 #[serde(rename_all = "camelCase")]
 pub struct WeChatOfficialAccountSendRequest {
     pub open_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTargetTextRequest {
+    pub chat_id: String,
     pub text: String,
 }
 
@@ -189,6 +198,26 @@ pub async fn execute_chat_connector(
         "msteams" => {
             send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text).await
         }
+        "whatsapp" => {
+            let chat_id = request
+                .chat_id
+                .ok_or_else(|| anyhow::anyhow!("whatsapp connector requires chatId"))?;
+            send_whatsapp_connector(ChatTargetTextRequest {
+                chat_id,
+                text: request.text,
+            })
+            .await
+        }
+        "line" => {
+            let chat_id = request
+                .chat_id
+                .ok_or_else(|| anyhow::anyhow!("line connector requires chatId"))?;
+            send_line_connector(ChatTargetTextRequest {
+                chat_id,
+                text: request.text,
+            })
+            .await
+        }
         "google_chat" => {
             send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text).await
         }
@@ -249,6 +278,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/chat/discord/send", post(send_discord_message))
         .route("/chat/mattermost/send", post(send_mattermost_message))
         .route("/chat/msteams/send", post(send_msteams_message))
+        .route("/chat/whatsapp/send", post(send_whatsapp_message))
+        .route("/chat/line/send", post(send_line_message))
         .route("/chat/google-chat/send", post(send_google_chat_message))
         .route("/chat/feishu/send", post(send_feishu_message))
         .route("/chat/dingtalk/send", post(send_dingtalk_message))
@@ -283,6 +314,9 @@ async fn status() -> Json<ConnectorStatusReport> {
             discord: std::env::var("DISCORD_BOT_WEBHOOK_URL").is_ok(),
             mattermost: std::env::var("MATTERMOST_BOT_WEBHOOK_URL").is_ok(),
             msteams: std::env::var("MSTEAMS_BOT_WEBHOOK_URL").is_ok(),
+            whatsapp: std::env::var("WHATSAPP_ACCESS_TOKEN").is_ok()
+                && std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok(),
+            line: std::env::var("LINE_CHANNEL_ACCESS_TOKEN").is_ok(),
             google_chat: std::env::var("GOOGLE_CHAT_BOT_WEBHOOK_URL").is_ok(),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
@@ -382,6 +416,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 platform: "msteams",
                 region: "global",
                 integration_mode: "live_webhook",
+            },
+            ChatPlatformSupport {
+                platform: "whatsapp",
+                region: "global",
+                integration_mode: "live_graph_text",
+            },
+            ChatPlatformSupport {
+                platform: "line",
+                region: "global",
+                integration_mode: "live_push_text",
             },
             ChatPlatformSupport {
                 platform: "google_chat",
@@ -592,6 +636,26 @@ async fn send_msteams_message(
     Json(request): Json<WebhookTextRequest>,
 ) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
     send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_whatsapp_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<ChatTargetTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_whatsapp_connector(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_line_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<ChatTargetTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_line_connector(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -1181,6 +1245,116 @@ async fn send_webhook_connector(
     })
 }
 
+async fn send_whatsapp_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let Some(access_token) = std::env::var("WHATSAPP_ACCESS_TOKEN").ok() else {
+        return Ok(ChatSendResult {
+            mode: "dry_run",
+            platform: "whatsapp",
+            delivered: false,
+            raw_response: Some(json!({
+                "chatId": request.chat_id,
+                "text": request.text,
+                "reason": "WHATSAPP_ACCESS_TOKEN is not configured"
+            })),
+        });
+    };
+    let Some(phone_number_id) = std::env::var("WHATSAPP_PHONE_NUMBER_ID").ok() else {
+        return Ok(ChatSendResult {
+            mode: "dry_run",
+            platform: "whatsapp",
+            delivered: false,
+            raw_response: Some(json!({
+                "chatId": request.chat_id,
+                "text": request.text,
+                "reason": "WHATSAPP_PHONE_NUMBER_ID is not configured"
+            })),
+        });
+    };
+    let endpoint = std::env::var("WHATSAPP_MESSAGES_URL").unwrap_or_else(|_| {
+        format!(
+            "https://graph.facebook.com/v23.0/{}/messages",
+            phone_number_id
+        )
+    });
+    let payload = build_whatsapp_text_payload(&request.chat_id, &request.text);
+
+    info!("Dispatching live WhatsApp Cloud message through gateway connector");
+    let response = Client::new()
+        .post(endpoint)
+        .bearer_auth(access_token)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status": status.as_u16(),
+            "payloadAccepted": status.is_success()
+        }),
+    };
+
+    if !status.is_success() {
+        anyhow::bail!("whatsapp connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "whatsapp",
+        delivered: raw_response
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| !messages.is_empty())
+            .unwrap_or(status.is_success()),
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_line_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let Some(access_token) = std::env::var("LINE_CHANNEL_ACCESS_TOKEN").ok() else {
+        return Ok(ChatSendResult {
+            mode: "dry_run",
+            platform: "line",
+            delivered: false,
+            raw_response: Some(json!({
+                "chatId": request.chat_id,
+                "text": request.text,
+                "reason": "LINE_CHANNEL_ACCESS_TOKEN is not configured"
+            })),
+        });
+    };
+    let endpoint = std::env::var("LINE_PUSH_API_URL")
+        .unwrap_or_else(|_| "https://api.line.me/v2/bot/message/push".to_string());
+    let payload = build_line_push_payload(&request.chat_id, &request.text);
+
+    info!("Dispatching live LINE push message through gateway connector");
+    let response = Client::new()
+        .post(endpoint)
+        .bearer_auth(access_token)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status": status.as_u16(),
+            "payloadAccepted": status.is_success()
+        }),
+    };
+
+    if !status.is_success() {
+        anyhow::bail!("line connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "line",
+        delivered: status.is_success(),
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn send_wechat_official_account_connector(
     request: WeChatOfficialAccountSendRequest,
 ) -> anyhow::Result<ChatSendResult> {
@@ -1347,6 +1521,31 @@ fn build_wechat_official_account_payload(open_id: &str, text: &str) -> Value {
         "text": {
             "content": text
         }
+    })
+}
+
+fn build_whatsapp_text_payload(chat_id: &str, text: &str) -> Value {
+    json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": chat_id,
+        "type": "text",
+        "text": {
+            "preview_url": false,
+            "body": text
+        }
+    })
+}
+
+fn build_line_push_payload(chat_id: &str, text: &str) -> Value {
+    json!({
+        "to": chat_id,
+        "messages": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ]
     })
 }
 
@@ -1580,10 +1779,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        QQSendRequest, build_chat_completion_messages, build_qq_message_payload,
-        build_wechat_official_account_payload, extract_anthropic_text,
-        extract_chat_completion_text, extract_google_text, extract_ollama_text,
-        extract_openai_text, normalize_qq_target_type,
+        QQSendRequest, build_chat_completion_messages, build_line_push_payload,
+        build_qq_message_payload, build_wechat_official_account_payload,
+        build_whatsapp_text_payload, extract_anthropic_text, extract_chat_completion_text,
+        extract_google_text, extract_ollama_text, extract_openai_text, normalize_qq_target_type,
     };
 
     #[test]
@@ -1716,6 +1915,43 @@ mod tests {
                 "text": {
                     "content": "hello china"
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn builds_whatsapp_text_payload() {
+        let payload = build_whatsapp_text_payload("15551234567", "hello whatsapp");
+
+        assert_eq!(
+            payload,
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": "15551234567",
+                "type": "text",
+                "text": {
+                    "preview_url": false,
+                    "body": "hello whatsapp"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn builds_line_push_payload() {
+        let payload = build_line_push_payload("U123456", "hello line");
+
+        assert_eq!(
+            payload,
+            json!({
+                "to": "U123456",
+                "messages": [
+                    {
+                        "type": "text",
+                        "text": "hello line"
+                    }
+                ]
             })
         );
     }

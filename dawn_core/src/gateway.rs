@@ -72,6 +72,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "slack",
             "mattermost",
             "msteams",
+            "whatsapp",
+            "line",
             "google_chat",
             "feishu",
             "dingtalk",

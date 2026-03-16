@@ -57,6 +57,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - Discord webhook bot
     - Mattermost incoming webhook bot
     - Microsoft Teams incoming webhook bot
+    - WhatsApp Cloud API text message send
+    - LINE Messaging API push message
     - Google Chat incoming webhook bot
     - Feishu webhook bot
     - DingTalk webhook bot
@@ -116,6 +118,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/chat/discord/send`
 - `POST /api/gateway/connectors/chat/mattermost/send`
 - `POST /api/gateway/connectors/chat/msteams/send`
+- `POST /api/gateway/connectors/chat/whatsapp/send`
+- `POST /api/gateway/connectors/chat/line/send`
 - `POST /api/gateway/connectors/chat/google-chat/send`
 - `POST /api/gateway/connectors/chat/feishu/send`
 - `POST /api/gateway/connectors/chat/dingtalk/send`

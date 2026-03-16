@@ -1731,6 +1731,8 @@ fn build_channel_send_request(
         "discord" => "/api/gateway/connectors/chat/discord/send",
         "mattermost" => "/api/gateway/connectors/chat/mattermost/send",
         "msteams" => "/api/gateway/connectors/chat/msteams/send",
+        "whatsapp" => "/api/gateway/connectors/chat/whatsapp/send",
+        "line" => "/api/gateway/connectors/chat/line/send",
         "google_chat" => "/api/gateway/connectors/chat/google-chat/send",
         "feishu" => "/api/gateway/connectors/chat/feishu/send",
         "dingtalk" => "/api/gateway/connectors/chat/dingtalk/send",
@@ -1756,6 +1758,16 @@ fn build_channel_send_request(
         "slack" | "discord" | "mattermost" | "msteams" | "google_chat" | "feishu" | "dingtalk"
         | "wecom_bot" => {
             json!({
+                "text": args.text,
+            })
+        }
+        "whatsapp" | "line" => {
+            let chat_id = args
+                .chat_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("{target} send requires --chat-id"))?;
+            json!({
+                "chatId": chat_id,
                 "text": args.text,
             })
         }
@@ -3432,6 +3444,8 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
         match normalized.as_str() {
             "wecom" => "wecom_bot".to_string(),
             "teams" | "microsoft_teams" | "microsoft-teams" => "msteams".to_string(),
+            "whatsapp-cloud" | "whatsapp_cloud" => "whatsapp".to_string(),
+            "line-messaging" => "line".to_string(),
             "googlechat" | "google-chat" | "gchat" => "google_chat".to_string(),
             other => other.to_string(),
         }
@@ -3540,6 +3554,31 @@ fn connector_secret_pairs(
                 "MSTEAMS_BOT_WEBHOOK_URL",
                 args.webhook_url.as_deref(),
             );
+        }
+        (false, "whatsapp") => {
+            insert_if_some(
+                &mut pairs,
+                "WHATSAPP_ACCESS_TOKEN",
+                args.access_token.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "WHATSAPP_PHONE_NUMBER_ID",
+                args.app_id.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "WHATSAPP_MESSAGES_URL",
+                args.base_url.as_deref(),
+            );
+        }
+        (false, "line") => {
+            insert_if_some(
+                &mut pairs,
+                "LINE_CHANNEL_ACCESS_TOKEN",
+                args.access_token.as_deref(),
+            );
+            insert_if_some(&mut pairs, "LINE_PUSH_API_URL", args.base_url.as_deref());
         }
         (false, "google_chat") => {
             insert_if_some(
@@ -4105,6 +4144,11 @@ mod tests {
         assert_eq!(normalize_connector_target(true, "local-openai"), "vllm");
         assert_eq!(normalize_connector_target(false, "teams"), "msteams");
         assert_eq!(
+            normalize_connector_target(false, "whatsapp-cloud"),
+            "whatsapp"
+        );
+        assert_eq!(normalize_connector_target(false, "line-messaging"), "line");
+        assert_eq!(
             normalize_connector_target(false, "google-chat"),
             "google_chat"
         );
@@ -4240,6 +4284,68 @@ mod tests {
     }
 
     #[test]
+    fn builds_channel_secret_pairs_for_whatsapp_and_line() {
+        let whatsapp_args = super::ConnectorConnectArgs {
+            target: "whatsapp".to_string(),
+            gateway: None,
+            api_key: None,
+            access_token: Some("wa-token".to_string()),
+            webhook_url: None,
+            app_id: Some("1234567890".to_string()),
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://graph.facebook.com/v23.0/1234567890/messages".to_string()),
+            env: Vec::new(),
+        };
+        let whatsapp_pairs =
+            connector_secret_pairs(false, "whatsapp", &whatsapp_args).expect("whatsapp secrets");
+        assert_eq!(
+            whatsapp_pairs
+                .get("WHATSAPP_ACCESS_TOKEN")
+                .map(String::as_str),
+            Some("wa-token")
+        );
+        assert_eq!(
+            whatsapp_pairs
+                .get("WHATSAPP_PHONE_NUMBER_ID")
+                .map(String::as_str),
+            Some("1234567890")
+        );
+        assert_eq!(
+            whatsapp_pairs
+                .get("WHATSAPP_MESSAGES_URL")
+                .map(String::as_str),
+            Some("https://graph.facebook.com/v23.0/1234567890/messages")
+        );
+
+        let line_args = super::ConnectorConnectArgs {
+            target: "line".to_string(),
+            gateway: None,
+            api_key: None,
+            access_token: Some("line-token".to_string()),
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://api.line.me/v2/bot/message/push".to_string()),
+            env: Vec::new(),
+        };
+        let line_pairs = connector_secret_pairs(false, "line", &line_args).expect("line secrets");
+        assert_eq!(
+            line_pairs
+                .get("LINE_CHANNEL_ACCESS_TOKEN")
+                .map(String::as_str),
+            Some("line-token")
+        );
+        assert_eq!(
+            line_pairs.get("LINE_PUSH_API_URL").map(String::as_str),
+            Some("https://api.line.me/v2/bot/message/push")
+        );
+    }
+
+    #[test]
     fn builds_send_requests_for_new_webhook_channels() {
         let args = super::ChannelSendArgs {
             target: "mattermost".to_string(),
@@ -4269,5 +4375,34 @@ mod tests {
             build_channel_send_request("google_chat", &args).expect("google chat send request");
         assert_eq!(path, "/api/gateway/connectors/chat/google-chat/send");
         assert_eq!(body, json!({ "text": "hello channel" }));
+
+        let targeted_args = super::ChannelSendArgs {
+            target: "whatsapp".to_string(),
+            text: "hello channel".to_string(),
+            gateway: None,
+            chat_id: Some("15551234567".to_string()),
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+        let (path, body) =
+            build_channel_send_request("whatsapp", &targeted_args).expect("whatsapp send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/whatsapp/send");
+        assert_eq!(
+            body,
+            json!({ "chatId": "15551234567", "text": "hello channel" })
+        );
+
+        let (path, body) =
+            build_channel_send_request("line", &targeted_args).expect("line send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/line/send");
+        assert_eq!(
+            body,
+            json!({ "chatId": "15551234567", "text": "hello channel" })
+        );
     }
 }
