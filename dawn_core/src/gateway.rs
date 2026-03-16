@@ -89,6 +89,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "groq",
             "together",
             "vllm",
+            "mistral",
+            "nvidia",
             "deepseek",
             "qwen",
             "zhipu",

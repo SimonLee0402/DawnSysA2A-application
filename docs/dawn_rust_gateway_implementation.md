@@ -46,6 +46,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - Groq Chat Completions
     - Together Chat Completions
     - vLLM OpenAI-compatible local chat endpoint
+    - Mistral Chat Completions
+    - NVIDIA NIM Chat Completions
     - DeepSeek Chat Completions
     - Qwen via DashScope OpenAI-compatible Chat Completions
     - Zhipu BigModel Chat Completions
@@ -107,6 +109,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/model/groq/respond`
 - `POST /api/gateway/connectors/model/together/respond`
 - `POST /api/gateway/connectors/model/vllm/respond`
+- `POST /api/gateway/connectors/model/mistral/respond`
+- `POST /api/gateway/connectors/model/nvidia/respond`
 - `POST /api/gateway/connectors/model/deepseek/respond`
 - `POST /api/gateway/connectors/model/qwen/respond`
 - `POST /api/gateway/connectors/model/zhipu/respond`

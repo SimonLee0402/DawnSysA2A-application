@@ -3438,6 +3438,8 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
             "grok" => "groq".to_string(),
             "togetherai" => "together".to_string(),
             "openai-local" | "local-openai" => "vllm".to_string(),
+            "mistralai" => "mistral".to_string(),
+            "nvidia-nim" | "nvidia_nim" | "nim" => "nvidia".to_string(),
             other => other.to_string(),
         }
     } else {
@@ -3498,6 +3500,23 @@ fn connector_secret_pairs(
         (true, "vllm") => {
             insert_if_some(&mut pairs, "VLLM_API_KEY", args.api_key.as_deref());
             insert_if_some(&mut pairs, "VLLM_BASE_URL", args.base_url.as_deref());
+        }
+        (true, "mistral") => {
+            insert_if_some(&mut pairs, "MISTRAL_API_KEY", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "MISTRAL_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
+        }
+        (true, "nvidia") => {
+            insert_if_some(&mut pairs, "NVIDIA_API_KEY", args.api_key.as_deref());
+            insert_if_some(&mut pairs, "NVIDIA_NIM_API_KEY", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "NVIDIA_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
         }
         (true, "deepseek") => {
             insert_if_some(&mut pairs, "DEEPSEEK_API_KEY", args.api_key.as_deref())
@@ -4142,6 +4161,8 @@ mod tests {
         assert_eq!(normalize_connector_target(true, "grok"), "groq");
         assert_eq!(normalize_connector_target(true, "togetherai"), "together");
         assert_eq!(normalize_connector_target(true, "local-openai"), "vllm");
+        assert_eq!(normalize_connector_target(true, "mistralai"), "mistral");
+        assert_eq!(normalize_connector_target(true, "nim"), "nvidia");
         assert_eq!(normalize_connector_target(false, "teams"), "msteams");
         assert_eq!(
             normalize_connector_target(false, "whatsapp-cloud"),
@@ -4155,7 +4176,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_secret_pairs_for_google_openrouter_groq_together_and_vllm() {
+    fn builds_secret_pairs_for_google_openrouter_groq_together_vllm_mistral_and_nvidia() {
         let google_args = super::ConnectorConnectArgs {
             target: "google".to_string(),
             gateway: None,
@@ -4280,6 +4301,62 @@ mod tests {
         assert_eq!(
             vllm_pairs.get("VLLM_BASE_URL").map(String::as_str),
             Some("http://127.0.0.1:8000")
+        );
+
+        let mistral_args = super::ConnectorConnectArgs {
+            target: "mistral".to_string(),
+            gateway: None,
+            api_key: Some("mistral-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://api.mistral.ai/v1/chat/completions".to_string()),
+            env: Vec::new(),
+        };
+        let mistral_pairs =
+            connector_secret_pairs(true, "mistral", &mistral_args).expect("mistral secrets");
+        assert_eq!(
+            mistral_pairs.get("MISTRAL_API_KEY").map(String::as_str),
+            Some("mistral-key")
+        );
+        assert_eq!(
+            mistral_pairs
+                .get("MISTRAL_CHAT_COMPLETIONS_URL")
+                .map(String::as_str),
+            Some("https://api.mistral.ai/v1/chat/completions")
+        );
+
+        let nvidia_args = super::ConnectorConnectArgs {
+            target: "nvidia".to_string(),
+            gateway: None,
+            api_key: Some("nvidia-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://integrate.api.nvidia.com/v1/chat/completions".to_string()),
+            env: Vec::new(),
+        };
+        let nvidia_pairs =
+            connector_secret_pairs(true, "nvidia", &nvidia_args).expect("nvidia secrets");
+        assert_eq!(
+            nvidia_pairs.get("NVIDIA_API_KEY").map(String::as_str),
+            Some("nvidia-key")
+        );
+        assert_eq!(
+            nvidia_pairs.get("NVIDIA_NIM_API_KEY").map(String::as_str),
+            Some("nvidia-key")
+        );
+        assert_eq!(
+            nvidia_pairs
+                .get("NVIDIA_CHAT_COMPLETIONS_URL")
+                .map(String::as_str),
+            Some("https://integrate.api.nvidia.com/v1/chat/completions")
         );
     }
 

@@ -30,6 +30,8 @@ struct ConfiguredConnectors {
     groq: bool,
     together: bool,
     vllm: bool,
+    mistral: bool,
+    nvidia: bool,
     deepseek: bool,
     qwen: bool,
     zhipu: bool,
@@ -162,6 +164,8 @@ pub async fn execute_model_connector(
         "groq" => execute_groq_response(request).await,
         "together" => execute_together_response(request).await,
         "vllm" => execute_vllm_response(request).await,
+        "mistral" => execute_mistral_response(request).await,
+        "nvidia" => execute_nvidia_response(request).await,
         "deepseek" => execute_deepseek_response(request).await,
         "qwen" => execute_qwen_response(request).await,
         "zhipu" => execute_zhipu_response(request).await,
@@ -267,6 +271,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/model/groq/respond", post(groq_respond))
         .route("/model/together/respond", post(together_respond))
         .route("/model/vllm/respond", post(vllm_respond))
+        .route("/model/mistral/respond", post(mistral_respond))
+        .route("/model/nvidia/respond", post(nvidia_respond))
         .route("/model/deepseek/respond", post(deepseek_respond))
         .route("/model/qwen/respond", post(qwen_respond))
         .route("/model/zhipu/respond", post(zhipu_respond))
@@ -302,6 +308,8 @@ async fn status() -> Json<ConnectorStatusReport> {
             together: std::env::var("TOGETHER_API_KEY").is_ok(),
             vllm: std::env::var("VLLM_CHAT_COMPLETIONS_URL").is_ok()
                 || std::env::var("VLLM_BASE_URL").is_ok(),
+            mistral: std::env::var("MISTRAL_API_KEY").is_ok(),
+            nvidia: resolve_first_present_env(&["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"]).is_some(),
             deepseek: std::env::var("DEEPSEEK_API_KEY").is_ok(),
             qwen: resolve_first_present_env(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]).is_some(),
             zhipu: std::env::var("ZHIPU_API_KEY").is_ok(),
@@ -359,6 +367,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "vllm",
                 region: "local",
                 integration_mode: "live_local_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "mistral",
+                region: "global",
+                integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "nvidia",
+                region: "global",
+                integration_mode: "live_openai_compatible",
             },
             ModelProviderSupport {
                 provider: "deepseek",
@@ -526,6 +544,26 @@ async fn vllm_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_vllm_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn mistral_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_mistral_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn nvidia_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_nvidia_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -1014,6 +1052,34 @@ async fn execute_vllm_response(
         output_text: extract_chat_completion_text(&raw_response),
         raw_response: Some(raw_response),
     })
+}
+
+async fn execute_mistral_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "mistral",
+        request,
+        "mistral-medium-latest",
+        &["MISTRAL_API_KEY"],
+        Some("MISTRAL_CHAT_COMPLETIONS_URL"),
+        "https://api.mistral.ai/v1/chat/completions",
+    )
+    .await
+}
+
+async fn execute_nvidia_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "nvidia",
+        request,
+        "meta/llama-3.3-70b-instruct",
+        &["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"],
+        Some("NVIDIA_CHAT_COMPLETIONS_URL"),
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+    )
+    .await
 }
 
 async fn execute_deepseek_response(
