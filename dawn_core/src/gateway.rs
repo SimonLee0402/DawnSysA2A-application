@@ -85,6 +85,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "google",
             "openrouter",
             "groq",
+            "together",
+            "vllm",
             "deepseek",
             "qwen",
             "zhipu",

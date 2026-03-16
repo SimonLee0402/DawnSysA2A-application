@@ -3424,6 +3424,8 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
             "claude" => "anthropic".to_string(),
             "gemini" => "google".to_string(),
             "grok" => "groq".to_string(),
+            "togetherai" => "together".to_string(),
+            "openai-local" | "local-openai" => "vllm".to_string(),
             other => other.to_string(),
         }
     } else {
@@ -3470,6 +3472,18 @@ fn connector_secret_pairs(
                 "GROQ_CHAT_COMPLETIONS_URL",
                 args.base_url.as_deref(),
             );
+        }
+        (true, "together") => {
+            insert_if_some(&mut pairs, "TOGETHER_API_KEY", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "TOGETHER_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
+        }
+        (true, "vllm") => {
+            insert_if_some(&mut pairs, "VLLM_API_KEY", args.api_key.as_deref());
+            insert_if_some(&mut pairs, "VLLM_BASE_URL", args.base_url.as_deref());
         }
         (true, "deepseek") => {
             insert_if_some(&mut pairs, "DEEPSEEK_API_KEY", args.api_key.as_deref())
@@ -4087,6 +4101,8 @@ mod tests {
     fn normalizes_connector_aliases_for_new_targets() {
         assert_eq!(normalize_connector_target(true, "gemini"), "google");
         assert_eq!(normalize_connector_target(true, "grok"), "groq");
+        assert_eq!(normalize_connector_target(true, "togetherai"), "together");
+        assert_eq!(normalize_connector_target(true, "local-openai"), "vllm");
         assert_eq!(normalize_connector_target(false, "teams"), "msteams");
         assert_eq!(
             normalize_connector_target(false, "google-chat"),
@@ -4095,7 +4111,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_secret_pairs_for_google_openrouter_and_groq() {
+    fn builds_secret_pairs_for_google_openrouter_groq_together_and_vllm() {
         let google_args = super::ConnectorConnectArgs {
             target: "google".to_string(),
             gateway: None,
@@ -4171,6 +4187,55 @@ mod tests {
                 .get("GROQ_CHAT_COMPLETIONS_URL")
                 .map(String::as_str),
             Some("https://api.groq.com/openai/v1/chat/completions")
+        );
+
+        let together_args = super::ConnectorConnectArgs {
+            target: "together".to_string(),
+            gateway: None,
+            api_key: Some("together-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("https://api.together.xyz/v1/chat/completions".to_string()),
+            env: Vec::new(),
+        };
+        let together_pairs =
+            connector_secret_pairs(true, "together", &together_args).expect("together secrets");
+        assert_eq!(
+            together_pairs.get("TOGETHER_API_KEY").map(String::as_str),
+            Some("together-key")
+        );
+        assert_eq!(
+            together_pairs
+                .get("TOGETHER_CHAT_COMPLETIONS_URL")
+                .map(String::as_str),
+            Some("https://api.together.xyz/v1/chat/completions")
+        );
+
+        let vllm_args = super::ConnectorConnectArgs {
+            target: "vllm".to_string(),
+            gateway: None,
+            api_key: Some("local-key".to_string()),
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("http://127.0.0.1:8000".to_string()),
+            env: Vec::new(),
+        };
+        let vllm_pairs = connector_secret_pairs(true, "vllm", &vllm_args).expect("vllm secrets");
+        assert_eq!(
+            vllm_pairs.get("VLLM_API_KEY").map(String::as_str),
+            Some("local-key")
+        );
+        assert_eq!(
+            vllm_pairs.get("VLLM_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:8000")
         );
     }
 

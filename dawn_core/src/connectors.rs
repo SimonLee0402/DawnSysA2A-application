@@ -28,6 +28,8 @@ struct ConfiguredConnectors {
     google: bool,
     openrouter: bool,
     groq: bool,
+    together: bool,
+    vllm: bool,
     deepseek: bool,
     qwen: bool,
     zhipu: bool,
@@ -149,6 +151,8 @@ pub async fn execute_model_connector(
         "google" => execute_google_response(request).await,
         "openrouter" => execute_openrouter_response(request).await,
         "groq" => execute_groq_response(request).await,
+        "together" => execute_together_response(request).await,
+        "vllm" => execute_vllm_response(request).await,
         "deepseek" => execute_deepseek_response(request).await,
         "qwen" => execute_qwen_response(request).await,
         "zhipu" => execute_zhipu_response(request).await,
@@ -232,6 +236,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/model/google/respond", post(google_respond))
         .route("/model/openrouter/respond", post(openrouter_respond))
         .route("/model/groq/respond", post(groq_respond))
+        .route("/model/together/respond", post(together_respond))
+        .route("/model/vllm/respond", post(vllm_respond))
         .route("/model/deepseek/respond", post(deepseek_respond))
         .route("/model/qwen/respond", post(qwen_respond))
         .route("/model/zhipu/respond", post(zhipu_respond))
@@ -262,6 +268,9 @@ async fn status() -> Json<ConnectorStatusReport> {
             google: resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]).is_some(),
             openrouter: std::env::var("OPENROUTER_API_KEY").is_ok(),
             groq: std::env::var("GROQ_API_KEY").is_ok(),
+            together: std::env::var("TOGETHER_API_KEY").is_ok(),
+            vllm: std::env::var("VLLM_CHAT_COMPLETIONS_URL").is_ok()
+                || std::env::var("VLLM_BASE_URL").is_ok(),
             deepseek: std::env::var("DEEPSEEK_API_KEY").is_ok(),
             qwen: resolve_first_present_env(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]).is_some(),
             zhipu: std::env::var("ZHIPU_API_KEY").is_ok(),
@@ -306,6 +315,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "groq",
                 region: "global",
                 integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "together",
+                region: "global",
+                integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "vllm",
+                region: "local",
+                integration_mode: "live_local_openai_compatible",
             },
             ModelProviderSupport {
                 provider: "deepseek",
@@ -443,6 +462,26 @@ async fn groq_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_groq_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn together_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_together_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn vllm_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_vllm_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -850,6 +889,67 @@ async fn execute_groq_response(
         "https://api.groq.com/openai/v1/chat/completions",
     )
     .await
+}
+
+async fn execute_together_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "together",
+        request,
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        &["TOGETHER_API_KEY"],
+        Some("TOGETHER_CHAT_COMPLETIONS_URL"),
+        "https://api.together.xyz/v1/chat/completions",
+    )
+    .await
+}
+
+async fn execute_vllm_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model
+        .or_else(|| resolve_first_present_env(&["VLLM_MODEL"]))
+        .unwrap_or_else(|| "Qwen/Qwen2.5-1.5B-Instruct".to_string());
+    let endpoint = std::env::var("VLLM_CHAT_COMPLETIONS_URL")
+        .ok()
+        .or_else(|| {
+            std::env::var("VLLM_BASE_URL")
+                .ok()
+                .map(|base| format!("{}/v1/chat/completions", base.trim_end_matches('/')))
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:8000/v1/chat/completions".to_string());
+    let body = json!({
+        "model": model,
+        "messages": build_chat_completion_messages(&input, instructions.as_deref()),
+        "stream": false
+    });
+
+    info!("Dispatching live vLLM chat completion request through gateway connector");
+    let mut request_builder = Client::new().post(&endpoint);
+    if let Ok(api_key) = std::env::var("VLLM_API_KEY") {
+        request_builder = request_builder.bearer_auth(api_key);
+    }
+    let response = request_builder.json(&body).send().await?;
+    let status = response.status();
+    let raw_response = response.json::<Value>().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("vllm connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "vllm",
+        model: body["model"].as_str().unwrap_or("unknown").to_string(),
+        output_text: extract_chat_completion_text(&raw_response),
+        raw_response: Some(raw_response),
+    })
 }
 
 async fn execute_deepseek_response(
