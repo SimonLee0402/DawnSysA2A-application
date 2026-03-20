@@ -12,12 +12,10 @@ use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 use tracing::warn;
 use uuid::Uuid;
-use wasmtime::Engine;
 
 use crate::{
     a2a::{self, Task},
     app_state::{AppState, ChatIngressEventRecord, ChatIngressStatus, unix_timestamp_ms},
-    sandbox,
 };
 
 #[derive(Debug, Serialize)]
@@ -25,6 +23,8 @@ use crate::{
 struct ChatIngressStatusReport {
     supported_platforms: Vec<&'static str>,
     telegram_webhook_secret_configured: bool,
+    signal_callback_secret_configured: bool,
+    bluebubbles_callback_secret_configured: bool,
     dingtalk_callback_token_configured: bool,
     wecom_callback_token_configured: bool,
     wechat_official_account_token_configured: bool,
@@ -87,6 +87,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/status", get(status))
         .route("/events", get(list_events))
         .route("/telegram/webhook/:secret", post(telegram_webhook))
+        .route("/signal/events/:secret", post(signal_events))
+        .route("/bluebubbles/events/:secret", post(bluebubbles_events))
         .route("/feishu/events", post(feishu_events))
         .route("/dingtalk/events", post(dingtalk_events))
         .route("/wecom/events", get(wecom_verify).post(wecom_events))
@@ -111,6 +113,8 @@ async fn status(
     Ok(Json(ChatIngressStatusReport {
         supported_platforms: vec![
             "telegram",
+            "signal",
+            "bluebubbles",
             "feishu",
             "dingtalk",
             "wecom",
@@ -118,6 +122,9 @@ async fn status(
             "qq",
         ],
         telegram_webhook_secret_configured: std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET").is_ok(),
+        signal_callback_secret_configured: std::env::var("DAWN_SIGNAL_CALLBACK_SECRET").is_ok(),
+        bluebubbles_callback_secret_configured: std::env::var("DAWN_BLUEBUBBLES_CALLBACK_SECRET")
+            .is_ok(),
         dingtalk_callback_token_configured: std::env::var("DAWN_DINGTALK_CALLBACK_TOKEN").is_ok(),
         wecom_callback_token_configured: std::env::var("DAWN_WECOM_CALLBACK_TOKEN").is_ok(),
         wechat_official_account_token_configured: std::env::var(
@@ -179,6 +186,131 @@ async fn telegram_webhook(
             "messageId": message.message_id,
             "chatId": message.chat.id
         }),
+    )
+    .await
+    .map_err(service_error)?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "ingressId": record.ingress_id,
+        "status": record.status,
+        "taskId": record.linked_task_id
+    })))
+}
+
+async fn signal_events(
+    State(state): State<Arc<AppState>>,
+    Path(secret): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_callback_secret("DAWN_SIGNAL_CALLBACK_SECRET", "signal", &secret)
+        .map_err(bad_request)?;
+
+    let text = extract_signal_text(&payload).ok_or_else(|| {
+        bad_request(anyhow::anyhow!(
+            "unsupported signal event; expected a text message payload"
+        ))
+    })?;
+    let chat_id = payload
+        .pointer("/envelope/source")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/source").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/data/source").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let sender_id = chat_id.clone();
+    let sender_display = payload
+        .pointer("/envelope/sourceName")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or(sender_id.clone());
+    let event_type = payload
+        .pointer("/envelope/type")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/type").and_then(Value::as_str))
+        .unwrap_or("signal.event")
+        .to_string();
+
+    let record = ingest_message(
+        state,
+        "signal",
+        event_type,
+        chat_id,
+        sender_id,
+        sender_display,
+        text,
+        payload,
+    )
+    .await
+    .map_err(service_error)?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "ingressId": record.ingress_id,
+        "status": record.status,
+        "taskId": record.linked_task_id
+    })))
+}
+
+async fn bluebubbles_events(
+    State(state): State<Arc<AppState>>,
+    Path(secret): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_callback_secret("DAWN_BLUEBUBBLES_CALLBACK_SECRET", "bluebubbles", &secret)
+        .map_err(bad_request)?;
+
+    let text = extract_bluebubbles_text(&payload).ok_or_else(|| {
+        bad_request(anyhow::anyhow!(
+            "unsupported bluebubbles event; expected a text message payload"
+        ))
+    })?;
+    let chat_id = payload
+        .pointer("/chatGuid")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/message/chatGuid").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/data/chatGuid").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let sender_id = payload
+        .pointer("/handle/address")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .pointer("/message/handle/address")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.pointer("/sender/address").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let sender_display = payload
+        .pointer("/handle/displayName")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .pointer("/message/handle/displayName")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .pointer("/sender/displayName")
+                .and_then(Value::as_str)
+        })
+        .map(ToString::to_string)
+        .or(sender_id.clone());
+    let event_type = payload
+        .pointer("/event")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/type").and_then(Value::as_str))
+        .unwrap_or("bluebubbles.event")
+        .to_string();
+
+    let record = ingest_message(
+        state,
+        "bluebubbles",
+        event_type,
+        chat_id,
+        sender_id,
+        sender_display,
+        text,
+        payload,
     )
     .await
     .map_err(service_error)?;
@@ -619,6 +751,34 @@ fn extract_feishu_text(payload: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn extract_signal_text(payload: &Value) -> Option<String> {
+    payload
+        .pointer("/envelope/dataMessage/message")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .pointer("/dataMessage/message")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.pointer("/message").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn extract_bluebubbles_text(payload: &Value) -> Option<String> {
+    payload
+        .pointer("/text")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/message/text").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/message").and_then(Value::as_str))
+        .or_else(|| payload.pointer("/data/text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn extract_dingtalk_text(payload: &Value) -> Option<String> {
     if let Some(message_type) = payload.pointer("/msgtype").and_then(Value::as_str) {
         if message_type != "text" {
@@ -740,6 +900,15 @@ fn verify_telegram_secret(secret: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn verify_callback_secret(env_var: &str, platform: &str, secret: &str) -> anyhow::Result<()> {
+    if let Ok(expected) = std::env::var(env_var) {
+        if expected != secret {
+            anyhow::bail!("{platform} callback secret mismatch");
+        }
+    }
+    Ok(())
+}
+
 fn verify_wechat_official_account_query(
     query: &WeChatOfficialAccountVerifyQuery,
 ) -> anyhow::Result<()> {
@@ -851,8 +1020,10 @@ mod tests {
 
     use axum::Router;
     use reqwest::Client;
+    use wasmtime::Engine;
 
     use super::*;
+    use crate::sandbox;
 
     fn temp_database_url() -> (String, PathBuf) {
         let mut path = std::env::temp_dir();
@@ -938,6 +1109,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signal_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/signal/events/test-secret"
+            ))
+            .json(&json!({
+                "envelope": {
+                    "type": "receipt",
+                    "source": "+15550002222",
+                    "sourceName": "Signal Friend",
+                    "dataMessage": {
+                        "message": "/task Summarize Signal backlog"
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["ok"], true);
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].platform, "signal");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        let task_id = events[0]
+            .linked_task_id
+            .ok_or_else(|| anyhow::anyhow!("missing linked task id"))?;
+        let task = state
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        assert_eq!(task.instruction, "Summarize Signal backlog");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dingtalk_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
@@ -968,6 +1181,49 @@ mod tests {
             .await?
             .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         assert_eq!(task.instruction, "Create reimbursement summary");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bluebubbles_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/bluebubbles/events/test-secret"
+            ))
+            .json(&json!({
+                "event": "message.created",
+                "chatGuid": "iMessage;+15550002222",
+                "message": {
+                    "text": "/task Draft iMessage follow-up",
+                    "handle": {
+                        "address": "+15550002222",
+                        "displayName": "Blue Contact"
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["ok"], true);
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].platform, "bluebubbles");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        let task_id = events[0]
+            .linked_task_id
+            .ok_or_else(|| anyhow::anyhow!("missing linked task id"))?;
+        let task = state
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        assert_eq!(task.instruction, "Draft iMessage follow-up");
 
         handle.abort();
         fs::remove_file(db_path).ok();

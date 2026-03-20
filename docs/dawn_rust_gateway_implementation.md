@@ -145,6 +145,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/ingress/status`
 - `GET /api/gateway/ingress/events`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
+- `POST /api/gateway/ingress/signal/events/{secret}`
+- `POST /api/gateway/ingress/bluebubbles/events/{secret}`
 - `POST /api/gateway/ingress/feishu/events`
 - `POST /api/gateway/ingress/dingtalk/events`
 - `GET /api/gateway/ingress/wecom/events`
@@ -269,6 +271,8 @@ Ingress endpoints:
 - `GET /api/gateway/ingress/status`
 - `GET /api/gateway/ingress/events?limit=20`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
+- `POST /api/gateway/ingress/signal/events/{secret}`
+- `POST /api/gateway/ingress/bluebubbles/events/{secret}`
 - `POST /api/gateway/ingress/feishu/events`
 - `POST /api/gateway/ingress/dingtalk/events`
 - `GET /api/gateway/ingress/wecom/events`
@@ -1404,7 +1408,7 @@ Removed legacy launchers:
 - Agent Card discovery and invocation now work for Dawn-compatible task endpoints, but the compatibility layer is still pragmatic rather than a fully heterogeneous A2A adapter matrix.
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
-- Inbound chat ingress now covers Telegram, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and approvals still fall back to a web portal link rather than native buttons inside each chat platform.
+- Inbound chat ingress now covers Telegram, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and approvals still fall back to a web portal link rather than native buttons inside each chat platform.
 - Identity onboarding now exposes a concrete readiness/checklist view, persistent setup verification receipts, node-claim reissue, and claim audit history for operator session bootstrap, workspace setup, connector defaults, ingress, node claims, and end-user approval routing, but it is still not a full opinionated wizard with persisted operator tasks or connector-by-connector validation history beyond the latest receipt chain.
 - Marketplace discovery now includes a federated peer registry and merged remote catalogs, but it is still early-stage: there is not yet signed peer bootstrap, ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.

@@ -2678,7 +2678,7 @@ fn connect_ingress_target(
     mut profile: DawnCliProfile,
     args: IngressConnectArgs,
 ) -> anyhow::Result<()> {
-    let target = args.target.trim().to_ascii_lowercase();
+    let target = normalize_ingress_target_name(&args.target);
     let env_pairs = ingress_secret_pairs(&target, &args)?;
     if env_pairs.is_empty() {
         bail!("no ingress credentials were provided for {}", args.target);
@@ -4848,6 +4848,16 @@ fn ingress_secret_pairs(
             "DAWN_TELEGRAM_WEBHOOK_SECRET",
             args.secret.as_deref(),
         ),
+        "signal" => insert_if_some(
+            &mut pairs,
+            "DAWN_SIGNAL_CALLBACK_SECRET",
+            args.secret.as_deref(),
+        ),
+        "bluebubbles" => insert_if_some(
+            &mut pairs,
+            "DAWN_BLUEBUBBLES_CALLBACK_SECRET",
+            args.secret.as_deref(),
+        ),
         "feishu" => {}
         "dingtalk" => insert_if_some(
             &mut pairs,
@@ -4873,6 +4883,14 @@ fn ingress_secret_pairs(
     }
 
     Ok(pairs)
+}
+
+fn normalize_ingress_target_name(target: &str) -> String {
+    match target.trim().to_ascii_lowercase().as_str() {
+        "signal-cli" | "signal_cli" | "signal-messenger" => "signal".to_string(),
+        "blue-bubbles" | "blue_bubbles" => "bluebubbles".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn parse_env_assignments(values: &[String]) -> anyhow::Result<Vec<(String, String)>> {
@@ -5160,8 +5178,8 @@ mod tests {
         ApprovalRequestSummary, PaymentRecordSummary, build_ap2_signature_payload,
         build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
         default_requested_capabilities, extract_text_from_value, find_pending_approval_record,
-        format_payment_approval_summary, normalize_connector_target, resolve_ap2_mcu_seed_hex,
-        sign_ap2_payload, update_values,
+        format_payment_approval_summary, ingress_secret_pairs, normalize_connector_target,
+        normalize_ingress_target_name, resolve_ap2_mcu_seed_hex, sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
     use serde_json::json;
@@ -5871,5 +5889,46 @@ mod tests {
             body,
             json!({ "chatId": "15551234567", "text": "hello channel" })
         );
+    }
+
+    #[test]
+    fn builds_ingress_secret_pairs_for_signal_and_bluebubbles() {
+        let signal_args = super::IngressConnectArgs {
+            target: "signal-cli".to_string(),
+            gateway: None,
+            secret: Some("signal-secret".to_string()),
+            token: None,
+            env: Vec::new(),
+        };
+        let signal_pairs =
+            ingress_secret_pairs("signal", &signal_args).expect("signal ingress secrets");
+        assert_eq!(
+            signal_pairs
+                .get("DAWN_SIGNAL_CALLBACK_SECRET")
+                .map(String::as_str),
+            Some("signal-secret")
+        );
+
+        let bluebubbles_args = super::IngressConnectArgs {
+            target: "blue-bubbles".to_string(),
+            gateway: None,
+            secret: Some("blue-secret".to_string()),
+            token: None,
+            env: Vec::new(),
+        };
+        let bluebubbles_pairs = ingress_secret_pairs("bluebubbles", &bluebubbles_args)
+            .expect("bluebubbles ingress secrets");
+        assert_eq!(
+            bluebubbles_pairs
+                .get("DAWN_BLUEBUBBLES_CALLBACK_SECRET")
+                .map(String::as_str),
+            Some("blue-secret")
+        );
+    }
+
+    #[test]
+    fn normalizes_ingress_aliases_for_new_targets() {
+        assert_eq!(normalize_ingress_target_name("signal-cli"), "signal");
+        assert_eq!(normalize_ingress_target_name("blue-bubbles"), "bluebubbles");
     }
 }
