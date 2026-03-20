@@ -290,6 +290,7 @@ pub struct MarketplacePeerRecord {
 #[serde(rename_all = "snake_case")]
 pub enum ChatIngressStatus {
     Received,
+    PendingApproval,
     TaskCreated,
     Replied,
     Ignored,
@@ -300,6 +301,7 @@ impl ChatIngressStatus {
     fn as_db(self) -> &'static str {
         match self {
             Self::Received => "received",
+            Self::PendingApproval => "pending_approval",
             Self::TaskCreated => "task_created",
             Self::Replied => "replied",
             Self::Ignored => "ignored",
@@ -310,6 +312,7 @@ impl ChatIngressStatus {
     fn from_db(raw: &str) -> anyhow::Result<Self> {
         match raw {
             "received" => Ok(Self::Received),
+            "pending_approval" => Ok(Self::PendingApproval),
             "task_created" => Ok(Self::TaskCreated),
             "replied" => Ok(Self::Replied),
             "ignored" => Ok(Self::Ignored),
@@ -334,6 +337,53 @@ pub struct ChatIngressEventRecord {
     pub reply_text: Option<String>,
     pub status: ChatIngressStatus,
     pub error: Option<String>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatChannelIdentityStatus {
+    Pending,
+    Paired,
+    Rejected,
+    Blocked,
+}
+
+impl ChatChannelIdentityStatus {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Paired => "paired",
+            Self::Rejected => "rejected",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "paired" => Ok(Self::Paired),
+            "rejected" => Ok(Self::Rejected),
+            "blocked" => Ok(Self::Blocked),
+            _ => Err(anyhow!("unknown chat channel identity status '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatChannelIdentityRecord {
+    pub platform: String,
+    pub identity_key: String,
+    pub chat_id: Option<String>,
+    pub sender_id: Option<String>,
+    pub sender_display: Option<String>,
+    pub pairing_code: Option<String>,
+    pub dm_policy: String,
+    pub decision_reason: Option<String>,
+    pub last_ingress_id: Option<Uuid>,
+    pub status: ChatChannelIdentityStatus,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
 }
@@ -1414,6 +1464,169 @@ impl AppState {
         row.map(TryInto::try_into).transpose()
     }
 
+    pub async fn upsert_chat_channel_identity(
+        &self,
+        identity: ChatChannelIdentityRecord,
+    ) -> anyhow::Result<ChatChannelIdentityRecord> {
+        save_chat_channel_identity(&self.pool, &identity).await?;
+        self.emit_console_event(
+            "chat_identity",
+            Some(format!("{}:{}", identity.platform, identity.identity_key)),
+            Some(identity.status.as_db().to_string()),
+            format!(
+                "{} chat identity {}",
+                identity.platform,
+                identity
+                    .sender_display
+                    .clone()
+                    .or(identity.sender_id.clone())
+                    .unwrap_or_else(|| identity.identity_key.clone())
+            ),
+        );
+        Ok(identity)
+    }
+
+    pub async fn get_chat_channel_identity(
+        &self,
+        platform: &str,
+        identity_key: &str,
+    ) -> anyhow::Result<Option<ChatChannelIdentityRecord>> {
+        let row = sqlx::query_as::<_, ChatChannelIdentityRow>(
+            r#"
+            SELECT
+                platform,
+                identity_key,
+                chat_id,
+                sender_id,
+                sender_display,
+                pairing_code,
+                dm_policy,
+                decision_reason,
+                last_ingress_id,
+                status,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM chat_channel_identities
+            WHERE platform = ?1 AND identity_key = ?2
+            "#,
+        )
+        .bind(platform)
+        .bind(identity_key)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!("failed to fetch chat identity for {platform}:{identity_key}")
+        })?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_chat_channel_identities(
+        &self,
+        platform: Option<&str>,
+        status: Option<ChatChannelIdentityStatus>,
+    ) -> anyhow::Result<Vec<ChatChannelIdentityRecord>> {
+        let rows = match (platform, status) {
+            (Some(platform), Some(status)) => sqlx::query_as::<_, ChatChannelIdentityRow>(
+                r#"
+                SELECT
+                    platform,
+                    identity_key,
+                    chat_id,
+                    sender_id,
+                    sender_display,
+                    pairing_code,
+                    dm_policy,
+                    decision_reason,
+                    last_ingress_id,
+                    status,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM chat_channel_identities
+                WHERE platform = ?1 AND status = ?2
+                ORDER BY updated_at_unix_ms DESC, identity_key ASC
+                "#,
+            )
+            .bind(platform)
+            .bind(status.as_db())
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list chat identities by platform and status")?,
+            (Some(platform), None) => sqlx::query_as::<_, ChatChannelIdentityRow>(
+                r#"
+                SELECT
+                    platform,
+                    identity_key,
+                    chat_id,
+                    sender_id,
+                    sender_display,
+                    pairing_code,
+                    dm_policy,
+                    decision_reason,
+                    last_ingress_id,
+                    status,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM chat_channel_identities
+                WHERE platform = ?1
+                ORDER BY updated_at_unix_ms DESC, identity_key ASC
+                "#,
+            )
+            .bind(platform)
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list chat identities by platform")?,
+            (None, Some(status)) => sqlx::query_as::<_, ChatChannelIdentityRow>(
+                r#"
+                SELECT
+                    platform,
+                    identity_key,
+                    chat_id,
+                    sender_id,
+                    sender_display,
+                    pairing_code,
+                    dm_policy,
+                    decision_reason,
+                    last_ingress_id,
+                    status,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM chat_channel_identities
+                WHERE status = ?1
+                ORDER BY updated_at_unix_ms DESC, identity_key ASC
+                "#,
+            )
+            .bind(status.as_db())
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list chat identities by status")?,
+            (None, None) => sqlx::query_as::<_, ChatChannelIdentityRow>(
+                r#"
+                SELECT
+                    platform,
+                    identity_key,
+                    chat_id,
+                    sender_id,
+                    sender_display,
+                    pairing_code,
+                    dm_policy,
+                    decision_reason,
+                    last_ingress_id,
+                    status,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM chat_channel_identities
+                ORDER BY updated_at_unix_ms DESC, identity_key ASC
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to list chat identities")?,
+        };
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     pub async fn upsert_node(
         &self,
         node_id: impl Into<String>,
@@ -2451,6 +2664,43 @@ impl TryFrom<ChatIngressEventRow> for ChatIngressEventRecord {
 }
 
 #[derive(FromRow)]
+struct ChatChannelIdentityRow {
+    platform: String,
+    identity_key: String,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+    pairing_code: Option<String>,
+    dm_policy: String,
+    decision_reason: Option<String>,
+    last_ingress_id: Option<String>,
+    status: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<ChatChannelIdentityRow> for ChatChannelIdentityRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: ChatChannelIdentityRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            platform: row.platform,
+            identity_key: row.identity_key,
+            chat_id: row.chat_id,
+            sender_id: row.sender_id,
+            sender_display: row.sender_display,
+            pairing_code: row.pairing_code,
+            dm_policy: row.dm_policy,
+            decision_reason: row.decision_reason,
+            last_ingress_id: parse_uuid_opt(row.last_ingress_id, "last_ingress_id")?,
+            status: ChatChannelIdentityStatus::from_db(&row.status)?,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct NodeRow {
     node_id: String,
     display_name: String,
@@ -2991,6 +3241,31 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_linked_task_id
         ON chat_ingress_events(linked_task_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_channel_identities (
+            platform TEXT NOT NULL,
+            identity_key TEXT NOT NULL,
+            chat_id TEXT,
+            sender_id TEXT,
+            sender_display TEXT,
+            pairing_code TEXT,
+            dm_policy TEXT NOT NULL,
+            decision_reason TEXT,
+            last_ingress_id TEXT,
+            status TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL,
+            PRIMARY KEY (platform, identity_key)
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_channel_identities_status
+        ON chat_channel_identities(status, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_channel_identities_platform_status
+        ON chat_channel_identities(platform, status, updated_at_unix_ms DESC)
         "#,
         r#"
         CREATE TABLE IF NOT EXISTS nodes (
@@ -3799,6 +4074,58 @@ async fn save_chat_ingress_event(
     .execute(pool)
     .await
     .context("failed to save chat ingress event")?;
+
+    Ok(())
+}
+
+async fn save_chat_channel_identity(
+    pool: &SqlitePool,
+    identity: &ChatChannelIdentityRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chat_channel_identities (
+            platform,
+            identity_key,
+            chat_id,
+            sender_id,
+            sender_display,
+            pairing_code,
+            dm_policy,
+            decision_reason,
+            last_ingress_id,
+            status,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(platform, identity_key) DO UPDATE SET
+            chat_id = excluded.chat_id,
+            sender_id = excluded.sender_id,
+            sender_display = excluded.sender_display,
+            pairing_code = excluded.pairing_code,
+            dm_policy = excluded.dm_policy,
+            decision_reason = excluded.decision_reason,
+            last_ingress_id = excluded.last_ingress_id,
+            status = excluded.status,
+            created_at_unix_ms = chat_channel_identities.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(&identity.platform)
+    .bind(&identity.identity_key)
+    .bind(&identity.chat_id)
+    .bind(&identity.sender_id)
+    .bind(&identity.sender_display)
+    .bind(&identity.pairing_code)
+    .bind(&identity.dm_policy)
+    .bind(&identity.decision_reason)
+    .bind(identity.last_ingress_id.map(|value| value.to_string()))
+    .bind(identity.status.as_db())
+    .bind(u128_to_i64(identity.created_at_unix_ms)?)
+    .bind(u128_to_i64(identity.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save chat channel identity")?;
 
     Ok(())
 }

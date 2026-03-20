@@ -634,6 +634,8 @@ async fn execute_command(
         "browser_open" => execute_browser_open_command(envelope).await,
         "browser_search" => execute_browser_search_command(envelope).await,
         "desktop_open" => execute_desktop_open_command(envelope).await,
+        "system_lock" => execute_system_lock_command(envelope).await,
+        "system_sleep" => execute_system_sleep_command(envelope).await,
         "desktop_notification" => execute_desktop_notification_command(envelope).await,
         "desktop_clipboard_set" => execute_desktop_clipboard_set_command(envelope).await,
         "desktop_type_text" => execute_desktop_type_text_command(envelope).await,
@@ -1287,6 +1289,50 @@ async fn execute_desktop_open_command(envelope: GatewayCommandEnvelope) -> Comma
                 "launcher": result.launcher,
                 "mode": result.mode,
                 "pid": result.pid,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_system_lock_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    match lock_host_system().await {
+        Ok(launcher) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "system_lock",
+                "launcher": launcher,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_system_sleep_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    match sleep_host_system().await {
+        Ok(launcher) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "system_sleep",
+                "launcher": launcher,
             })),
             error: None,
         },
@@ -9604,6 +9650,67 @@ $notify.Dispose()
     anyhow::bail!("desktop_notification is not implemented for this operating system")
 }
 
+async fn lock_host_system() -> anyhow::Result<&'static str> {
+    if cfg!(target_os = "windows") {
+        let status = Command::new("rundll32.exe")
+            .arg("user32.dll,LockWorkStation")
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("system_lock exited with status {:?}", status.code());
+        }
+        return Ok("rundll32:user32.dll,LockWorkStation");
+    }
+    if cfg!(target_os = "macos") {
+        let status = Command::new("osascript")
+            .arg("-e")
+            .arg("tell application \"System Events\" to keystroke \"q\" using {control down, command down}")
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("system_lock exited with status {:?}", status.code());
+        }
+        return Ok("osascript:lock-screen-shortcut");
+    }
+    if cfg!(target_os = "linux") {
+        let status = Command::new("loginctl").arg("lock-session").status().await?;
+        if !status.success() {
+            anyhow::bail!("system_lock exited with status {:?}", status.code());
+        }
+        return Ok("loginctl lock-session");
+    }
+    anyhow::bail!("system_lock is not implemented for this operating system")
+}
+
+async fn sleep_host_system() -> anyhow::Result<&'static str> {
+    if cfg!(target_os = "windows") {
+        let status = Command::new("rundll32.exe")
+            .arg("powrprof.dll,SetSuspendState")
+            .arg("0,1,0")
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("system_sleep exited with status {:?}", status.code());
+        }
+        return Ok("rundll32:powrprof.dll,SetSuspendState");
+    }
+    if cfg!(target_os = "macos") {
+        let status = Command::new("pmset").arg("sleepnow").status().await?;
+        if !status.success() {
+            anyhow::bail!("system_sleep exited with status {:?}", status.code());
+        }
+        return Ok("pmset sleepnow");
+    }
+    if cfg!(target_os = "linux") {
+        let status = Command::new("systemctl").arg("suspend").status().await?;
+        if !status.success() {
+            anyhow::bail!("system_sleep exited with status {:?}", status.code());
+        }
+        return Ok("systemctl suspend");
+    }
+    anyhow::bail!("system_sleep is not implemented for this operating system")
+}
+
 async fn send_desktop_text(text: &str, delay_ms: u64) -> anyhow::Result<&'static str> {
     if cfg!(target_os = "windows") {
         let send_keys = encode_windows_send_keys_text(text);
@@ -11395,6 +11502,8 @@ fn default_capabilities() -> Vec<String> {
         "browser_open".to_string(),
         "browser_search".to_string(),
         "desktop_open".to_string(),
+        "system_lock".to_string(),
+        "system_sleep".to_string(),
         "desktop_notification".to_string(),
         "desktop_clipboard_set".to_string(),
         "desktop_type_text".to_string(),

@@ -29,9 +29,12 @@ struct ConfiguredConnectors {
     google: bool,
     bedrock: bool,
     cloudflare_ai_gateway: bool,
+    github_models: bool,
+    huggingface: bool,
     openrouter: bool,
     groq: bool,
     together: bool,
+    vercel_ai_gateway: bool,
     vllm: bool,
     mistral: bool,
     nvidia: bool,
@@ -169,9 +172,12 @@ pub async fn execute_model_connector(
         "google" => execute_google_response(request).await,
         "bedrock" => execute_bedrock_response(request).await,
         "cloudflare_ai_gateway" => execute_cloudflare_ai_gateway_response(request).await,
+        "github_models" => execute_github_models_response(request).await,
+        "huggingface" => execute_huggingface_response(request).await,
         "openrouter" => execute_openrouter_response(request).await,
         "groq" => execute_groq_response(request).await,
         "together" => execute_together_response(request).await,
+        "vercel_ai_gateway" => execute_vercel_ai_gateway_response(request).await,
         "vllm" => execute_vllm_response(request).await,
         "mistral" => execute_mistral_response(request).await,
         "nvidia" => execute_nvidia_response(request).await,
@@ -312,9 +318,12 @@ pub fn router() -> Router<Arc<AppState>> {
             "/model/cloudflare-ai-gateway/respond",
             post(cloudflare_ai_gateway_respond),
         )
+        .route("/model/github-models/respond", post(github_models_respond))
+        .route("/model/huggingface/respond", post(huggingface_respond))
         .route("/model/openrouter/respond", post(openrouter_respond))
         .route("/model/groq/respond", post(groq_respond))
         .route("/model/together/respond", post(together_respond))
+        .route("/model/vercel-ai-gateway/respond", post(vercel_ai_gateway_respond))
         .route("/model/vllm/respond", post(vllm_respond))
         .route("/model/mistral/respond", post(mistral_respond))
         .route("/model/nvidia/respond", post(nvidia_respond))
@@ -365,9 +374,19 @@ async fn status() -> Json<ConnectorStatusReport> {
                     || std::env::var("CLOUDFLARE_AI_GATEWAY_BASE_URL").is_ok()
                     || (std::env::var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID").is_ok()
                         && std::env::var("CLOUDFLARE_AI_GATEWAY_ID").is_ok())),
+            github_models: resolve_first_present_env(&["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"])
+                .is_some(),
+            huggingface: resolve_first_present_env(&["HUGGINGFACE_API_KEY", "HF_TOKEN"]).is_some(),
             openrouter: std::env::var("OPENROUTER_API_KEY").is_ok(),
             groq: std::env::var("GROQ_API_KEY").is_ok(),
             together: std::env::var("TOGETHER_API_KEY").is_ok(),
+            vercel_ai_gateway: resolve_first_present_env(&[
+                "VERCEL_AI_GATEWAY_API_KEY",
+                "AI_GATEWAY_API_KEY",
+            ])
+            .is_some()
+                || std::env::var("VERCEL_AI_GATEWAY_BASE_URL").is_ok()
+                || std::env::var("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok(),
             vllm: std::env::var("VLLM_CHAT_COMPLETIONS_URL").is_ok()
                 || std::env::var("VLLM_BASE_URL").is_ok(),
             mistral: std::env::var("MISTRAL_API_KEY").is_ok(),
@@ -429,6 +448,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 integration_mode: "live_openai_compatible_gateway",
             },
             ModelProviderSupport {
+                provider: "github_models",
+                region: "global",
+                integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "huggingface",
+                region: "global",
+                integration_mode: "live_openai_compatible_router",
+            },
+            ModelProviderSupport {
                 provider: "openrouter",
                 region: "global",
                 integration_mode: "live_openai_compatible",
@@ -442,6 +471,11 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "together",
                 region: "global",
                 integration_mode: "live_openai_compatible",
+            },
+            ModelProviderSupport {
+                provider: "vercel_ai_gateway",
+                region: "global",
+                integration_mode: "live_openai_compatible_gateway",
             },
             ModelProviderSupport {
                 provider: "vllm",
@@ -629,6 +663,26 @@ async fn cloudflare_ai_gateway_respond(
         .map_err(connector_anyhow_error)
 }
 
+async fn github_models_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_github_models_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn huggingface_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_huggingface_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
 async fn openrouter_respond(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<OpenAIResponseRequest>,
@@ -654,6 +708,16 @@ async fn together_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_together_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn vercel_ai_gateway_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_vercel_ai_gateway_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -1333,6 +1397,48 @@ async fn execute_cloudflare_ai_gateway_response(
             .or(Some("gpt-4.1-mini")),
         &["CLOUDFLARE_AI_GATEWAY_API_KEY", "OPENAI_API_KEY"],
         endpoint.as_str(),
+    )
+    .await
+}
+
+async fn execute_github_models_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "github_models",
+        request,
+        "openai/gpt-4.1-mini",
+        &["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"],
+        Some("GITHUB_MODELS_CHAT_COMPLETIONS_URL"),
+        "https://models.github.ai/inference/chat/completions",
+    )
+    .await
+}
+
+async fn execute_huggingface_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "huggingface",
+        request,
+        "meta-llama/Llama-3.1-8B-Instruct",
+        &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
+        Some("HUGGINGFACE_CHAT_COMPLETIONS_URL"),
+        "https://router.huggingface.co/v1/chat/completions",
+    )
+    .await
+}
+
+async fn execute_vercel_ai_gateway_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    execute_openai_compatible_chat_response(
+        "vercel_ai_gateway",
+        request,
+        "openai/gpt-4.1-mini",
+        &["VERCEL_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"],
+        Some("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL"),
+        "https://ai-gateway.vercel.sh/v1/chat/completions",
     )
     .await
 }

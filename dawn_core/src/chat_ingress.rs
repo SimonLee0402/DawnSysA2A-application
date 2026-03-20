@@ -15,7 +15,11 @@ use uuid::Uuid;
 
 use crate::{
     a2a::{self, Task},
-    app_state::{AppState, ChatIngressEventRecord, ChatIngressStatus, unix_timestamp_ms},
+    app_state::{
+        AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus, ChatIngressEventRecord,
+        ChatIngressStatus, unix_timestamp_ms,
+    },
+    connectors::{self, ChatDispatchRequest},
 };
 
 #[derive(Debug, Serialize)]
@@ -37,6 +41,20 @@ struct ChatIngressStatusReport {
 #[serde(rename_all = "camelCase")]
 struct ListEventsQuery {
     limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListPairingsQuery {
+    platform: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingDecisionRequest {
+    actor: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +104,9 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
         .route("/events", get(list_events))
+        .route("/pairings", get(list_pairings))
+        .route("/pairings/:platform/:identity_key/approve", post(approve_pairing))
+        .route("/pairings/:platform/:identity_key/reject", post(reject_pairing))
         .route("/telegram/webhook/:secret", post(telegram_webhook))
         .route("/signal/events/:secret", post(signal_events))
         .route("/bluebubbles/events/:secret", post(bluebubbles_events))
@@ -146,6 +167,39 @@ async fn list_events(
         .await
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn list_pairings(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListPairingsQuery>,
+) -> Result<Json<Vec<ChatChannelIdentityRecord>>, (StatusCode, Json<Value>)> {
+    let platform = query.platform.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let status = parse_pairing_status(query.status.as_deref())?;
+    state
+        .list_chat_channel_identities(platform, status)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn approve_pairing(
+    State(state): State<Arc<AppState>>,
+    Path((platform, identity_key)): Path<(String, String)>,
+    Json(request): Json<PairingDecisionRequest>,
+) -> Result<Json<ChatChannelIdentityRecord>, (StatusCode, Json<Value>)> {
+    resolve_pairing_decision(state, &platform, &identity_key, true, request)
+        .await
+        .map(Json)
+}
+
+async fn reject_pairing(
+    State(state): State<Arc<AppState>>,
+    Path((platform, identity_key)): Path<(String, String)>,
+    Json(request): Json<PairingDecisionRequest>,
+) -> Result<Json<ChatChannelIdentityRecord>, (StatusCode, Json<Value>)> {
+    resolve_pairing_decision(state, &platform, &identity_key, false, request)
+        .await
+        .map(Json)
 }
 
 async fn telegram_webhook(
@@ -660,6 +714,53 @@ async fn ingest_message(
         return Ok(record);
     }
 
+    match evaluate_ingress_access(
+        state.clone(),
+        platform,
+        record.chat_id.as_deref(),
+        record.sender_id.as_deref(),
+        record.sender_display.as_deref(),
+        record.ingress_id,
+    )
+    .await?
+    {
+        IngressAccessDecision::Allow => {}
+        IngressAccessDecision::PendingPairing(identity) => {
+            let pairing_code = identity
+                .pairing_code
+                .clone()
+                .unwrap_or_else(|| "pending".to_string());
+            let actor = identity
+                .sender_display
+                .clone()
+                .or(identity.sender_id.clone())
+                .unwrap_or_else(|| identity.identity_key.clone());
+            let reply = format!(
+                "Pairing required for {platform}. Ask the operator to approve code {pairing_code} for {actor}."
+            );
+            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply).await;
+            record.reply_text = Some(reply);
+            record.status = ChatIngressStatus::PendingApproval;
+            record.error = Some(format!(
+                "{platform} sender is waiting for pairing approval ({pairing_code})"
+            ));
+            record.updated_at_unix_ms = unix_timestamp_ms();
+            state.upsert_chat_ingress_event(record.clone()).await?;
+            return Ok(record);
+        }
+        IngressAccessDecision::Rejected(message) => {
+            let _ =
+                dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &message)
+                    .await;
+            record.reply_text = Some(message.clone());
+            record.status = ChatIngressStatus::Ignored;
+            record.error = Some(message);
+            record.updated_at_unix_ms = unix_timestamp_ms();
+            state.upsert_chat_ingress_event(record.clone()).await?;
+            return Ok(record);
+        }
+    }
+
     let task_name = format!(
         "{} inbound {}",
         platform,
@@ -702,6 +803,191 @@ async fn ingest_message(
             Ok(record)
         }
     }
+}
+
+enum IngressAccessDecision {
+    Allow,
+    PendingPairing(ChatChannelIdentityRecord),
+    Rejected(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChatDmPolicy {
+    Open,
+    Allowlist,
+    Pairing,
+    Disabled,
+}
+
+async fn evaluate_ingress_access(
+    state: Arc<AppState>,
+    platform: &str,
+    chat_id: Option<&str>,
+    sender_id: Option<&str>,
+    sender_display: Option<&str>,
+    ingress_id: Uuid,
+) -> anyhow::Result<IngressAccessDecision> {
+    if !matches!(platform, "signal" | "bluebubbles") {
+        return Ok(IngressAccessDecision::Allow);
+    }
+
+    let policy = chat_dm_policy_for_platform(platform);
+    let identity_key = build_chat_identity_key(platform, chat_id, sender_id)?;
+    if allowlist_contains(platform, sender_id, chat_id) {
+        return Ok(IngressAccessDecision::Allow);
+    }
+    if let Some(identity) = state.get_chat_channel_identity(platform, &identity_key).await? {
+        return match identity.status {
+            ChatChannelIdentityStatus::Paired => Ok(IngressAccessDecision::Allow),
+            ChatChannelIdentityStatus::Pending if policy == ChatDmPolicy::Pairing => {
+                Ok(IngressAccessDecision::PendingPairing(identity))
+            }
+            ChatChannelIdentityStatus::Rejected | ChatChannelIdentityStatus::Blocked => {
+                Ok(IngressAccessDecision::Rejected(format!(
+                    "{platform} sender {} is not approved for inbound automation.",
+                    identity
+                        .sender_display
+                        .clone()
+                        .or(identity.sender_id.clone())
+                        .unwrap_or_else(|| identity.identity_key.clone())
+                )))
+            }
+            _ => Ok(IngressAccessDecision::Allow),
+        };
+    }
+
+    match policy {
+        ChatDmPolicy::Open => Ok(IngressAccessDecision::Allow),
+        ChatDmPolicy::Allowlist => Ok(IngressAccessDecision::Rejected(format!(
+            "{platform} sender is not allowlisted for inbound automation."
+        ))),
+        ChatDmPolicy::Disabled => Ok(IngressAccessDecision::Rejected(format!(
+            "{platform} inbound automation is disabled."
+        ))),
+        ChatDmPolicy::Pairing => {
+            let now = unix_timestamp_ms();
+            let identity = state
+                .upsert_chat_channel_identity(ChatChannelIdentityRecord {
+                    platform: platform.to_string(),
+                    identity_key: identity_key.clone(),
+                    chat_id: chat_id.map(ToString::to_string),
+                    sender_id: sender_id.map(ToString::to_string),
+                    sender_display: sender_display.map(ToString::to_string),
+                    pairing_code: Some(generate_pairing_code()),
+                    dm_policy: chat_dm_policy_label(policy).to_string(),
+                    decision_reason: None,
+                    last_ingress_id: Some(ingress_id),
+                    status: ChatChannelIdentityStatus::Pending,
+                    created_at_unix_ms: now,
+                    updated_at_unix_ms: now,
+                })
+                .await?;
+            Ok(IngressAccessDecision::PendingPairing(identity))
+        }
+    }
+}
+
+async fn dispatch_ingress_reply_if_possible(
+    platform: &str,
+    chat_id: Option<&str>,
+    text: &str,
+) -> anyhow::Result<()> {
+    let Some(chat_id) = chat_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let request = ChatDispatchRequest {
+        platform: platform.to_string(),
+        text: text.to_string(),
+        chat_id: Some(chat_id.to_string()),
+        parse_mode: None,
+        disable_notification: Some(false),
+        target_type: None,
+        event_id: None,
+        msg_id: None,
+        msg_seq: None,
+        is_wakeup: None,
+    };
+    match connectors::execute_chat_connector(request).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            warn!(?error, platform, "failed to dispatch ingress reply");
+            Ok(())
+        }
+    }
+}
+
+fn build_chat_identity_key(
+    platform: &str,
+    chat_id: Option<&str>,
+    sender_id: Option<&str>,
+) -> anyhow::Result<String> {
+    let value = sender_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| chat_id.map(str::trim).filter(|value| !value.is_empty()))
+        .ok_or_else(|| anyhow::anyhow!("missing sender identity for {platform} ingress"))?;
+    Ok(value.to_string())
+}
+
+fn generate_pairing_code() -> String {
+    let hex = Uuid::new_v4().simple().to_string();
+    hex.chars().take(6).collect::<String>().to_ascii_uppercase()
+}
+
+fn chat_dm_policy_for_platform(platform: &str) -> ChatDmPolicy {
+    let env_var = match platform {
+        "signal" => "DAWN_SIGNAL_DM_POLICY",
+        "bluebubbles" => "DAWN_BLUEBUBBLES_DM_POLICY",
+        _ => return ChatDmPolicy::Open,
+    };
+    match std::env::var(env_var)
+        .unwrap_or_else(|_| "open".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "allowlist" | "allow_list" => ChatDmPolicy::Allowlist,
+        "pairing" | "pair" => ChatDmPolicy::Pairing,
+        "disabled" | "off" => ChatDmPolicy::Disabled,
+        _ => ChatDmPolicy::Open,
+    }
+}
+
+fn chat_dm_policy_label(policy: ChatDmPolicy) -> &'static str {
+    match policy {
+        ChatDmPolicy::Open => "open",
+        ChatDmPolicy::Allowlist => "allowlist",
+        ChatDmPolicy::Pairing => "pairing",
+        ChatDmPolicy::Disabled => "disabled",
+    }
+}
+
+fn allowlist_contains(platform: &str, sender_id: Option<&str>, chat_id: Option<&str>) -> bool {
+    let env_keys: &[&str] = match platform {
+        "signal" => &["DAWN_SIGNAL_ALLOW_FROM", "DAWN_SIGNAL_ALLOWLIST"],
+        "bluebubbles" => &["DAWN_BLUEBUBBLES_ALLOW_FROM", "DAWN_BLUEBUBBLES_ALLOWLIST"],
+        _ => &[],
+    };
+    let allowlist = env_keys
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .unwrap_or_default();
+    if allowlist.trim().is_empty() {
+        return false;
+    }
+    let values = allowlist
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    sender_id
+        .map(str::trim)
+        .filter(|value| values.iter().any(|allowed| allowed.eq_ignore_ascii_case(value)))
+        .is_some()
+        || chat_id
+            .map(str::trim)
+            .filter(|value| values.iter().any(|allowed| allowed.eq_ignore_ascii_case(value)))
+            .is_some()
 }
 
 fn normalize_ingress_instruction(text: &str) -> String {
@@ -909,6 +1195,80 @@ fn verify_callback_secret(env_var: &str, platform: &str, secret: &str) -> anyhow
     Ok(())
 }
 
+async fn resolve_pairing_decision(
+    state: Arc<AppState>,
+    platform: &str,
+    identity_key: &str,
+    approved: bool,
+    request: PairingDecisionRequest,
+) -> Result<ChatChannelIdentityRecord, (StatusCode, Json<Value>)> {
+    let normalized_platform = platform.trim().to_ascii_lowercase();
+    let Some(mut identity) = state
+        .get_chat_channel_identity(&normalized_platform, identity_key)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Err(not_found("chat pairing identity not found"));
+    };
+    identity.status = if approved {
+        ChatChannelIdentityStatus::Paired
+    } else {
+        ChatChannelIdentityStatus::Rejected
+    };
+    identity.decision_reason = request.reason.clone();
+    identity.updated_at_unix_ms = unix_timestamp_ms();
+    let identity = state
+        .upsert_chat_channel_identity(identity)
+        .await
+        .map_err(internal_error)?;
+
+    let actor = request
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("operator");
+    let reason_suffix = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" Reason: {value}"))
+        .unwrap_or_default();
+    let message = if approved {
+        format!(
+            "Pairing approved for {normalized_platform}. {actor} allowed this chat to create tasks.{reason_suffix}"
+        )
+    } else {
+        format!(
+            "Pairing rejected for {normalized_platform}. {actor} denied inbound automation for this chat.{reason_suffix}"
+        )
+    };
+    let _ = dispatch_ingress_reply_if_possible(
+        &normalized_platform,
+        identity.chat_id.as_deref(),
+        &message,
+    )
+    .await;
+
+    Ok(identity)
+}
+
+fn parse_pairing_status(
+    raw: Option<&str>,
+) -> Result<Option<ChatChannelIdentityStatus>, (StatusCode, Json<Value>)> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("pending") => Ok(Some(ChatChannelIdentityStatus::Pending)),
+        Some("paired") => Ok(Some(ChatChannelIdentityStatus::Paired)),
+        Some("rejected") => Ok(Some(ChatChannelIdentityStatus::Rejected)),
+        Some("blocked") => Ok(Some(ChatChannelIdentityStatus::Blocked)),
+        Some(_) => Err(bad_request(anyhow::anyhow!(
+            "pairing status must be pending, paired, rejected, or blocked"
+        ))),
+    }
+}
+
 fn verify_wechat_official_account_query(
     query: &WeChatOfficialAccountVerifyQuery,
 ) -> anyhow::Result<()> {
@@ -979,6 +1339,15 @@ fn bad_request(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     )
 }
 
+fn not_found(message: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": message
+        })),
+    )
+}
+
 fn service_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     let message = error.to_string();
     if message.contains("unsupported") || message.contains("mismatch") || message.contains("empty")
@@ -1016,7 +1385,11 @@ fn plain_internal_error(error: anyhow::Error) -> (StatusCode, String) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
 
     use axum::Router;
     use reqwest::Client;
@@ -1024,6 +1397,51 @@ mod tests {
 
     use super::*;
     use crate::sandbox;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvRestore {
+        previous: Vec<(String, Option<String>)>,
+    }
+
+    impl ScopedEnvRestore {
+        fn apply(entries: &[(&str, Option<&str>)]) -> Self {
+            let previous = entries
+                .iter()
+                .map(|(key, value)| {
+                    let prior = std::env::var(key).ok();
+                    match value {
+                        Some(next) => unsafe {
+                            std::env::set_var(key, next);
+                        },
+                        None => unsafe {
+                            std::env::remove_var(key);
+                        },
+                    }
+                    ((*key).to_string(), prior)
+                })
+                .collect();
+            Self { previous }
+        }
+    }
+
+    impl Drop for ScopedEnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.drain(..).rev() {
+                match value {
+                    Some(previous) => unsafe {
+                        std::env::set_var(&key, previous);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(&key);
+                    },
+                }
+            }
+        }
+    }
 
     fn temp_database_url() -> (String, PathBuf) {
         let mut path = std::env::temp_dir();
@@ -1110,6 +1528,8 @@ mod tests {
 
     #[tokio::test]
     async fn signal_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_SIGNAL_DM_POLICY", None)]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -1189,6 +1609,8 @@ mod tests {
 
     #[tokio::test]
     async fn bluebubbles_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_BLUEBUBBLES_DM_POLICY", None)]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -1224,6 +1646,80 @@ mod tests {
             .await?
             .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         assert_eq!(task.instruction, "Draft iMessage follow-up");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signal_event_can_require_pairing_and_then_create_task_after_approval(
+    ) -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_SIGNAL_DM_POLICY", Some("pairing"))]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+
+        let pending_response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/signal/events/test-secret"
+            ))
+            .json(&json!({
+                "envelope": {
+                    "type": "receipt",
+                    "source": "+15550003333",
+                    "sourceName": "Signal Pairing User",
+                    "dataMessage": {
+                        "message": "/task Pair me"
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let pending_body: Value = pending_response.json().await?;
+        assert_eq!(pending_body["status"], "pending_approval");
+
+        let identities = state
+            .list_chat_channel_identities(Some("signal"), Some(ChatChannelIdentityStatus::Pending))
+            .await?;
+        assert_eq!(identities.len(), 1);
+        assert!(identities[0].pairing_code.is_some());
+
+        client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/pairings/signal/{}/approve",
+                identities[0].identity_key
+            ))
+            .json(&json!({
+                "actor": "test-operator"
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let approved_response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/signal/events/test-secret"
+            ))
+            .json(&json!({
+                "envelope": {
+                    "type": "receipt",
+                    "source": "+15550003333",
+                    "sourceName": "Signal Pairing User",
+                    "dataMessage": {
+                        "message": "/task Paired now"
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let approved_body: Value = approved_response.json().await?;
+        assert_eq!(approved_body["status"], "task_created");
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
 
         handle.abort();
         fs::remove_file(db_path).ok();

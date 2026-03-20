@@ -44,9 +44,12 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - Google Gemini GenerateContent API
     - Amazon Bedrock OpenAI-compatible Chat Completions
     - Cloudflare AI Gateway OpenAI-compatible Chat Completions
+    - GitHub Models Chat Completions
+    - Hugging Face Router Chat Completions
     - OpenRouter Chat Completions
     - Groq Chat Completions
     - Together Chat Completions
+    - Vercel AI Gateway OpenAI-compatible Chat Completions
     - vLLM OpenAI-compatible local chat endpoint
     - Mistral Chat Completions
     - NVIDIA NIM Chat Completions
@@ -113,9 +116,12 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/model/google/respond`
 - `POST /api/gateway/connectors/model/bedrock/respond`
 - `POST /api/gateway/connectors/model/cloudflare-ai-gateway/respond`
+- `POST /api/gateway/connectors/model/github-models/respond`
+- `POST /api/gateway/connectors/model/huggingface/respond`
 - `POST /api/gateway/connectors/model/openrouter/respond`
 - `POST /api/gateway/connectors/model/groq/respond`
 - `POST /api/gateway/connectors/model/together/respond`
+- `POST /api/gateway/connectors/model/vercel-ai-gateway/respond`
 - `POST /api/gateway/connectors/model/vllm/respond`
 - `POST /api/gateway/connectors/model/mistral/respond`
 - `POST /api/gateway/connectors/model/nvidia/respond`
@@ -144,6 +150,9 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/chat/qq/send`
 - `GET /api/gateway/ingress/status`
 - `GET /api/gateway/ingress/events`
+- `GET /api/gateway/ingress/pairings`
+- `POST /api/gateway/ingress/pairings/{platform}/{identity_key}/approve`
+- `POST /api/gateway/ingress/pairings/{platform}/{identity_key}/reject`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
 - `POST /api/gateway/ingress/signal/events/{secret}`
 - `POST /api/gateway/ingress/bluebubbles/events/{secret}`
@@ -351,6 +360,7 @@ Identity And Onboarding:
 - `POST /api/gateway/identity/node-claims/{claim_id}/revoke`
 - `POST /api/gateway/identity/node-claims/{claim_id}/reissue`
 - the desktop CLI now exposes a top-level `dawn-node setup` flow that bootstraps an operator session, lets the user choose default model providers and chat platforms, stages connector secrets locally, installs selected skills, and optionally issues a first local node claim in one pass
+- the desktop CLI now also exposes `dawn-node channels pairings list|approve|reject`, so Signal and BlueBubbles inbound pairing decisions can be resolved from the local workstation without dropping into raw HTTP calls
 - `GET /api/gateway/identity/status` now also returns a durable readiness summary with `completionPercent`, `nextStep`, per-surface checklist items, and counts for sessions, nodes, default connectors, ingress, and end-user approval backlog
 - the control-center `Setup Navigator` and `Identity & Onboarding` panels now consume that readiness payload so the operator sees concrete onboarding gaps instead of only raw forms
 - `POST /api/gateway/identity/setup-verifications` records a persistent verification receipt for one setup target (`model`, `chat`, or `ingress`) and captures the operator, endpoint, env-key gap, and whether the target belongs to the current workspace default path
@@ -1028,6 +1038,8 @@ Device-facing node behavior:
 - `browser_search` builds a search URL for `google`, `bing`, `duckduckgo`, or `baidu` and opens it in the default browser.
 - the current browser stack now has two tiers: lightweight HTTP + DOM sessions for cookie-aware fetch/form/download flows, and a visible managed-browser tier for lifecycle/status control, screenshot/PDF capture, cookie/storage inspection, storage mutation, request-header control, offline/geolocation/device emulation, and JS-driven click/type/evaluate/wait/dialog/key/upload/download actions, now with basic managed-session console capture, bounded response-preview network visibility, merged console+network trace output, aggregated error reporting, and shared-process tab/window creation. It still does not yet expose full Playwright-class CDP event streaming or exportable trace-file parity.
 - `desktop_open` launches a local application, file, folder, or URL on the host machine and returns the launcher plus spawned process identifier when available.
+- `system_lock` locks the current host session through the operating system using `LockWorkStation`, `CGSession`, or `loginctl` depending on platform.
+- `system_sleep` suspends the host operating system into sleep mode using the native platform mechanism.
 - `desktop_notification` emits a host-level desktop notification using platform-native delivery (`NotifyIcon` balloon tip on Windows, Notification Center on macOS, `notify-send` on Linux) so a user or operator can receive a local prompt outside the browser.
 - `desktop_clipboard_set` writes text into the host clipboard; it currently supports Windows and macOS.
 - `desktop_type_text` sends text to the currently focused desktop window; it currently uses Windows `WScript.Shell.SendKeys`.
@@ -1092,6 +1104,7 @@ For the desktop CLI and future hardware signer wire contract, see [docs/ap2_seri
   - `policy_profiles`
   - `policy_audit_events`
   - `policy_trust_roots`
+  - `chat_channel_identities`
 
 This gives the gateway restart-safe task, payment, node, command, and orchestration checkpoint state without pulling in Postgres yet. The repository shape is still compatible with a later SQLx/Postgres migration.
 
@@ -1108,6 +1121,27 @@ This gives the gateway restart-safe task, payment, node, command, and orchestrat
 - Optional API version override: `ANTHROPIC_VERSION`
 - Live endpoint used by the gateway: `POST https://api.anthropic.com/v1/messages`
 - Default model: `claude-3-5-sonnet-latest`
+
+### GitHub Models
+
+- Environment variable: `GITHUB_MODELS_API_KEY` or `GITHUB_TOKEN`
+- Optional endpoint override: `GITHUB_MODELS_CHAT_COMPLETIONS_URL`
+- Live endpoint used by the gateway: `POST https://models.github.ai/inference/chat/completions`
+- If the key is missing, the connector returns `mode = dry_run`
+
+### Hugging Face
+
+- Environment variable: `HUGGINGFACE_API_KEY` or `HF_TOKEN`
+- Optional endpoint override: `HUGGINGFACE_CHAT_COMPLETIONS_URL`
+- Live endpoint used by the gateway: `POST https://router.huggingface.co/v1/chat/completions`
+- If the key is missing, the connector returns `mode = dry_run`
+
+### Vercel AI Gateway
+
+- Environment variable: `VERCEL_AI_GATEWAY_API_KEY` or `AI_GATEWAY_API_KEY`
+- Optional endpoint override: `VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL` or `VERCEL_AI_GATEWAY_BASE_URL`
+- Live endpoint used by the gateway: `POST https://ai-gateway.vercel.sh/v1/chat/completions`
+- If the key is missing, the connector returns `mode = dry_run`
 - If the key is missing, the connector returns `mode = dry_run`
 
 ### DeepSeek
@@ -1408,7 +1442,7 @@ Removed legacy launchers:
 - Agent Card discovery and invocation now work for Dawn-compatible task endpoints, but the compatibility layer is still pragmatic rather than a fully heterogeneous A2A adapter matrix.
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
-- Inbound chat ingress now covers Telegram, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, but it is still early-stage: there is not yet a full inbound reply orchestration layer, and approvals still fall back to a web portal link rather than native buttons inside each chat platform.
+- Inbound chat ingress now covers Telegram, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, and Signal/BlueBubbles now include configurable `open`, `allowlist`, `pairing`, and `disabled` DM policies plus a persisted pairing ledger with operator approve/reject endpoints. It is still not a full channel-native workflow surface: there is not yet multi-account pairing state, attachment/reaction routing, or native in-channel approval buttons.
 - Identity onboarding now exposes a concrete readiness/checklist view, persistent setup verification receipts, node-claim reissue, and claim audit history for operator session bootstrap, workspace setup, connector defaults, ingress, node claims, and end-user approval routing, but it is still not a full opinionated wizard with persisted operator tasks or connector-by-connector validation history beyond the latest receipt chain.
 - Marketplace discovery now includes a federated peer registry and merged remote catalogs, but it is still early-stage: there is not yet signed peer bootstrap, ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.

@@ -268,6 +268,7 @@ enum ChannelCommand {
     },
     Connect(ConnectorConnectArgs),
     Send(ChannelSendArgs),
+    Pairings(ChannelPairingArgs),
     Add {
         values: Vec<String>,
         #[arg(long)]
@@ -340,6 +341,46 @@ struct ChannelSendArgs {
     msg_seq: Option<i64>,
     #[arg(long)]
     is_wakeup: bool,
+}
+
+#[derive(Args)]
+struct ChannelPairingArgs {
+    #[command(subcommand)]
+    command: ChannelPairingCommand,
+}
+
+#[derive(Subcommand)]
+enum ChannelPairingCommand {
+    List {
+        #[arg(long)]
+        gateway: Option<String>,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Approve {
+        platform: String,
+        identity_key: String,
+        #[arg(long)]
+        gateway: Option<String>,
+        #[arg(long, default_value = "desktop-operator")]
+        actor: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    Reject {
+        platform: String,
+        identity_key: String,
+        #[arg(long)]
+        gateway: Option<String>,
+        #[arg(long, default_value = "desktop-operator")]
+        actor: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -1746,9 +1787,12 @@ fn connector_prompt_specs(is_models: bool, target: &str) -> Vec<SetupFieldSpec> 
         (true, "openai")
         | (true, "anthropic")
         | (true, "google")
+        | (true, "github_models")
+        | (true, "huggingface")
         | (true, "openrouter")
         | (true, "groq")
         | (true, "together")
+        | (true, "vercel_ai_gateway")
         | (true, "mistral")
         | (true, "nvidia")
         | (true, "deepseek")
@@ -1977,6 +2021,14 @@ fn connector_existing_value(
             "BEDROCK_BASE_URL",
             "BEDROCK_RUNTIME_ENDPOINT",
         ],
+        (true, "github_models", SetupFieldKind::ApiKey) => {
+            &["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"]
+        }
+        (true, "github_models", SetupFieldKind::BaseUrl) => &["GITHUB_MODELS_CHAT_COMPLETIONS_URL"],
+        (true, "huggingface", SetupFieldKind::ApiKey) => {
+            &["HUGGINGFACE_API_KEY", "HF_TOKEN"]
+        }
+        (true, "huggingface", SetupFieldKind::BaseUrl) => &["HUGGINGFACE_CHAT_COMPLETIONS_URL"],
         (true, "openrouter", SetupFieldKind::ApiKey) => &["OPENROUTER_API_KEY"],
         (true, "cloudflare_ai_gateway", SetupFieldKind::ApiKey) => {
             &["CLOUDFLARE_AI_GATEWAY_API_KEY"]
@@ -1993,6 +2045,12 @@ fn connector_existing_value(
         ],
         (true, "groq", SetupFieldKind::ApiKey) => &["GROQ_API_KEY"],
         (true, "together", SetupFieldKind::ApiKey) => &["TOGETHER_API_KEY"],
+        (true, "vercel_ai_gateway", SetupFieldKind::ApiKey) => {
+            &["VERCEL_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"]
+        }
+        (true, "vercel_ai_gateway", SetupFieldKind::BaseUrl) => {
+            &["VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL", "VERCEL_AI_GATEWAY_BASE_URL"]
+        }
         (true, "vllm", SetupFieldKind::ApiKey) => &["VLLM_API_KEY"],
         (true, "vllm", SetupFieldKind::BaseUrl) => &["VLLM_BASE_URL"],
         (true, "mistral", SetupFieldKind::ApiKey) => &["MISTRAL_API_KEY"],
@@ -2084,6 +2142,8 @@ fn connector_requirement_groups(is_models: bool, target: &str) -> Vec<Vec<&'stat
             vec!["BEDROCK_API_KEY", "BEDROCK_BASE_URL"],
             vec!["BEDROCK_API_KEY", "BEDROCK_RUNTIME_ENDPOINT"],
         ],
+        (true, "github_models") => vec![vec!["GITHUB_MODELS_API_KEY"], vec!["GITHUB_TOKEN"]],
+        (true, "huggingface") => vec![vec!["HUGGINGFACE_API_KEY"], vec!["HF_TOKEN"]],
         (true, "openrouter") => vec![vec!["OPENROUTER_API_KEY"]],
         (true, "cloudflare_ai_gateway") => vec![
             vec![
@@ -2102,6 +2162,12 @@ fn connector_requirement_groups(is_models: bool, target: &str) -> Vec<Vec<&'stat
         ],
         (true, "groq") => vec![vec!["GROQ_API_KEY"]],
         (true, "together") => vec![vec!["TOGETHER_API_KEY"]],
+        (true, "vercel_ai_gateway") => vec![
+            vec!["VERCEL_AI_GATEWAY_API_KEY"],
+            vec!["AI_GATEWAY_API_KEY"],
+            vec!["VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL"],
+            vec!["VERCEL_AI_GATEWAY_BASE_URL"],
+        ],
         (true, "vllm") => vec![vec!["VLLM_BASE_URL"]],
         (true, "mistral") => vec![vec!["MISTRAL_API_KEY"]],
         (true, "nvidia") => vec![vec!["NVIDIA_API_KEY"], vec!["NVIDIA_NIM_API_KEY"]],
@@ -2512,6 +2578,7 @@ async fn handle_channels(args: ChannelArgs) -> anyhow::Result<()> {
         }
         ChannelCommand::Connect(args) => connect_metadata_target(profile, false, args).await,
         ChannelCommand::Send(args) => send_channel_message(profile, args).await,
+        ChannelCommand::Pairings(args) => handle_channel_pairings(profile, args).await,
         ChannelCommand::Add { values, gateway } => {
             update_workspace_metadata(profile, gateway, values, false, true, "chat platforms").await
         }
@@ -2520,6 +2587,103 @@ async fn handle_channels(args: ChannelArgs) -> anyhow::Result<()> {
                 .await
         }
     }
+}
+
+async fn handle_channel_pairings(
+    profile: DawnCliProfile,
+    args: ChannelPairingArgs,
+) -> anyhow::Result<()> {
+    match args.command {
+        ChannelPairingCommand::List {
+            gateway,
+            platform,
+            status,
+            json,
+        } => {
+            let client =
+                GatewayClient::new(resolve_gateway_base_url(gateway.as_deref(), &profile))?;
+            let mut query = Vec::new();
+            if let Some(platform) = platform
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                query.push(format!("platform={platform}"));
+            }
+            if let Some(status) = status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                query.push(format!("status={status}"));
+            }
+            let path = if query.is_empty() {
+                "/api/gateway/ingress/pairings".to_string()
+            } else {
+                format!("/api/gateway/ingress/pairings?{}", query.join("&"))
+            };
+            let response: Value = client.get_json(&path).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if let Some(items) = response.as_array() {
+                for item in items {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        string_at_path(item, &["platform"]).unwrap_or_else(|| "<unknown>".to_string()),
+                        string_at_path(item, &["identityKey"])
+                            .unwrap_or_else(|| "<unknown>".to_string()),
+                        string_at_path(item, &["status"]).unwrap_or_else(|| "<unknown>".to_string()),
+                        string_at_path(item, &["pairingCode"]).unwrap_or_else(|| "-".to_string()),
+                        string_at_path(item, &["senderDisplay"])
+                            .or_else(|| string_at_path(item, &["senderId"]))
+                            .unwrap_or_else(|| "-".to_string())
+                    );
+                }
+            }
+            Ok(())
+        }
+        ChannelPairingCommand::Approve {
+            platform,
+            identity_key,
+            gateway,
+            actor,
+            reason,
+        } => decide_channel_pairing(profile, gateway, &platform, &identity_key, true, &actor, reason.as_deref()).await,
+        ChannelPairingCommand::Reject {
+            platform,
+            identity_key,
+            gateway,
+            actor,
+            reason,
+        } => decide_channel_pairing(profile, gateway, &platform, &identity_key, false, &actor, reason.as_deref()).await,
+    }
+}
+
+async fn decide_channel_pairing(
+    profile: DawnCliProfile,
+    gateway: Option<String>,
+    platform: &str,
+    identity_key: &str,
+    approved: bool,
+    actor: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<()> {
+    let client = GatewayClient::new(resolve_gateway_base_url(gateway.as_deref(), &profile))?;
+    let target = normalize_connector_target(false, platform);
+    let action = if approved { "approve" } else { "reject" };
+    let response: Value = client
+        .post_json(
+            &format!(
+                "/api/gateway/ingress/pairings/{target}/{identity_key}/{action}"
+            ),
+            &json!({
+                "actor": actor,
+                "reason": reason,
+            }),
+        )
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
 }
 
 async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
@@ -4496,12 +4660,17 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
             "claude" => "anthropic".to_string(),
             "gemini" => "google".to_string(),
             "aws-bedrock" | "aws_bedrock" => "bedrock".to_string(),
+            "github-models" | "github_models" | "github" => "github_models".to_string(),
+            "hf" | "hugging-face" | "hugging_face" => "huggingface".to_string(),
             "cloudflare-gateway"
             | "cloudflare_gateway"
             | "cloudflare-ai-gateway"
             | "cloudflare_ai_gateway" => "cloudflare_ai_gateway".to_string(),
             "grok" => "groq".to_string(),
             "togetherai" => "together".to_string(),
+            "vercel-gateway" | "vercel_gateway" | "vercel-ai-gateway" => {
+                "vercel_ai_gateway".to_string()
+            }
             "openai-local" | "local-openai" => "vllm".to_string(),
             "mistralai" => "mistral".to_string(),
             "nvidia-nim" | "nvidia_nim" | "nim" => "nvidia".to_string(),
@@ -4558,6 +4727,24 @@ fn connector_secret_pairs(
                 }
             }
         }
+        (true, "github_models") => {
+            insert_if_some(&mut pairs, "GITHUB_MODELS_API_KEY", args.api_key.as_deref());
+            insert_if_some(&mut pairs, "GITHUB_TOKEN", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "GITHUB_MODELS_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
+        }
+        (true, "huggingface") => {
+            insert_if_some(&mut pairs, "HUGGINGFACE_API_KEY", args.api_key.as_deref());
+            insert_if_some(&mut pairs, "HF_TOKEN", args.api_key.as_deref());
+            insert_if_some(
+                &mut pairs,
+                "HUGGINGFACE_CHAT_COMPLETIONS_URL",
+                args.base_url.as_deref(),
+            );
+        }
         (true, "cloudflare_ai_gateway") => {
             insert_if_some(
                 &mut pairs,
@@ -4613,6 +4800,29 @@ fn connector_secret_pairs(
                 "TOGETHER_CHAT_COMPLETIONS_URL",
                 args.base_url.as_deref(),
             );
+        }
+        (true, "vercel_ai_gateway") => {
+            insert_if_some(
+                &mut pairs,
+                "VERCEL_AI_GATEWAY_API_KEY",
+                args.api_key.as_deref(),
+            );
+            insert_if_some(&mut pairs, "AI_GATEWAY_API_KEY", args.api_key.as_deref());
+            if let Some(base_or_url) = args.base_url.as_deref() {
+                if base_or_url.contains("/chat/completions") {
+                    insert_if_some(
+                        &mut pairs,
+                        "VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+                        Some(base_or_url),
+                    );
+                } else {
+                    insert_if_some(
+                        &mut pairs,
+                        "VERCEL_AI_GATEWAY_BASE_URL",
+                        Some(base_or_url),
+                    );
+                }
+            }
         }
         (true, "vllm") => {
             insert_if_some(&mut pairs, "VLLM_API_KEY", args.api_key.as_deref());
@@ -5053,6 +5263,8 @@ fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
         "browser_open".to_string(),
         "browser_search".to_string(),
         "desktop_open".to_string(),
+        "system_lock".to_string(),
+        "system_sleep".to_string(),
         "desktop_notification".to_string(),
         "desktop_clipboard_set".to_string(),
         "desktop_type_text".to_string(),

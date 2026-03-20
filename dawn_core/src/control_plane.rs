@@ -963,6 +963,7 @@ fn requires_command_approval(command_type: &str, payload: &Value) -> bool {
     command_type == "shell_exec"
         || command_type.starts_with("browser_")
         || command_type.starts_with("desktop_")
+        || command_type.starts_with("system_")
         || payload
             .get("approvalRequired")
             .and_then(Value::as_bool)
@@ -1235,6 +1236,8 @@ mod tests {
         assert!(requires_command_approval("desktop_mouse_move", &json!({})));
         assert!(requires_command_approval("desktop_mouse_click", &json!({})));
         assert!(requires_command_approval("desktop_screenshot", &json!({})));
+        assert!(requires_command_approval("system_lock", &json!({})));
+        assert!(requires_command_approval("system_sleep", &json!({})));
         assert!(requires_command_approval(
             "desktop_accessibility_snapshot",
             &json!({})
