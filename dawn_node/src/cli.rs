@@ -1901,6 +1901,34 @@ fn connector_prompt_specs(is_models: bool, target: &str) -> Vec<SetupFieldSpec> 
                 default_value: Some("https://matrix-client.matrix.org"),
             },
         ],
+        (false, "signal") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::AccessToken,
+                label: "Signal account / phone number",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "signal-cli REST base URL or /v2/send URL",
+                required: false,
+                default_value: Some("http://127.0.0.1:8080"),
+            },
+        ],
+        (false, "bluebubbles") => vec![
+            SetupFieldSpec {
+                kind: SetupFieldKind::ClientSecret,
+                label: "Server password / GUID",
+                required: true,
+                default_value: None,
+            },
+            SetupFieldSpec {
+                kind: SetupFieldKind::BaseUrl,
+                label: "Server URL or /api/v1/message/text URL",
+                required: true,
+                default_value: None,
+            },
+        ],
         (false, "wechat_official_account") => vec![
             SetupFieldSpec {
                 kind: SetupFieldKind::AppId,
@@ -1991,6 +2019,16 @@ fn connector_existing_value(
         (false, "matrix", SetupFieldKind::AccessToken) => &["MATRIX_ACCESS_TOKEN"],
         (false, "matrix", SetupFieldKind::BaseUrl) => &["MATRIX_HOMESERVER_URL"],
         (false, "google_chat", SetupFieldKind::WebhookUrl) => &["GOOGLE_CHAT_BOT_WEBHOOK_URL"],
+        (false, "signal", SetupFieldKind::AccessToken) => &["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"],
+        (false, "signal", SetupFieldKind::BaseUrl) => &[
+            "SIGNAL_SEND_API_URL",
+            "SIGNAL_HTTP_URL",
+            "SIGNAL_CLI_REST_API_URL",
+        ],
+        (false, "bluebubbles", SetupFieldKind::ClientSecret) => &["BLUEBUBBLES_PASSWORD"],
+        (false, "bluebubbles", SetupFieldKind::BaseUrl) => {
+            &["BLUEBUBBLES_SEND_MESSAGE_URL", "BLUEBUBBLES_SERVER_URL"]
+        }
         (false, "feishu", SetupFieldKind::WebhookUrl) => &["FEISHU_BOT_WEBHOOK_URL"],
         (false, "dingtalk", SetupFieldKind::WebhookUrl) => &["DINGTALK_BOT_WEBHOOK_URL"],
         (false, "wecom_bot", SetupFieldKind::WebhookUrl) => &["WECOM_BOT_WEBHOOK_URL"],
@@ -2090,6 +2128,11 @@ fn connector_requirement_groups(is_models: bool, target: &str) -> Vec<Vec<&'stat
         (false, "line") => vec![vec!["LINE_CHANNEL_ACCESS_TOKEN"]],
         (false, "matrix") => vec![vec!["MATRIX_ACCESS_TOKEN", "MATRIX_HOMESERVER_URL"]],
         (false, "google_chat") => vec![vec!["GOOGLE_CHAT_BOT_WEBHOOK_URL"]],
+        (false, "signal") => vec![vec!["SIGNAL_ACCOUNT"], vec!["SIGNAL_NUMBER"]],
+        (false, "bluebubbles") => vec![
+            vec!["BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_SEND_MESSAGE_URL"],
+            vec!["BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_SERVER_URL"],
+        ],
         (false, "feishu") => vec![vec!["FEISHU_BOT_WEBHOOK_URL"]],
         (false, "dingtalk") => vec![vec!["DINGTALK_BOT_WEBHOOK_URL"]],
         (false, "wecom_bot") => vec![vec!["WECOM_BOT_WEBHOOK_URL"]],
@@ -2749,6 +2792,8 @@ fn build_channel_send_request(
         "line" => "/api/gateway/connectors/chat/line/send",
         "matrix" => "/api/gateway/connectors/chat/matrix/send",
         "google_chat" => "/api/gateway/connectors/chat/google-chat/send",
+        "signal" => "/api/gateway/connectors/chat/signal/send",
+        "bluebubbles" => "/api/gateway/connectors/chat/bluebubbles/send",
         "feishu" => "/api/gateway/connectors/chat/feishu/send",
         "dingtalk" => "/api/gateway/connectors/chat/dingtalk/send",
         "wecom_bot" => "/api/gateway/connectors/chat/wecom/send",
@@ -2776,7 +2821,7 @@ fn build_channel_send_request(
                 "text": args.text,
             })
         }
-        "whatsapp" | "line" | "matrix" => {
+        "whatsapp" | "line" | "matrix" | "signal" | "bluebubbles" => {
             let chat_id = args
                 .chat_id
                 .as_deref()
@@ -4471,6 +4516,8 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
             "line-messaging" => "line".to_string(),
             "matrix-org" => "matrix".to_string(),
             "googlechat" | "google-chat" | "gchat" => "google_chat".to_string(),
+            "signal-cli" | "signal_cli" | "signal-messenger" => "signal".to_string(),
+            "blue-bubbles" | "blue_bubbles" => "bluebubbles".to_string(),
             other => other.to_string(),
         }
     }
@@ -4701,6 +4748,38 @@ fn connector_secret_pairs(
                 "GOOGLE_CHAT_BOT_WEBHOOK_URL",
                 args.webhook_url.as_deref(),
             );
+        }
+        (false, "signal") => {
+            insert_if_some(&mut pairs, "SIGNAL_ACCOUNT", args.access_token.as_deref());
+            if let Some(base_or_url) = args.base_url.as_deref().map(str::trim) {
+                if !base_or_url.is_empty() {
+                    if base_or_url.trim_end_matches('/').ends_with("/v2/send") {
+                        insert_if_some(&mut pairs, "SIGNAL_SEND_API_URL", Some(base_or_url));
+                    } else {
+                        insert_if_some(&mut pairs, "SIGNAL_HTTP_URL", Some(base_or_url));
+                    }
+                }
+            }
+        }
+        (false, "bluebubbles") => {
+            insert_if_some(
+                &mut pairs,
+                "BLUEBUBBLES_PASSWORD",
+                args.client_secret.as_deref(),
+            );
+            if let Some(base_or_url) = args.base_url.as_deref().map(str::trim) {
+                if !base_or_url.is_empty() {
+                    if base_or_url.contains("/api/v1/message/text") {
+                        insert_if_some(
+                            &mut pairs,
+                            "BLUEBUBBLES_SEND_MESSAGE_URL",
+                            Some(base_or_url),
+                        );
+                    } else {
+                        insert_if_some(&mut pairs, "BLUEBUBBLES_SERVER_URL", Some(base_or_url));
+                    }
+                }
+            }
         }
         (false, "feishu") => {
             insert_if_some(
@@ -5278,6 +5357,11 @@ mod tests {
             normalize_connector_target(false, "google-chat"),
             "google_chat"
         );
+        assert_eq!(normalize_connector_target(false, "signal-cli"), "signal");
+        assert_eq!(
+            normalize_connector_target(false, "blue-bubbles"),
+            "bluebubbles"
+        );
     }
 
     #[test]
@@ -5650,6 +5734,61 @@ mod tests {
     }
 
     #[test]
+    fn builds_channel_secret_pairs_for_signal_and_bluebubbles() {
+        let signal_args = super::ConnectorConnectArgs {
+            target: "signal".to_string(),
+            gateway: None,
+            api_key: None,
+            access_token: Some("+15550001111".to_string()),
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: None,
+            endpoint_id: None,
+            base_url: Some("http://127.0.0.1:8080".to_string()),
+            env: Vec::new(),
+        };
+        let signal_pairs =
+            connector_secret_pairs(false, "signal", &signal_args).expect("signal secrets");
+        assert_eq!(
+            signal_pairs.get("SIGNAL_ACCOUNT").map(String::as_str),
+            Some("+15550001111")
+        );
+        assert_eq!(
+            signal_pairs.get("SIGNAL_HTTP_URL").map(String::as_str),
+            Some("http://127.0.0.1:8080")
+        );
+
+        let bluebubbles_args = super::ConnectorConnectArgs {
+            target: "bluebubbles".to_string(),
+            gateway: None,
+            api_key: None,
+            access_token: None,
+            webhook_url: None,
+            app_id: None,
+            app_secret: None,
+            client_secret: Some("server-guid".to_string()),
+            endpoint_id: None,
+            base_url: Some("https://bluebubbles.example.com".to_string()),
+            env: Vec::new(),
+        };
+        let bluebubbles_pairs = connector_secret_pairs(false, "bluebubbles", &bluebubbles_args)
+            .expect("bluebubbles secrets");
+        assert_eq!(
+            bluebubbles_pairs
+                .get("BLUEBUBBLES_PASSWORD")
+                .map(String::as_str),
+            Some("server-guid")
+        );
+        assert_eq!(
+            bluebubbles_pairs
+                .get("BLUEBUBBLES_SERVER_URL")
+                .map(String::as_str),
+            Some("https://bluebubbles.example.com")
+        );
+    }
+
+    #[test]
     fn builds_send_requests_for_new_webhook_channels() {
         let args = super::ChannelSendArgs {
             target: "mattermost".to_string(),
@@ -5712,6 +5851,22 @@ mod tests {
         let (path, body) =
             build_channel_send_request("matrix", &targeted_args).expect("matrix send request");
         assert_eq!(path, "/api/gateway/connectors/chat/matrix/send");
+        assert_eq!(
+            body,
+            json!({ "chatId": "15551234567", "text": "hello channel" })
+        );
+
+        let (path, body) =
+            build_channel_send_request("signal", &targeted_args).expect("signal send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/signal/send");
+        assert_eq!(
+            body,
+            json!({ "chatId": "15551234567", "text": "hello channel" })
+        );
+
+        let (path, body) = build_channel_send_request("bluebubbles", &targeted_args)
+            .expect("bluebubbles send request");
+        assert_eq!(path, "/api/gateway/connectors/chat/bluebubbles/send");
         assert_eq!(
             body,
             json!({ "chatId": "15551234567", "text": "hello channel" })

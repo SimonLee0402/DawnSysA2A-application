@@ -76,6 +76,8 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "line",
             "matrix",
             "google_chat",
+            "signal",
+            "bluebubbles",
             "feishu",
             "dingtalk",
             "wecom_bot",

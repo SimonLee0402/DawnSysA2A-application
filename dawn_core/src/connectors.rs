@@ -51,6 +51,8 @@ struct ConfiguredConnectors {
     line: bool,
     matrix: bool,
     google_chat: bool,
+    signal: bool,
+    bluebubbles: bool,
     feishu: bool,
     dingtalk: bool,
     wecom_bot: bool,
@@ -243,6 +245,26 @@ pub async fn execute_chat_connector(
         "google_chat" => {
             send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text).await
         }
+        "signal" => {
+            let chat_id = request
+                .chat_id
+                .ok_or_else(|| anyhow::anyhow!("signal connector requires chatId"))?;
+            send_signal_connector(ChatTargetTextRequest {
+                chat_id,
+                text: request.text,
+            })
+            .await
+        }
+        "bluebubbles" => {
+            let chat_id = request
+                .chat_id
+                .ok_or_else(|| anyhow::anyhow!("bluebubbles connector requires chatId"))?;
+            send_bluebubbles_connector(ChatTargetTextRequest {
+                chat_id,
+                text: request.text,
+            })
+            .await
+        }
         "feishu" => send_webhook_connector("feishu", "FEISHU_BOT_WEBHOOK_URL", request.text).await,
         "dingtalk" => {
             send_webhook_connector("dingtalk", "DINGTALK_BOT_WEBHOOK_URL", request.text).await
@@ -312,6 +334,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/chat/line/send", post(send_line_message))
         .route("/chat/matrix/send", post(send_matrix_message))
         .route("/chat/google-chat/send", post(send_google_chat_message))
+        .route("/chat/signal/send", post(send_signal_message))
+        .route("/chat/bluebubbles/send", post(send_bluebubbles_message))
         .route("/chat/feishu/send", post(send_feishu_message))
         .route("/chat/dingtalk/send", post(send_dingtalk_message))
         .route("/chat/wecom/send", post(send_wecom_message))
@@ -368,6 +392,10 @@ async fn status() -> Json<ConnectorStatusReport> {
             matrix: std::env::var("MATRIX_ACCESS_TOKEN").is_ok()
                 && std::env::var("MATRIX_HOMESERVER_URL").is_ok(),
             google_chat: std::env::var("GOOGLE_CHAT_BOT_WEBHOOK_URL").is_ok(),
+            signal: resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]).is_some(),
+            bluebubbles: std::env::var("BLUEBUBBLES_PASSWORD").is_ok()
+                && (std::env::var("BLUEBUBBLES_SEND_MESSAGE_URL").is_ok()
+                    || std::env::var("BLUEBUBBLES_SERVER_URL").is_ok()),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
             wecom_bot: std::env::var("WECOM_BOT_WEBHOOK_URL").is_ok(),
@@ -511,6 +539,16 @@ async fn status() -> Json<ConnectorStatusReport> {
                 platform: "google_chat",
                 region: "global",
                 integration_mode: "live_webhook",
+            },
+            ChatPlatformSupport {
+                platform: "signal",
+                region: "global",
+                integration_mode: "live_signal_rest",
+            },
+            ChatPlatformSupport {
+                platform: "bluebubbles",
+                region: "global",
+                integration_mode: "live_private_api",
             },
             ChatPlatformSupport {
                 platform: "feishu",
@@ -806,6 +844,26 @@ async fn send_google_chat_message(
     Json(request): Json<WebhookTextRequest>,
 ) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
     send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_signal_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<ChatTargetTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_signal_connector(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn send_bluebubbles_message(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<ChatTargetTextRequest>,
+) -> Result<Json<ChatSendResult>, (axum::http::StatusCode, Json<Value>)> {
+    send_bluebubbles_connector(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -1665,6 +1723,90 @@ async fn send_matrix_connector(request: ChatTargetTextRequest) -> anyhow::Result
     })
 }
 
+async fn send_signal_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let Some(account) = resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]) else {
+        return Ok(ChatSendResult {
+            mode: "dry_run",
+            platform: "signal",
+            delivered: false,
+            raw_response: Some(json!({
+                "chatId": request.chat_id,
+                "text": request.text,
+                "reason": "SIGNAL_ACCOUNT or SIGNAL_NUMBER is not configured"
+            })),
+        });
+    };
+    let endpoint = resolve_signal_send_endpoint()?;
+    let payload = build_signal_send_payload(&account, &request.chat_id, &request.text);
+
+    info!("Dispatching live Signal message through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status": status.as_u16(),
+            "payloadAccepted": status.is_success()
+        }),
+    };
+
+    if !status.is_success() {
+        anyhow::bail!("signal connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "signal",
+        delivered: raw_response.get("timestamp").is_some() || status.is_success(),
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_connector(
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let Some(password) = std::env::var("BLUEBUBBLES_PASSWORD").ok() else {
+        return Ok(ChatSendResult {
+            mode: "dry_run",
+            platform: "bluebubbles",
+            delivered: false,
+            raw_response: Some(json!({
+                "chatId": request.chat_id,
+                "text": request.text,
+                "reason": "BLUEBUBBLES_PASSWORD is not configured"
+            })),
+        });
+    };
+    let endpoint = resolve_bluebubbles_send_endpoint(&password)?;
+    let payload = build_bluebubbles_text_payload(
+        &request.chat_id,
+        &request.text,
+        &format!("dawn-{}", Uuid::new_v4()),
+    );
+
+    info!("Dispatching live BlueBubbles message through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status": status.as_u16(),
+            "payloadAccepted": status.is_success()
+        }),
+    };
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: status.is_success(),
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn send_wechat_official_account_connector(
     request: WeChatOfficialAccountSendRequest,
 ) -> anyhow::Result<ChatSendResult> {
@@ -1937,6 +2079,14 @@ fn build_matrix_text_payload(text: &str) -> Value {
     })
 }
 
+fn build_signal_send_payload(account: &str, recipient: &str, text: &str) -> Value {
+    json!({
+        "message": text,
+        "number": account,
+        "recipients": [recipient]
+    })
+}
+
 fn build_matrix_send_endpoint(
     homeserver: &str,
     room_id: &str,
@@ -1953,6 +2103,55 @@ fn build_matrix_send_endpoint(
         segments.extend(["send", "m.room.message"]);
         segments.push(transaction_id);
     }
+    Ok(url)
+}
+
+fn build_bluebubbles_text_payload(chat_guid: &str, text: &str, temp_guid: &str) -> Value {
+    json!({
+        "chatGuid": chat_guid,
+        "message": text,
+        "tempGuid": temp_guid
+    })
+}
+
+fn resolve_signal_send_endpoint() -> anyhow::Result<Url> {
+    let endpoint = resolve_first_present_env(&["SIGNAL_SEND_API_URL"]).unwrap_or_else(|| {
+        let base = resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
+            .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+        let trimmed = base.trim_end_matches('/');
+        if trimmed.ends_with("/v2/send") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/v2/send")
+        }
+    });
+    Url::parse(&endpoint).map_err(Into::into)
+}
+
+fn resolve_bluebubbles_send_endpoint(password: &str) -> anyhow::Result<Url> {
+    let mut url = if let Some(explicit) = std::env::var("BLUEBUBBLES_SEND_MESSAGE_URL").ok() {
+        Url::parse(&explicit)?
+    } else {
+        let base = std::env::var("BLUEBUBBLES_SERVER_URL")
+            .map_err(|_| anyhow::anyhow!("BLUEBUBBLES_SERVER_URL is not configured"))?;
+        let mut url = Url::parse(&base)?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("invalid BLUEBUBBLES_SERVER_URL path"))?;
+            segments.pop_if_empty();
+            segments.extend(["api", "v1", "message", "text"]);
+        }
+        url
+    };
+
+    let has_auth = url
+        .query_pairs()
+        .any(|(key, _)| key == "guid" || key == "password");
+    if !has_auth {
+        url.query_pairs_mut().append_pair("guid", password);
+    }
+
     Ok(url)
 }
 
@@ -2186,12 +2385,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        QQSendRequest, build_chat_completion_messages, build_line_push_payload,
-        build_matrix_send_endpoint, build_matrix_text_payload, build_qq_message_payload,
-        build_wechat_official_account_payload, build_whatsapp_text_payload, extract_anthropic_text,
-        extract_chat_completion_text, extract_google_text, extract_ollama_text,
-        extract_openai_text, normalize_qq_target_type, resolve_cloudflare_ai_gateway_endpoint,
-        resolve_openai_style_endpoint,
+        QQSendRequest, build_bluebubbles_text_payload, build_chat_completion_messages,
+        build_line_push_payload, build_matrix_send_endpoint, build_matrix_text_payload,
+        build_qq_message_payload, build_signal_send_payload, build_wechat_official_account_payload,
+        build_whatsapp_text_payload, extract_anthropic_text, extract_chat_completion_text,
+        extract_google_text, extract_ollama_text, extract_openai_text, normalize_qq_target_type,
+        resolve_cloudflare_ai_gateway_endpoint, resolve_openai_style_endpoint,
     };
 
     #[test]
@@ -2374,6 +2573,35 @@ mod tests {
             json!({
                 "msgtype": "m.text",
                 "body": "hello matrix"
+            })
+        );
+    }
+
+    #[test]
+    fn builds_signal_send_payload() {
+        let payload = build_signal_send_payload("+15550001111", "+15550002222", "hello signal");
+
+        assert_eq!(
+            payload,
+            json!({
+                "message": "hello signal",
+                "number": "+15550001111",
+                "recipients": ["+15550002222"]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_bluebubbles_text_payload() {
+        let payload =
+            build_bluebubbles_text_payload("iMessage;+15550002222", "hello blue", "temp-123");
+
+        assert_eq!(
+            payload,
+            json!({
+                "chatGuid": "iMessage;+15550002222",
+                "message": "hello blue",
+                "tempGuid": "temp-123"
             })
         );
     }

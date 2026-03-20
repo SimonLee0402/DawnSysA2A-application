@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     env,
+    ffi::OsString,
     net::TcpListener,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -1127,7 +1128,7 @@ pub fn list_managed_browser_profiles() -> anyhow::Result<Vec<ManagedBrowserProfi
 pub async fn delete_managed_browser_profile(
     profile_name: &str,
 ) -> anyhow::Result<ManagedBrowserProfileDeleteResult> {
-    let profile_name = sanitize_managed_browser_profile_name(profile_name);
+    let profile_name = validate_managed_browser_profile_name(profile_name)?;
     let profile_path = managed_browser_profile_root().join(&profile_name);
     let exists = tokio::fs::try_exists(&profile_path)
         .await
@@ -1155,7 +1156,7 @@ pub async fn delete_managed_browser_profile(
 pub fn inspect_managed_browser_profile(
     profile_name: &str,
 ) -> anyhow::Result<ManagedBrowserProfileInspectResult> {
-    let profile_name = sanitize_managed_browser_profile_name(profile_name);
+    let profile_name = validate_managed_browser_profile_name(profile_name)?;
     let profile_path = managed_browser_profile_root().join(&profile_name);
     if !profile_path.exists() {
         anyhow::bail!(
@@ -1182,15 +1183,13 @@ pub fn export_managed_browser_profile(
 ) -> anyhow::Result<ManagedBrowserProfileExportResult> {
     let inspected = inspect_managed_browser_profile(profile_name)?;
     let source_path = PathBuf::from(&inspected.profile_path);
-    if source_path == export_path {
-        anyhow::bail!("browser profile export path must differ from the source profile path");
-    }
     if export_path.exists() {
         anyhow::bail!(
             "browser profile export path {} already exists",
             export_path.display()
         );
     }
+    ensure_non_overlapping_profile_paths(&source_path, export_path, "export")?;
     copy_managed_browser_profile_dir(&source_path, export_path)?;
     Ok(ManagedBrowserProfileExportResult {
         profile_name: inspected.profile_name,
@@ -1219,8 +1218,9 @@ pub async fn import_managed_browser_profile(
             source_path.display()
         );
     }
-    let profile_name = sanitize_managed_browser_profile_name(profile_name);
+    let profile_name = validate_managed_browser_profile_name(profile_name)?;
     let profile_path = managed_browser_profile_root().join(&profile_name);
+    ensure_non_overlapping_profile_paths(source_path, &profile_path, "import")?;
     let existed = profile_path.exists();
     if existed && !overwrite {
         anyhow::bail!(
@@ -2884,6 +2884,20 @@ fn sanitize_managed_browser_profile_name(profile_name: &str) -> String {
     }
 }
 
+fn validate_managed_browser_profile_name(profile_name: &str) -> anyhow::Result<String> {
+    let trimmed = profile_name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("managed browser profile name cannot be empty");
+    }
+    let sanitized = sanitize_managed_browser_profile_name(trimmed);
+    if sanitized == "default" && !trimmed.eq_ignore_ascii_case("default") {
+        anyhow::bail!(
+            "managed browser profile name `{trimmed}` collapses to the reserved default profile; choose a more specific name or use `default` explicitly"
+        );
+    }
+    Ok(sanitized)
+}
+
 fn resolve_managed_browser_user_data_dir(
     profile_name: Option<&str>,
     persistent_profile: bool,
@@ -2906,6 +2920,71 @@ fn resolve_managed_browser_user_data_dir(
         debug_port,
         unix_timestamp_ms()
     ))
+}
+
+fn ensure_non_overlapping_profile_paths(
+    source: &Path,
+    destination: &Path,
+    operation: &str,
+) -> anyhow::Result<()> {
+    let source_path = normalize_path_for_overlap_check(source)?;
+    let destination_path = normalize_path_for_overlap_check(destination)?;
+    if source_path == destination_path {
+        anyhow::bail!(
+            "managed browser profile {operation} source {} must differ from destination {}",
+            source_path.display(),
+            destination_path.display()
+        );
+    }
+    if destination_path.starts_with(&source_path) {
+        anyhow::bail!(
+            "managed browser profile {operation} destination {} cannot be inside source {}",
+            destination_path.display(),
+            source_path.display()
+        );
+    }
+    if source_path.starts_with(&destination_path) {
+        anyhow::bail!(
+            "managed browser profile {operation} source {} cannot be inside destination {}",
+            source_path.display(),
+            destination_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn normalize_path_for_overlap_check(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .context("failed to resolve current working directory for profile path checks")?
+            .join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut suffix = Vec::<OsString>::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            anyhow::bail!(
+                "path {} does not have an existing ancestor for overlap checks",
+                absolute.display()
+            );
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            anyhow::bail!(
+                "path {} does not have an existing ancestor for overlap checks",
+                absolute.display()
+            );
+        };
+        existing = parent;
+    }
+    let mut normalized = std::fs::canonicalize(existing)
+        .with_context(|| format!("failed to canonicalize {}", existing.display()))?;
+    for component in suffix.iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
 }
 
 fn collect_managed_browser_profile_stats(
@@ -3474,7 +3553,7 @@ mod tests {
         evaluate_managed_browser, export_managed_browser_profile, import_managed_browser_profile,
         inspect_managed_browser_profile, launch_managed_browser, parse_managed_browser_key_spec,
         resolve_managed_browser_user_data_dir, sanitize_managed_browser_profile_name,
-        validate_managed_browser_download_source,
+        validate_managed_browser_download_source, validate_managed_browser_profile_name,
     };
     use serde_json::json;
     use std::{
@@ -3551,6 +3630,14 @@ mod tests {
             "Sales-Team---QA"
         );
         assert_eq!(sanitize_managed_browser_profile_name(""), "default");
+    }
+
+    #[test]
+    fn rejects_invalid_profile_names_that_collapse_to_default() {
+        let error = validate_managed_browser_profile_name(" /// ")
+            .expect_err("expected invalid profile name to be rejected")
+            .to_string();
+        assert!(error.contains("reserved default profile"));
     }
 
     #[test]
@@ -3633,6 +3720,24 @@ mod tests {
         std::fs::remove_dir_all(export_root).expect("expected export cleanup");
     }
 
+    #[test]
+    fn rejects_export_path_nested_inside_source_profile() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let profile_name = format!("export-overlap-profile-{suffix}");
+        let path = resolve_managed_browser_user_data_dir(Some(&profile_name), true, 9222);
+        std::fs::create_dir_all(path.join("Default")).expect("expected nested profile dir");
+        std::fs::write(path.join("Preferences"), "{\"a\":1}").expect("expected root file");
+        let nested_export = path.join("nested-export");
+        let error = export_managed_browser_profile(&profile_name, &nested_export)
+            .expect_err("expected nested export path to be rejected")
+            .to_string();
+        assert!(error.contains("cannot be inside source"));
+        std::fs::remove_dir_all(path).expect("expected test profile cleanup");
+    }
+
     #[tokio::test]
     async fn imports_managed_browser_profile_dir() {
         let suffix = SystemTime::now()
@@ -3654,6 +3759,24 @@ mod tests {
         assert!(imported_root.join("Default").join("Cookies").exists());
         std::fs::remove_dir_all(source_root).expect("expected source cleanup");
         std::fs::remove_dir_all(imported_root).expect("expected imported cleanup");
+    }
+
+    #[tokio::test]
+    async fn rejects_import_when_source_matches_destination_profile() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let profile_name = format!("import-overlap-profile-{suffix}");
+        let profile_root = resolve_managed_browser_user_data_dir(Some(&profile_name), true, 9222);
+        std::fs::create_dir_all(profile_root.join("Default")).expect("expected profile dir");
+        std::fs::write(profile_root.join("Preferences"), "{\"c\":3}").expect("expected root file");
+        let error = import_managed_browser_profile(&profile_root, &profile_name, true)
+            .await
+            .expect_err("expected overlapping import to be rejected")
+            .to_string();
+        assert!(error.contains("must differ from destination"));
+        std::fs::remove_dir_all(profile_root).expect("expected test profile cleanup");
     }
 
     #[tokio::test]

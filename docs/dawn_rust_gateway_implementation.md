@@ -66,6 +66,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - LINE Messaging API push message
     - Matrix Client-Server API room message send
     - Google Chat incoming webhook bot
+    - Signal send via `signal-cli-rest-api`
+    - BlueBubbles private API text message send
     - Feishu webhook bot
     - DingTalk webhook bot
     - WeCom webhook bot
@@ -133,6 +135,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `POST /api/gateway/connectors/chat/line/send`
 - `POST /api/gateway/connectors/chat/matrix/send`
 - `POST /api/gateway/connectors/chat/google-chat/send`
+- `POST /api/gateway/connectors/chat/signal/send`
+- `POST /api/gateway/connectors/chat/bluebubbles/send`
 - `POST /api/gateway/connectors/chat/feishu/send`
 - `POST /api/gateway/connectors/chat/dingtalk/send`
 - `POST /api/gateway/connectors/chat/wecom/send`
