@@ -1050,6 +1050,7 @@ struct SetupSkillCandidate {
     skill_id: String,
     version: String,
     federated: bool,
+    signed: bool,
     label: String,
 }
 
@@ -1716,6 +1717,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
                 skill_id: skill_id.trim().to_string(),
                 version: "latest".to_string(),
                 federated: args.federated_skills,
+                signed: true,
                 label: skill_id.trim().to_string(),
             })
             .collect::<Vec<_>>()
@@ -1726,8 +1728,25 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     };
 
     profile.connector_env = staged_env;
+    let mut allow_unsigned_skills = args.allow_unsigned_skills;
+    if interactive
+        && !allow_unsigned_skills
+        && selected_skills.iter().any(|skill| !skill.signed)
+    {
+        println!("One or more selected skills are unsigned.");
+        allow_unsigned_skills = prompt_confirm(
+            "Allow installing unsigned skills for this setup run",
+            false,
+        )?;
+        if !allow_unsigned_skills {
+            println!("Skipping unsigned skills. Re-run setup or use `--allow-unsigned-skills` if you trust that source.");
+        }
+    }
     let mut installed_skills = Vec::new();
     for skill in &selected_skills {
+        if !allow_unsigned_skills && !skill.signed {
+            continue;
+        }
         let install_args = SkillInstallArgs {
             skill_id: skill.skill_id.clone(),
             version: if skill.version == "latest" {
@@ -1738,7 +1757,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             gateway: Some(gateway_base_url.clone()),
             federated: skill.federated,
             all: true,
-            allow_unsigned: args.allow_unsigned_skills,
+            allow_unsigned: allow_unsigned_skills,
             no_activate: false,
         };
         install_skill(install_args).await?;
@@ -2058,9 +2077,13 @@ async fn prompt_setup_skills(client: &GatewayClient) -> anyhow::Result<Vec<Setup
         skill_id: skill.skill_id.clone(),
         version: skill.version.clone(),
         federated: false,
+        signed: skill.signed,
         label: format!(
-            "{}@{} [local] {}",
-            skill.skill_id, skill.version, skill.display_name
+            "{}@{} [local, {}] {}",
+            skill.skill_id,
+            skill.version,
+            if skill.signed { "signed" } else { "unsigned" },
+            skill.display_name
         ),
     }));
     candidates.extend(
@@ -2071,12 +2094,14 @@ async fn prompt_setup_skills(client: &GatewayClient) -> anyhow::Result<Vec<Setup
                 skill_id: skill.entry.skill_id.clone(),
                 version: skill.entry.version.clone(),
                 federated: true,
+                signed: skill.entry.signed,
                 label: format!(
-                    "{}@{} [federated {}:{}] {}",
+                    "{}@{} [federated {}:{}, {}] {}",
                     skill.entry.skill_id,
                     skill.entry.version,
                     skill.source_display_name,
                     skill.source_peer_id,
+                    if skill.entry.signed { "signed" } else { "unsigned" },
                     skill.entry.display_name
                 ),
             }),
