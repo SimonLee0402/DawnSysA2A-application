@@ -900,11 +900,34 @@
       updateRefreshStamp(`最后刷新：${new Date().toLocaleString("zh-CN", { hour12: false })}`);
     }
 
-    function connectConsoleStream() {
+    function scheduleRealtimeRefresh() {
+      if (state.refreshTimer) {
+        clearTimeout(state.refreshTimer);
+      }
+      state.refreshTimer = setTimeout(() => {
+        refreshDashboard().catch((error) => {
+          updateRefreshStamp(`刷新失败：${error.message}`);
+        });
+      }, 500);
+    }
+
+    function handleRealtimePayload(payload) {
+      const event = payload?.event || payload;
+      const detail = event?.detail || event?.status || event?.channel || payload?.detail || "update";
+      $("stream-pill").textContent = event?.status || payload?.kind || "live";
+      renderStreamSummary(
+        detail,
+        `${event?.channel || payload?.transport || "control"} · ${formatTime(event?.createdAtUnixMs)}`
+      );
+      renderSessionState();
+      scheduleRealtimeRefresh();
+    }
+
+    function connectConsoleStreamFallback() {
       if (state.stream) {
         state.stream.close();
       }
-      $("stream-pill").textContent = "connecting";
+      $("stream-pill").textContent = "fallback";
       const source = new EventSource("/console/events");
       state.stream = source;
       source.onopen = () => {
@@ -912,29 +935,43 @@
       };
       source.addEventListener("console_update", (event) => {
         try {
-          const payload = JSON.parse(event.data);
-          const detail = payload.detail || payload.status || payload.channel || "update";
-          $("stream-pill").textContent = payload.status || "live";
-          renderStreamSummary(
-            detail,
-            `${payload.channel || "console"} · ${formatTime(payload.createdAtUnixMs)}`
-          );
-          renderSessionState();
+          handleRealtimePayload(JSON.parse(event.data));
         } catch (_) {
           $("stream-pill").textContent = "live";
         }
-        if (state.refreshTimer) {
-          clearTimeout(state.refreshTimer);
-        }
-        state.refreshTimer = setTimeout(() => {
-          refreshDashboard().catch((error) => {
-            updateRefreshStamp(`刷新失败：${error.message}`);
-          });
-        }, 500);
       });
       source.onerror = () => {
         $("stream-pill").textContent = "reconnecting";
       };
+    }
+
+    function connectConsoleStream() {
+      if (state.stream) {
+        state.stream.close();
+      }
+      $("stream-pill").textContent = "connecting";
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(`${protocol}//${window.location.host}/app/ws`);
+      state.stream = socket;
+      socket.addEventListener("open", () => {
+        $("stream-pill").textContent = "live";
+        socket.send("refresh");
+      });
+      socket.addEventListener("message", (event) => {
+        try {
+          handleRealtimePayload(JSON.parse(event.data));
+        } catch (_) {
+          $("stream-pill").textContent = "live";
+        }
+      });
+      socket.addEventListener("error", () => {
+        $("stream-pill").textContent = "fallback";
+      });
+      socket.addEventListener("close", () => {
+        if (state.stream === socket) {
+          connectConsoleStreamFallback();
+        }
+      });
     }
 
     async function handleBootstrap(event) {

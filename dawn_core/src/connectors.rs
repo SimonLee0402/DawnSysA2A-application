@@ -81,6 +81,44 @@ struct ChatPlatformSupport {
     integration_mode: &'static str,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignalAccountConfig {
+    account: Option<String>,
+    base_url: Option<String>,
+    send_api_url: Option<String>,
+    reaction_api_url: Option<String>,
+    receipt_api_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BlueBubblesAccountConfig {
+    password: Option<String>,
+    base_url: Option<String>,
+    send_message_url: Option<String>,
+    send_attachment_url: Option<String>,
+    send_reaction_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSignalAccount {
+    account: String,
+    base_url: String,
+    send_api_url: Option<String>,
+    reaction_api_url: Option<String>,
+    receipt_api_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedBlueBubblesAccount {
+    password: String,
+    base_url: String,
+    send_message_url: Option<String>,
+    send_attachment_url: Option<String>,
+    send_reaction_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAIResponseRequest {
@@ -105,6 +143,7 @@ pub struct ChatDispatchRequest {
     pub platform: String,
     pub text: Option<String>,
     pub chat_id: Option<String>,
+    pub account_key: Option<String>,
     pub attachment_name: Option<String>,
     pub attachment_base64: Option<String>,
     pub attachment_content_type: Option<String>,
@@ -115,7 +154,21 @@ pub struct ChatDispatchRequest {
     pub receipt_type: Option<String>,
     pub typing: Option<String>,
     pub mark_read: Option<bool>,
+    pub mark_unread: Option<bool>,
     pub part_index: Option<i64>,
+    pub effect_id: Option<String>,
+    pub edit_message_id: Option<String>,
+    pub edited_text: Option<String>,
+    pub unsend_message_id: Option<String>,
+    pub participant_action: Option<String>,
+    pub participant_address: Option<String>,
+    pub group_action: Option<String>,
+    pub group_id: Option<String>,
+    pub group_name: Option<String>,
+    pub group_description: Option<String>,
+    pub group_link_mode: Option<String>,
+    pub group_members: Option<Vec<String>>,
+    pub group_admins: Option<Vec<String>>,
     pub parse_mode: Option<String>,
     pub disable_notification: Option<bool>,
     pub target_type: Option<String>,
@@ -144,8 +197,10 @@ pub struct WeChatOfficialAccountSendRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatTargetTextRequest {
+    #[serde(default)]
     pub chat_id: String,
     pub text: Option<String>,
+    pub account_key: Option<String>,
     pub attachment_name: Option<String>,
     pub attachment_base64: Option<String>,
     pub attachment_content_type: Option<String>,
@@ -156,7 +211,21 @@ pub struct ChatTargetTextRequest {
     pub receipt_type: Option<String>,
     pub typing: Option<String>,
     pub mark_read: Option<bool>,
+    pub mark_unread: Option<bool>,
     pub part_index: Option<i64>,
+    pub effect_id: Option<String>,
+    pub edit_message_id: Option<String>,
+    pub edited_text: Option<String>,
+    pub unsend_message_id: Option<String>,
+    pub participant_action: Option<String>,
+    pub participant_address: Option<String>,
+    pub group_action: Option<String>,
+    pub group_id: Option<String>,
+    pub group_name: Option<String>,
+    pub group_description: Option<String>,
+    pub group_link_mode: Option<String>,
+    pub group_members: Option<Vec<String>>,
+    pub group_admins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,6 +342,7 @@ pub async fn execute_chat_connector(
             send_whatsapp_connector(ChatTargetTextRequest {
                 chat_id,
                 text: Some(text),
+                account_key: None,
                 attachment_name: None,
                 attachment_base64: None,
                 attachment_content_type: None,
@@ -283,7 +353,21 @@ pub async fn execute_chat_connector(
                 receipt_type: None,
                 typing: None,
                 mark_read: None,
+                mark_unread: None,
                 part_index: None,
+                effect_id: None,
+                edit_message_id: None,
+                edited_text: None,
+                unsend_message_id: None,
+                participant_action: None,
+                participant_address: None,
+                group_action: None,
+                group_id: None,
+                group_name: None,
+                group_description: None,
+                group_link_mode: None,
+                group_members: None,
+                group_admins: None,
             })
             .await
         }
@@ -295,6 +379,7 @@ pub async fn execute_chat_connector(
             send_line_connector(ChatTargetTextRequest {
                 chat_id,
                 text: Some(text),
+                account_key: None,
                 attachment_name: None,
                 attachment_base64: None,
                 attachment_content_type: None,
@@ -305,7 +390,21 @@ pub async fn execute_chat_connector(
                 receipt_type: None,
                 typing: None,
                 mark_read: None,
+                mark_unread: None,
                 part_index: None,
+                effect_id: None,
+                edit_message_id: None,
+                edited_text: None,
+                unsend_message_id: None,
+                participant_action: None,
+                participant_address: None,
+                group_action: None,
+                group_id: None,
+                group_name: None,
+                group_description: None,
+                group_link_mode: None,
+                group_members: None,
+                group_admins: None,
             })
             .await
         }
@@ -317,6 +416,7 @@ pub async fn execute_chat_connector(
             send_matrix_connector(ChatTargetTextRequest {
                 chat_id,
                 text: Some(text),
+                account_key: None,
                 attachment_name: None,
                 attachment_base64: None,
                 attachment_content_type: None,
@@ -327,7 +427,21 @@ pub async fn execute_chat_connector(
                 receipt_type: None,
                 typing: None,
                 mark_read: None,
+                mark_unread: None,
                 part_index: None,
+                effect_id: None,
+                edit_message_id: None,
+                edited_text: None,
+                unsend_message_id: None,
+                participant_action: None,
+                participant_address: None,
+                group_action: None,
+                group_id: None,
+                group_name: None,
+                group_description: None,
+                group_link_mode: None,
+                group_members: None,
+                group_admins: None,
             })
             .await
         }
@@ -342,10 +456,12 @@ pub async fn execute_chat_connector(
         "signal" => {
             let chat_id = request
                 .chat_id
-                .ok_or_else(|| anyhow::anyhow!("signal connector requires chatId"))?;
+                .or_else(|| request.group_id.clone())
+                .unwrap_or_default();
             send_signal_connector(ChatTargetTextRequest {
                 chat_id,
                 text: request.text,
+                account_key: request.account_key,
                 attachment_name: request.attachment_name,
                 attachment_base64: request.attachment_base64,
                 attachment_content_type: request.attachment_content_type,
@@ -356,17 +472,30 @@ pub async fn execute_chat_connector(
                 receipt_type: request.receipt_type,
                 typing: request.typing,
                 mark_read: request.mark_read,
+                mark_unread: request.mark_unread,
                 part_index: request.part_index,
+                effect_id: request.effect_id,
+                edit_message_id: request.edit_message_id,
+                edited_text: request.edited_text,
+                unsend_message_id: request.unsend_message_id,
+                participant_action: request.participant_action,
+                participant_address: request.participant_address,
+                group_action: request.group_action,
+                group_id: request.group_id,
+                group_name: request.group_name,
+                group_description: request.group_description,
+                group_link_mode: request.group_link_mode,
+                group_members: request.group_members,
+                group_admins: request.group_admins,
             })
             .await
         }
         "bluebubbles" => {
-            let chat_id = request
-                .chat_id
-                .ok_or_else(|| anyhow::anyhow!("bluebubbles connector requires chatId"))?;
+            let chat_id = request.chat_id.unwrap_or_default();
             send_bluebubbles_connector(ChatTargetTextRequest {
                 chat_id,
                 text: request.text,
+                account_key: request.account_key,
                 attachment_name: request.attachment_name,
                 attachment_base64: request.attachment_base64,
                 attachment_content_type: request.attachment_content_type,
@@ -377,7 +506,21 @@ pub async fn execute_chat_connector(
                 receipt_type: request.receipt_type,
                 typing: request.typing,
                 mark_read: request.mark_read,
+                mark_unread: request.mark_unread,
                 part_index: request.part_index,
+                effect_id: request.effect_id,
+                edit_message_id: request.edit_message_id,
+                edited_text: request.edited_text,
+                unsend_message_id: request.unsend_message_id,
+                participant_action: request.participant_action,
+                participant_address: request.participant_address,
+                group_action: request.group_action,
+                group_id: request.group_id,
+                group_name: request.group_name,
+                group_description: request.group_description,
+                group_link_mode: request.group_link_mode,
+                group_members: request.group_members,
+                group_admins: request.group_admins,
             })
             .await
         }
@@ -540,10 +683,10 @@ async fn status() -> Json<ConnectorStatusReport> {
             matrix: std::env::var("MATRIX_ACCESS_TOKEN").is_ok()
                 && std::env::var("MATRIX_HOMESERVER_URL").is_ok(),
             google_chat: std::env::var("GOOGLE_CHAT_BOT_WEBHOOK_URL").is_ok(),
-            signal: resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]).is_some(),
-            bluebubbles: std::env::var("BLUEBUBBLES_PASSWORD").is_ok()
-                && (std::env::var("BLUEBUBBLES_SEND_MESSAGE_URL").is_ok()
-                    || std::env::var("BLUEBUBBLES_SERVER_URL").is_ok()),
+            signal: resolve_signal_account_config(None).is_some()
+                || std::env::var("DAWN_SIGNAL_ACCOUNTS_JSON").is_ok(),
+            bluebubbles: resolve_bluebubbles_account_config(None).is_some()
+                || std::env::var("DAWN_BLUEBUBBLES_ACCOUNTS_JSON").is_ok(),
             feishu: std::env::var("FEISHU_BOT_WEBHOOK_URL").is_ok(),
             dingtalk: std::env::var("DINGTALK_BOT_WEBHOOK_URL").is_ok(),
             wecom_bot: std::env::var("WECOM_BOT_WEBHOOK_URL").is_ok(),
@@ -1962,25 +2105,43 @@ async fn send_matrix_connector(request: ChatTargetTextRequest) -> anyhow::Result
 }
 
 async fn send_signal_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
-    let Some(account) = resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]) else {
+    let Some(account) = resolve_signal_account_config(request.account_key.as_deref()) else {
         return Ok(ChatSendResult {
             mode: "dry_run",
             platform: "signal",
             delivered: false,
             raw_response: Some(json!({
+                "accountKey": request.account_key,
                 "chatId": request.chat_id,
                 "text": request.text,
                 "attachmentName": request.attachment_name,
                 "reaction": request.reaction,
                 "targetMessageId": request.target_message_id,
                 "receiptType": request.receipt_type,
-                "reason": "SIGNAL_ACCOUNT or SIGNAL_NUMBER is not configured"
+                "groupAction": request.group_action,
+                "groupId": request.group_id,
+                "reason": "SIGNAL account is not configured"
             })),
         });
     };
 
-    if request.typing.is_some() || request.mark_read == Some(true) {
-        anyhow::bail!("signal connector does not support typing or mark-read actions");
+    if request.group_action.is_some() {
+        return send_signal_group_action_connector(&account, request).await;
+    }
+
+    if request.typing.is_some()
+        || request.mark_read == Some(true)
+        || request.mark_unread == Some(true)
+        || request.effect_id.is_some()
+        || request.edit_message_id.is_some()
+        || request.edited_text.is_some()
+        || request.unsend_message_id.is_some()
+        || request.participant_action.is_some()
+        || request.participant_address.is_some()
+    {
+        anyhow::bail!(
+            "signal connector does not support typing, mark-read, edit/unsend, effect, or bluebubbles-style participant actions"
+        );
     }
 
     if request.receipt_type.is_some() {
@@ -1997,12 +2158,13 @@ async fn send_signal_connector(request: ChatTargetTextRequest) -> anyhow::Result
 async fn send_bluebubbles_connector(
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
-    let Some(password) = std::env::var("BLUEBUBBLES_PASSWORD").ok() else {
+    let Some(account) = resolve_bluebubbles_account_config(request.account_key.as_deref()) else {
         return Ok(ChatSendResult {
             mode: "dry_run",
             platform: "bluebubbles",
             delivered: false,
             raw_response: Some(json!({
+                "accountKey": request.account_key,
                 "chatId": request.chat_id,
                 "text": request.text,
                 "attachmentName": request.attachment_name,
@@ -2010,21 +2172,47 @@ async fn send_bluebubbles_connector(
                 "targetMessageId": request.target_message_id,
                 "typing": request.typing,
                 "markRead": request.mark_read,
-                "reason": "BLUEBUBBLES_PASSWORD is not configured"
+                "markUnread": request.mark_unread,
+                "editMessageId": request.edit_message_id,
+                "unsendMessageId": request.unsend_message_id,
+                "participantAction": request.participant_action,
+                "participantAddress": request.participant_address,
+                "groupName": request.group_name,
+                "reason": "BlueBubbles account is not configured"
             })),
         });
     };
 
+    if request.group_name.is_some() {
+        return send_bluebubbles_rename_group_connector(&account, request).await;
+    }
+
+    if request.participant_action.is_some() || request.participant_address.is_some() {
+        return send_bluebubbles_participant_connector(&account, request).await;
+    }
+
     if request.typing.is_some() {
-        return send_bluebubbles_typing_connector(&password, request).await;
+        return send_bluebubbles_typing_connector(&account, request).await;
     }
 
     if request.mark_read == Some(true) {
-        return send_bluebubbles_mark_read_connector(&password, request).await;
+        return send_bluebubbles_mark_read_connector(&account, request).await;
+    }
+
+    if request.mark_unread == Some(true) {
+        return send_bluebubbles_mark_unread_connector(&account, request).await;
+    }
+
+    if request.edit_message_id.is_some() || request.edited_text.is_some() {
+        return send_bluebubbles_edit_connector(&account, request).await;
+    }
+
+    if request.unsend_message_id.is_some() {
+        return send_bluebubbles_unsend_connector(&account, request).await;
     }
 
     if request.reaction.is_some() {
-        return send_bluebubbles_reaction_connector(&password, request).await;
+        return send_bluebubbles_reaction_connector(&account, request).await;
     }
 
     if request.receipt_type.is_some() || request.remove_reaction == Some(true) {
@@ -2034,10 +2222,10 @@ async fn send_bluebubbles_connector(
     }
 
     if request.attachment_base64.is_some() {
-        return send_bluebubbles_attachment_connector(&password, request).await;
+        return send_bluebubbles_attachment_connector(&account, request).await;
     }
 
-    send_bluebubbles_text_connector(&password, request).await
+    send_bluebubbles_text_connector(&account, request).await
 }
 
 struct DecodedAttachment {
@@ -2047,7 +2235,7 @@ struct DecodedAttachment {
 }
 
 async fn send_signal_message_connector(
-    account: &str,
+    account: &ResolvedSignalAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let attachment = decode_attachment(&request)?;
@@ -2056,8 +2244,9 @@ async fn send_signal_message_connector(
         anyhow::bail!("signal connector requires text or attachment content");
     }
 
-    let endpoint = resolve_signal_send_endpoint()?;
-    let payload = build_signal_send_payload(account, &request.chat_id, text, attachment.as_ref());
+    let endpoint = resolve_signal_send_endpoint(account)?;
+    let payload =
+        build_signal_send_payload(&account.account, &request.chat_id, text, attachment.as_ref());
 
     info!("Dispatching live Signal message through gateway connector");
     let response = Client::new().post(endpoint).json(&payload).send().await?;
@@ -2077,7 +2266,7 @@ async fn send_signal_message_connector(
 }
 
 async fn send_signal_reaction_connector(
-    account: &str,
+    account: &ResolvedSignalAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let target_message_id = request
@@ -2120,7 +2309,7 @@ async fn send_signal_reaction_connector(
 }
 
 async fn send_signal_receipt_connector(
-    account: &str,
+    account: &ResolvedSignalAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let target_message_id = request
@@ -2152,8 +2341,48 @@ async fn send_signal_receipt_connector(
     })
 }
 
+async fn send_signal_group_action_connector(
+    account: &ResolvedSignalAccount,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let action = request
+        .group_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("signal group actions require groupAction"))?
+        .to_ascii_lowercase();
+    let endpoint = resolve_signal_group_endpoint(
+        account,
+        request.group_id.as_deref(),
+        signal_group_action_suffix(&action)?,
+    )?;
+    let method = signal_group_action_method(&action)?;
+    let payload = build_signal_group_action_payload(&action, &request)?;
+
+    info!("Dispatching live Signal group action through gateway connector");
+    let mut request_builder = Client::new().request(method, endpoint);
+    if let Some(payload) = payload {
+        request_builder = request_builder.json(&payload);
+    }
+    let response = request_builder.send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("signal group action `{action}` failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "signal",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
 async fn send_bluebubbles_text_connector(
-    password: &str,
+    account: &ResolvedBlueBubblesAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let text = request
@@ -2161,9 +2390,14 @@ async fn send_bluebubbles_text_connector(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("bluebubbles connector requires text"))?;
-    let endpoint = resolve_bluebubbles_send_endpoint(password)?;
-    let payload =
-        build_bluebubbles_text_payload(&request.chat_id, text, &format!("dawn-{}", Uuid::new_v4()));
+    let endpoint = resolve_bluebubbles_send_endpoint(account)?;
+    let payload = build_bluebubbles_text_payload(
+        &request.chat_id,
+        text,
+        &format!("dawn-{}", Uuid::new_v4()),
+        request.target_message_id.as_deref(),
+        request.effect_id.as_deref(),
+    );
 
     info!("Dispatching live BlueBubbles text message through gateway connector");
     let response = Client::new().post(endpoint).json(&payload).send().await?;
@@ -2183,7 +2417,7 @@ async fn send_bluebubbles_text_connector(
 }
 
 async fn send_bluebubbles_attachment_connector(
-    password: &str,
+    account: &ResolvedBlueBubblesAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     if request
@@ -2196,13 +2430,20 @@ async fn send_bluebubbles_attachment_connector(
 
     let attachment = decode_attachment(&request)?
         .ok_or_else(|| anyhow::anyhow!("bluebubbles attachment send requires attachment content"))?;
-    let endpoint = resolve_bluebubbles_attachment_endpoint(password)?;
+    let endpoint = resolve_bluebubbles_attachment_endpoint(account)?;
     let mut form = Form::new()
         .text("chatGuid", request.chat_id)
         .text("name", attachment.name.clone())
         .text("method", "private-api");
     if let Some(target_message_id) = request.target_message_id.as_deref() {
         form = form.text("selectedMessageGuid", target_message_id.to_string());
+    }
+    if let Some(effect_id) = request
+        .effect_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        form = form.text("effectId", effect_id.to_string());
     }
     if let Some(part_index) = request.part_index {
         form = form.text("partIndex", part_index.to_string());
@@ -2233,7 +2474,7 @@ async fn send_bluebubbles_attachment_connector(
 }
 
 async fn send_bluebubbles_reaction_connector(
-    password: &str,
+    account: &ResolvedBlueBubblesAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let target_message_id = request
@@ -2247,7 +2488,7 @@ async fn send_bluebubbles_reaction_connector(
             .ok_or_else(|| anyhow::anyhow!("bluebubbles reactions require reaction"))?,
         request.remove_reaction.unwrap_or(false),
     )?;
-    let endpoint = resolve_bluebubbles_reaction_endpoint(password)?;
+    let endpoint = resolve_bluebubbles_reaction_endpoint(account)?;
     let payload = build_bluebubbles_reaction_payload(
         &request.chat_id,
         target_message_id,
@@ -2273,7 +2514,7 @@ async fn send_bluebubbles_reaction_connector(
 }
 
 async fn send_bluebubbles_typing_connector(
-    password: &str,
+    account: &ResolvedBlueBubblesAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let typing = request
@@ -2285,7 +2526,7 @@ async fn send_bluebubbles_typing_connector(
         "stop" | "stopped" => ("stop", reqwest::Method::DELETE),
         other => anyhow::bail!("unsupported bluebubbles typing action: {other}"),
     };
-    let endpoint = resolve_bluebubbles_chat_action_endpoint(password, &request.chat_id, "typing")?;
+    let endpoint = resolve_bluebubbles_chat_action_endpoint(account, &request.chat_id, "typing")?;
 
     info!("Dispatching live BlueBubbles typing action through gateway connector");
     let response = Client::new().request(action.1, endpoint).send().await?;
@@ -2305,10 +2546,10 @@ async fn send_bluebubbles_typing_connector(
 }
 
 async fn send_bluebubbles_mark_read_connector(
-    password: &str,
+    account: &ResolvedBlueBubblesAccount,
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
-    let endpoint = resolve_bluebubbles_chat_action_endpoint(password, &request.chat_id, "read")?;
+    let endpoint = resolve_bluebubbles_chat_action_endpoint(account, &request.chat_id, "read")?;
 
     info!("Dispatching live BlueBubbles mark-read action through gateway connector");
     let response = Client::new().post(endpoint).send().await?;
@@ -2317,6 +2558,174 @@ async fn send_bluebubbles_mark_read_connector(
 
     if !status.is_success() {
         anyhow::bail!("bluebubbles mark-read request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_mark_unread_connector(
+    account: &ResolvedBlueBubblesAccount,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let endpoint = resolve_bluebubbles_chat_action_endpoint(account, &request.chat_id, "unread")?;
+
+    info!("Dispatching live BlueBubbles mark-unread action through gateway connector");
+    let response = Client::new().post(endpoint).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles mark-unread request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_edit_connector(
+    account: &ResolvedBlueBubblesAccount,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let message_guid = request
+        .edit_message_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles edit requires editMessageId"))?;
+    let edited_text = request
+        .edited_text
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles edit requires editedText"))?;
+    let endpoint = resolve_bluebubbles_message_action_endpoint(account, message_guid, "edit")?;
+    let payload = json!({
+        "editedMessage": edited_text,
+        "backwardsCompatibilityMessage": request.text.as_deref().unwrap_or(edited_text),
+        "partIndex": request.part_index,
+    });
+
+    info!("Dispatching live BlueBubbles edit through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles edit request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_unsend_connector(
+    account: &ResolvedBlueBubblesAccount,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let message_guid = request
+        .unsend_message_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles unsend requires unsendMessageId"))?;
+    let endpoint = resolve_bluebubbles_message_action_endpoint(account, message_guid, "unsend")?;
+    let mut payload = json!({});
+    if let Some(part_index) = request.part_index {
+        payload["partIndex"] = json!(part_index);
+    }
+
+    info!("Dispatching live BlueBubbles unsend through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles unsend request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_participant_connector(
+    account: &ResolvedBlueBubblesAccount,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let action = request
+        .participant_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("add")
+        .to_ascii_lowercase();
+    let address = request
+        .participant_address
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles participant changes require participantAddress"))?;
+    let method = match action.as_str() {
+        "add" => reqwest::Method::POST,
+        "remove" => reqwest::Method::DELETE,
+        other => anyhow::bail!("unsupported bluebubbles participantAction: {other}"),
+    };
+    let endpoint =
+        resolve_bluebubbles_chat_action_endpoint(account, &request.chat_id, "participant")?;
+    let payload = json!({ "address": address });
+
+    info!("Dispatching live BlueBubbles participant action through gateway connector");
+    let response = Client::new()
+        .request(method, endpoint)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!(
+            "bluebubbles participant action `{action}` failed with status {status}: {raw_response}"
+        );
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_rename_group_connector(
+    account: &ResolvedBlueBubblesAccount,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let display_name = request
+        .group_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles group rename requires groupName"))?;
+    let endpoint = resolve_bluebubbles_chat_update_endpoint(account, &request.chat_id)?;
+    let payload = json!({ "displayName": display_name });
+
+    info!("Dispatching live BlueBubbles group rename through gateway connector");
+    let response = Client::new().put(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles group rename failed with status {status}: {raw_response}");
     }
 
     Ok(ChatSendResult {
@@ -2675,12 +3084,25 @@ fn build_matrix_send_endpoint(
     Ok(url)
 }
 
-fn build_bluebubbles_text_payload(chat_guid: &str, text: &str, temp_guid: &str) -> Value {
-    json!({
+fn build_bluebubbles_text_payload(
+    chat_guid: &str,
+    text: &str,
+    temp_guid: &str,
+    selected_message_guid: Option<&str>,
+    effect_id: Option<&str>,
+) -> Value {
+    let mut payload = json!({
         "chatGuid": chat_guid,
         "message": text,
         "tempGuid": temp_guid
-    })
+    });
+    if let Some(selected_message_guid) = selected_message_guid.filter(|value| !value.trim().is_empty()) {
+        payload["selectedMessageGuid"] = json!(selected_message_guid);
+    }
+    if let Some(effect_id) = effect_id.filter(|value| !value.trim().is_empty()) {
+        payload["effectId"] = json!(effect_id);
+    }
+    payload
 }
 
 fn build_bluebubbles_reaction_payload(
@@ -2700,11 +3122,9 @@ fn build_bluebubbles_reaction_payload(
     payload
 }
 
-fn resolve_signal_send_endpoint() -> anyhow::Result<Url> {
-    let endpoint = resolve_first_present_env(&["SIGNAL_SEND_API_URL"]).unwrap_or_else(|| {
-        let base = resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
-            .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
-        let trimmed = base.trim_end_matches('/');
+fn resolve_signal_send_endpoint(account: &ResolvedSignalAccount) -> anyhow::Result<Url> {
+    let endpoint = account.send_api_url.clone().unwrap_or_else(|| {
+        let trimmed = account.base_url.trim_end_matches('/');
         if trimmed.ends_with("/v2/send") {
             trimmed.to_string()
         } else {
@@ -2714,113 +3134,129 @@ fn resolve_signal_send_endpoint() -> anyhow::Result<Url> {
     Url::parse(&endpoint).map_err(Into::into)
 }
 
-fn resolve_signal_reaction_endpoint(account: &str) -> anyhow::Result<Url> {
-    resolve_signal_account_endpoint(
-        Some("SIGNAL_REACTION_API_URL"),
-        &["v1", "reactions", account],
-    )
+fn resolve_signal_reaction_endpoint(account: &ResolvedSignalAccount) -> anyhow::Result<Url> {
+    resolve_signal_account_endpoint(account, account.reaction_api_url.as_deref(), &["v1", "reactions"])
 }
 
-fn resolve_signal_receipt_endpoint(account: &str) -> anyhow::Result<Url> {
-    resolve_signal_account_endpoint(
-        Some("SIGNAL_RECEIPT_API_URL"),
-        &["v1", "receipts", account],
-    )
+fn resolve_signal_receipt_endpoint(account: &ResolvedSignalAccount) -> anyhow::Result<Url> {
+    resolve_signal_account_endpoint(account, account.receipt_api_url.as_deref(), &["v1", "receipts"])
 }
 
 fn resolve_signal_account_endpoint(
-    explicit_env: Option<&str>,
+    account: &ResolvedSignalAccount,
+    explicit_url: Option<&str>,
     segments: &[&str],
 ) -> anyhow::Result<Url> {
-    if let Some(explicit_env) = explicit_env {
-        if let Ok(explicit) = std::env::var(explicit_env) {
-            return Url::parse(&explicit).map_err(Into::into);
-        }
+    if let Some(explicit_url) = explicit_url {
+        return Url::parse(explicit_url).map_err(Into::into);
     }
-    let base = resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
-        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
-    let mut url = Url::parse(&base)?;
+    let mut url = Url::parse(&account.base_url)?;
     {
         let mut path = url
             .path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid Signal REST API base url"))?;
         path.pop_if_empty();
         path.extend(segments);
+        path.push(&account.account);
     }
     Ok(url)
 }
 
-fn resolve_bluebubbles_send_endpoint(password: &str) -> anyhow::Result<Url> {
-    let mut url = if let Some(explicit) = std::env::var("BLUEBUBBLES_SEND_MESSAGE_URL").ok() {
-        Url::parse(&explicit)?
-    } else {
-        let base = std::env::var("BLUEBUBBLES_SERVER_URL")
-            .map_err(|_| anyhow::anyhow!("BLUEBUBBLES_SERVER_URL is not configured"))?;
-        let mut url = Url::parse(&base)?;
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|_| anyhow::anyhow!("invalid BLUEBUBBLES_SERVER_URL path"))?;
-            segments.pop_if_empty();
-            segments.extend(["api", "v1", "message", "text"]);
+fn resolve_signal_group_endpoint(
+    account: &ResolvedSignalAccount,
+    group_id: Option<&str>,
+    suffix: Vec<String>,
+) -> anyhow::Result<Url> {
+    let mut url = Url::parse(&account.base_url)?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid Signal REST API base url"))?;
+        path.pop_if_empty();
+        path.extend(["v1", "groups"]);
+        path.push(&account.account);
+        for segment in suffix {
+            if segment == "{groupId}" {
+                let group_id = group_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("signal group action requires groupId"))?;
+                path.push(group_id);
+            } else {
+                path.push(&segment);
+            }
         }
-        url
-    };
-
-    let has_auth = url
-        .query_pairs()
-        .any(|(key, _)| key == "guid" || key == "password");
-    if !has_auth {
-        url.query_pairs_mut().append_pair("guid", password);
     }
-
     Ok(url)
 }
 
-fn resolve_bluebubbles_attachment_endpoint(password: &str) -> anyhow::Result<Url> {
+fn resolve_bluebubbles_send_endpoint(account: &ResolvedBlueBubblesAccount) -> anyhow::Result<Url> {
     resolve_bluebubbles_authed_endpoint(
-        password,
-        Some("BLUEBUBBLES_SEND_ATTACHMENT_URL"),
+        account,
+        account.send_message_url.as_deref(),
+        &["api", "v1", "message", "text"],
+    )
+}
+
+fn resolve_bluebubbles_attachment_endpoint(
+    account: &ResolvedBlueBubblesAccount,
+) -> anyhow::Result<Url> {
+    resolve_bluebubbles_authed_endpoint(
+        account,
+        account.send_attachment_url.as_deref(),
         &["api", "v1", "message", "attachment"],
     )
 }
 
-fn resolve_bluebubbles_reaction_endpoint(password: &str) -> anyhow::Result<Url> {
+fn resolve_bluebubbles_reaction_endpoint(
+    account: &ResolvedBlueBubblesAccount,
+) -> anyhow::Result<Url> {
     resolve_bluebubbles_authed_endpoint(
-        password,
-        Some("BLUEBUBBLES_SEND_REACTION_URL"),
+        account,
+        account.send_reaction_url.as_deref(),
         &["api", "v1", "message", "react"],
     )
 }
 
 fn resolve_bluebubbles_chat_action_endpoint(
-    password: &str,
+    account: &ResolvedBlueBubblesAccount,
     chat_guid: &str,
     action: &str,
 ) -> anyhow::Result<Url> {
     resolve_bluebubbles_authed_endpoint(
-        password,
+        account,
         None,
         &["api", "v1", "chat", chat_guid, action],
     )
 }
 
+fn resolve_bluebubbles_chat_update_endpoint(
+    account: &ResolvedBlueBubblesAccount,
+    chat_guid: &str,
+) -> anyhow::Result<Url> {
+    resolve_bluebubbles_authed_endpoint(account, None, &["api", "v1", "chat", chat_guid])
+}
+
+fn resolve_bluebubbles_message_action_endpoint(
+    account: &ResolvedBlueBubblesAccount,
+    message_guid: &str,
+    action: &str,
+) -> anyhow::Result<Url> {
+    resolve_bluebubbles_authed_endpoint(account, None, &["api", "v1", "message", message_guid, action])
+}
+
 fn resolve_bluebubbles_authed_endpoint(
-    password: &str,
-    explicit_env: Option<&str>,
+    account: &ResolvedBlueBubblesAccount,
+    explicit_url: Option<&str>,
     segments: &[&str],
 ) -> anyhow::Result<Url> {
-    let mut url = if let Some(explicit_env) = explicit_env {
-        if let Ok(explicit) = std::env::var(explicit_env) {
-            Url::parse(&explicit)?
-        } else {
-            bluebubbles_base_url()?
-        }
+    let mut url = if let Some(explicit_url) = explicit_url {
+        Url::parse(explicit_url)?
     } else {
-        bluebubbles_base_url()?
+        bluebubbles_base_url(account)?
     };
 
-    if url.path() == "/" || explicit_env.is_none() || url.path().ends_with('/') {
+    if url.path() == "/" || explicit_url.is_none() || url.path().ends_with('/') {
         let mut path = url
             .path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid BLUEBUBBLES_SERVER_URL path"))?;
@@ -2832,15 +3268,13 @@ fn resolve_bluebubbles_authed_endpoint(
         .query_pairs()
         .any(|(key, _)| key == "guid" || key == "password");
     if !has_auth {
-        url.query_pairs_mut().append_pair("guid", password);
+        url.query_pairs_mut().append_pair("guid", &account.password);
     }
     Ok(url)
 }
 
-fn bluebubbles_base_url() -> anyhow::Result<Url> {
-    let base = std::env::var("BLUEBUBBLES_SERVER_URL")
-        .map_err(|_| anyhow::anyhow!("BLUEBUBBLES_SERVER_URL is not configured"))?;
-    Url::parse(&base).map_err(Into::into)
+fn bluebubbles_base_url(account: &ResolvedBlueBubblesAccount) -> anyhow::Result<Url> {
+    Url::parse(&account.base_url).map_err(Into::into)
 }
 
 fn decode_attachment(request: &ChatTargetTextRequest) -> anyhow::Result<Option<DecodedAttachment>> {
@@ -2912,6 +3346,186 @@ async fn parse_connector_response(response: reqwest::Response) -> anyhow::Result
             "payloadAccepted": status.is_success()
         }),
     })
+}
+
+fn resolve_signal_account_config(account_key: Option<&str>) -> Option<ResolvedSignalAccount> {
+    let normalized_key = account_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    if let Some(config) = normalized_key
+        .as_deref()
+        .and_then(parse_signal_account_registry)
+    {
+        return Some(config);
+    }
+
+    resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]).map(|account| ResolvedSignalAccount {
+        account,
+        base_url: resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
+            .unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
+        send_api_url: std::env::var("SIGNAL_SEND_API_URL").ok(),
+        reaction_api_url: std::env::var("SIGNAL_REACTION_API_URL").ok(),
+        receipt_api_url: std::env::var("SIGNAL_RECEIPT_API_URL").ok(),
+    })
+}
+
+fn parse_signal_account_registry(account_key: &str) -> Option<ResolvedSignalAccount> {
+    let raw = std::env::var("DAWN_SIGNAL_ACCOUNTS_JSON").ok()?;
+    let registry = serde_json::from_str::<serde_json::Map<String, Value>>(&raw).ok()?;
+    let entry = registry.get(account_key)?;
+    let config = serde_json::from_value::<SignalAccountConfig>(entry.clone()).ok()?;
+    let account = config.account?.trim().to_string();
+    if account.is_empty() {
+        return None;
+    }
+    let base_url = config
+        .base_url
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string())
+        .trim()
+        .to_string();
+    if base_url.is_empty() {
+        return None;
+    }
+    Some(ResolvedSignalAccount {
+        account,
+        base_url,
+        send_api_url: config.send_api_url.filter(|value| !value.trim().is_empty()),
+        reaction_api_url: config.reaction_api_url.filter(|value| !value.trim().is_empty()),
+        receipt_api_url: config.receipt_api_url.filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn resolve_bluebubbles_account_config(
+    account_key: Option<&str>,
+) -> Option<ResolvedBlueBubblesAccount> {
+    let normalized_key = account_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    if let Some(config) = normalized_key
+        .as_deref()
+        .and_then(parse_bluebubbles_account_registry)
+    {
+        return Some(config);
+    }
+
+    let password = std::env::var("BLUEBUBBLES_PASSWORD").ok()?;
+    let base_url = resolve_first_present_env(&["BLUEBUBBLES_SERVER_URL"])
+        .or_else(|| std::env::var("BLUEBUBBLES_SEND_MESSAGE_URL").ok())
+        .unwrap_or_default();
+    if base_url.trim().is_empty() {
+        return None;
+    }
+    Some(ResolvedBlueBubblesAccount {
+        password,
+        base_url,
+        send_message_url: std::env::var("BLUEBUBBLES_SEND_MESSAGE_URL").ok(),
+        send_attachment_url: std::env::var("BLUEBUBBLES_SEND_ATTACHMENT_URL").ok(),
+        send_reaction_url: std::env::var("BLUEBUBBLES_SEND_REACTION_URL").ok(),
+    })
+}
+
+fn parse_bluebubbles_account_registry(account_key: &str) -> Option<ResolvedBlueBubblesAccount> {
+    let raw = std::env::var("DAWN_BLUEBUBBLES_ACCOUNTS_JSON").ok()?;
+    let registry = serde_json::from_str::<serde_json::Map<String, Value>>(&raw).ok()?;
+    let entry = registry.get(account_key)?;
+    let config = serde_json::from_value::<BlueBubblesAccountConfig>(entry.clone()).ok()?;
+    let password = config.password?.trim().to_string();
+    if password.is_empty() {
+        return None;
+    }
+    let base_url = config.base_url?.trim().to_string();
+    if base_url.is_empty() {
+        return None;
+    }
+    Some(ResolvedBlueBubblesAccount {
+        password,
+        base_url,
+        send_message_url: config.send_message_url.filter(|value| !value.trim().is_empty()),
+        send_attachment_url: config.send_attachment_url.filter(|value| !value.trim().is_empty()),
+        send_reaction_url: config.send_reaction_url.filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn signal_group_action_method(action: &str) -> anyhow::Result<reqwest::Method> {
+    match action {
+        "list_groups" | "get_group" => Ok(reqwest::Method::GET),
+        "create_group" | "join_group" | "leave_group" | "block_group" | "add_members"
+        | "add_admins" => Ok(reqwest::Method::POST),
+        "update_group" => Ok(reqwest::Method::PUT),
+        "delete_group" | "remove_members" | "remove_admins" => Ok(reqwest::Method::DELETE),
+        other => anyhow::bail!("unsupported signal groupAction: {other}"),
+    }
+}
+
+fn signal_group_action_suffix(action: &str) -> anyhow::Result<Vec<String>> {
+    let suffix = match action {
+        "list_groups" => vec![],
+        "get_group" | "update_group" | "delete_group" => vec!["{groupId}".to_string()],
+        "create_group" => vec![],
+        "join_group" => vec!["{groupId}".to_string(), "join".to_string()],
+        "leave_group" => vec!["{groupId}".to_string(), "quit".to_string()],
+        "block_group" => vec!["{groupId}".to_string(), "block".to_string()],
+        "add_members" | "remove_members" => vec!["{groupId}".to_string(), "members".to_string()],
+        "add_admins" | "remove_admins" => vec!["{groupId}".to_string(), "admins".to_string()],
+        other => anyhow::bail!("unsupported signal groupAction: {other}"),
+    };
+    Ok(suffix)
+}
+
+fn build_signal_group_action_payload(
+    action: &str,
+    request: &ChatTargetTextRequest,
+) -> anyhow::Result<Option<Value>> {
+    let payload = match action {
+        "list_groups" | "get_group" | "delete_group" | "join_group" | "leave_group"
+        | "block_group" => None,
+        "create_group" => {
+            let name = request
+                .group_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("signal create_group requires groupName"))?;
+            let members = request
+                .group_members
+                .clone()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("signal create_group requires at least one groupMember"))?;
+            Some(json!({
+                "name": name,
+                "members": members,
+                "description": request.group_description,
+                "group_link": request.group_link_mode.clone().unwrap_or_else(|| "disabled".to_string()),
+                "permissions": {
+                    "add_members": "only-admins",
+                    "edit_group": "only-admins",
+                }
+            }))
+        }
+        "update_group" => Some(json!({
+            "name": request.group_name,
+            "description": request.group_description,
+        })),
+        "add_members" | "remove_members" => {
+            let members = request
+                .group_members
+                .clone()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("signal {action} requires groupMembers"))?;
+            Some(json!({ "members": members }))
+        }
+        "add_admins" | "remove_admins" => {
+            let admins = request
+                .group_admins
+                .clone()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("signal {action} requires groupAdmins"))?;
+            Some(json!({ "admins": admins }))
+        }
+        other => anyhow::bail!("unsupported signal groupAction: {other}"),
+    };
+    Ok(payload)
 }
 
 fn normalize_bluebubbles_reaction(reaction: &str, remove: bool) -> anyhow::Result<String> {
@@ -3294,6 +3908,19 @@ mod tests {
     }
 
     #[test]
+    fn chat_target_request_defaults_missing_chat_id() {
+        let request: super::ChatTargetTextRequest = serde_json::from_value(json!({
+            "text": "hello",
+            "groupAction": "list_groups"
+        }))
+        .expect("request should deserialize without chatId");
+
+        assert_eq!(request.chat_id, "");
+        assert_eq!(request.text.as_deref(), Some("hello"));
+        assert_eq!(request.group_action.as_deref(), Some("list_groups"));
+    }
+
+    #[test]
     fn builds_wechat_official_account_text_payload() {
         let payload = build_wechat_official_account_payload("openid-123", "hello china");
 
@@ -3437,8 +4064,13 @@ mod tests {
 
     #[test]
     fn builds_bluebubbles_text_payload() {
-        let payload =
-            build_bluebubbles_text_payload("iMessage;+15550002222", "hello blue", "temp-123");
+        let payload = build_bluebubbles_text_payload(
+            "iMessage;+15550002222",
+            "hello blue",
+            "temp-123",
+            None,
+            None,
+        );
 
         assert_eq!(
             payload,

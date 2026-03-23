@@ -370,6 +370,8 @@ struct ChannelSendArgs {
     #[arg(long)]
     chat_id: Option<String>,
     #[arg(long)]
+    account_key: Option<String>,
+    #[arg(long)]
     attachment_file: Option<String>,
     #[arg(long)]
     attachment_name: Option<String>,
@@ -390,7 +392,35 @@ struct ChannelSendArgs {
     #[arg(long)]
     mark_read: bool,
     #[arg(long)]
+    mark_unread: bool,
+    #[arg(long)]
     part_index: Option<i64>,
+    #[arg(long)]
+    effect_id: Option<String>,
+    #[arg(long)]
+    edit_message_id: Option<String>,
+    #[arg(long)]
+    edited_text: Option<String>,
+    #[arg(long)]
+    unsend_message_id: Option<String>,
+    #[arg(long)]
+    participant_action: Option<String>,
+    #[arg(long)]
+    participant_address: Option<String>,
+    #[arg(long)]
+    group_action: Option<String>,
+    #[arg(long)]
+    group_id: Option<String>,
+    #[arg(long)]
+    group_name: Option<String>,
+    #[arg(long)]
+    group_description: Option<String>,
+    #[arg(long)]
+    group_link_mode: Option<String>,
+    #[arg(long = "group-member")]
+    group_members: Vec<String>,
+    #[arg(long = "group-admin")]
+    group_admins: Vec<String>,
     #[arg(long)]
     parse_mode: Option<String>,
     #[arg(long)]
@@ -3288,17 +3318,18 @@ fn build_channel_send_request(
             })
         }
         "signal" => {
-            let chat_id = args
-                .chat_id
+            let has_group_action = args
+                .group_action
                 .as_deref()
-                .ok_or_else(|| anyhow!("signal send requires --chat-id"))?;
+                .is_some_and(|value| !value.trim().is_empty());
             let (attachment_name, attachment_base64, attachment_content_type) =
                 encode_attachment_payload(args)?;
             let has_text = args
                 .text
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty());
-            if !has_text
+            if !has_group_action
+                && !has_text
                 && attachment_base64.is_none()
                 && args.reaction.is_none()
                 && !args.remove_reaction
@@ -3311,9 +3342,13 @@ fn build_channel_send_request(
             if args.typing.is_some() || args.mark_read {
                 bail!("signal send does not support --typing or --mark-read");
             }
-            let mut payload = json!({
-                "chatId": chat_id,
-            });
+            let mut payload = json!({});
+            if let Some(chat_id) = args.chat_id.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["chatId"] = json!(chat_id);
+            }
+            if let Some(account_key) = args.account_key.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["accountKey"] = json!(account_key);
+            }
             if let Some(text) = args.text.as_deref().filter(|value| !value.trim().is_empty()) {
                 payload["text"] = json!(text);
             }
@@ -3341,13 +3376,30 @@ fn build_channel_send_request(
             if let Some(receipt_type) = args.receipt_type.as_deref() {
                 payload["receiptType"] = json!(receipt_type);
             }
+            if let Some(group_action) = args.group_action.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["groupAction"] = json!(group_action);
+            }
+            if let Some(group_id) = args.group_id.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["groupId"] = json!(group_id);
+            }
+            if let Some(group_name) = args.group_name.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["groupName"] = json!(group_name);
+            }
+            if let Some(group_description) = args.group_description.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["groupDescription"] = json!(group_description);
+            }
+            if let Some(group_link_mode) = args.group_link_mode.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["groupLinkMode"] = json!(group_link_mode);
+            }
+            if !args.group_members.is_empty() {
+                payload["groupMembers"] = json!(args.group_members);
+            }
+            if !args.group_admins.is_empty() {
+                payload["groupAdmins"] = json!(args.group_admins);
+            }
             payload
         }
         "bluebubbles" => {
-            let chat_id = args
-                .chat_id
-                .as_deref()
-                .ok_or_else(|| anyhow!("bluebubbles send requires --chat-id"))?;
             let (attachment_name, attachment_base64, attachment_content_type) =
                 encode_attachment_payload(args)?;
             if attachment_base64.is_some()
@@ -3359,18 +3411,29 @@ fn build_channel_send_request(
                 bail!("bluebubbles attachment send currently does not support text captions");
             }
             if !args.mark_read
+                && !args.mark_unread
                 && args.typing.is_none()
                 && attachment_base64.is_none()
                 && args.reaction.is_none()
+                && args.edit_message_id.is_none()
+                && args.edited_text.is_none()
+                && args.unsend_message_id.is_none()
+                && args.participant_action.is_none()
+                && args.participant_address.is_none()
+                && args.group_name.is_none()
                 && args.text.as_deref().is_none_or(|value| value.trim().is_empty())
             {
                 bail!(
-                    "bluebubbles send requires text, --attachment-file, --reaction, --typing, or --mark-read"
+                    "bluebubbles send requires text or a native action such as attachment, reaction, typing, mark-read, mark-unread, edit, unsend, participant, or group rename"
                 );
             }
-            let mut payload = json!({
-                "chatId": chat_id,
-            });
+            let mut payload = json!({});
+            if let Some(chat_id) = args.chat_id.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["chatId"] = json!(chat_id);
+            }
+            if let Some(account_key) = args.account_key.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["accountKey"] = json!(account_key);
+            }
             if let Some(text) = args.text.as_deref().filter(|value| !value.trim().is_empty()) {
                 payload["text"] = json!(text);
             }
@@ -3398,8 +3461,32 @@ fn build_channel_send_request(
             if args.mark_read {
                 payload["markRead"] = json!(true);
             }
+            if args.mark_unread {
+                payload["markUnread"] = json!(true);
+            }
             if let Some(part_index) = args.part_index {
                 payload["partIndex"] = json!(part_index);
+            }
+            if let Some(effect_id) = args.effect_id.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["effectId"] = json!(effect_id);
+            }
+            if let Some(edit_message_id) = args.edit_message_id.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["editMessageId"] = json!(edit_message_id);
+            }
+            if let Some(edited_text) = args.edited_text.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["editedText"] = json!(edited_text);
+            }
+            if let Some(unsend_message_id) = args.unsend_message_id.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["unsendMessageId"] = json!(unsend_message_id);
+            }
+            if let Some(participant_action) = args.participant_action.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["participantAction"] = json!(participant_action);
+            }
+            if let Some(participant_address) = args.participant_address.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["participantAddress"] = json!(participant_address);
+            }
+            if let Some(group_name) = args.group_name.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["groupName"] = json!(group_name);
             }
             payload
         }
@@ -3928,6 +4015,7 @@ async fn chat(args: ChatArgs) -> anyhow::Result<()> {
             text: Some(reply_text.clone()),
             gateway: None,
             chat_id: args.chat_id,
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -3938,7 +4026,21 @@ async fn chat(args: ChatArgs) -> anyhow::Result<()> {
             receipt_type: None,
             typing: None,
             mark_read: false,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: args.parse_mode,
             disable_notification: args.disable_notification,
             target_type: args.target_type,
@@ -6562,6 +6664,7 @@ mod tests {
             text: Some("hello channel".to_string()),
             gateway: None,
             chat_id: None,
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -6572,7 +6675,21 @@ mod tests {
             receipt_type: None,
             typing: None,
             mark_read: false,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6602,6 +6719,7 @@ mod tests {
             text: Some("hello channel".to_string()),
             gateway: None,
             chat_id: Some("15551234567".to_string()),
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -6612,7 +6730,21 @@ mod tests {
             receipt_type: None,
             typing: None,
             mark_read: false,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6672,6 +6804,7 @@ mod tests {
             text: Some("hello channel".to_string()),
             gateway: None,
             chat_id: Some("+15551234567".to_string()),
+            account_key: None,
             attachment_file: Some(attachment_path.display().to_string()),
             attachment_name: Some("proof.txt".to_string()),
             attachment_content_type: Some("text/plain".to_string()),
@@ -6682,7 +6815,21 @@ mod tests {
             receipt_type: None,
             typing: None,
             mark_read: false,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6706,6 +6853,7 @@ mod tests {
             text: None,
             gateway: None,
             chat_id: Some("+15551234567".to_string()),
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -6716,7 +6864,21 @@ mod tests {
             receipt_type: None,
             typing: None,
             mark_read: false,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6743,6 +6905,7 @@ mod tests {
             text: None,
             gateway: None,
             chat_id: Some("iMessage;+15551234567".to_string()),
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -6753,7 +6916,21 @@ mod tests {
             receipt_type: None,
             typing: None,
             mark_read: false,
+            mark_unread: false,
             part_index: Some(1),
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6774,6 +6951,7 @@ mod tests {
             text: None,
             gateway: None,
             chat_id: Some("iMessage;+15551234567".to_string()),
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -6784,7 +6962,21 @@ mod tests {
             receipt_type: None,
             typing: Some("start".to_string()),
             mark_read: false,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6802,6 +6994,7 @@ mod tests {
             text: None,
             gateway: None,
             chat_id: Some("iMessage;+15551234567".to_string()),
+            account_key: None,
             attachment_file: None,
             attachment_name: None,
             attachment_content_type: None,
@@ -6812,7 +7005,21 @@ mod tests {
             receipt_type: None,
             typing: None,
             mark_read: true,
+            mark_unread: false,
             part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: vec![],
+            group_admins: vec![],
             parse_mode: None,
             disable_notification: false,
             target_type: None,
