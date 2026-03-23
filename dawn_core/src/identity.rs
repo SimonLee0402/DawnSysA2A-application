@@ -2853,7 +2853,7 @@ async fn insert_operator_session(
         .ok_or_else(|| anyhow!("operator session disappeared after insert"))
 }
 
-async fn resolve_session_by_token(
+pub(crate) async fn resolve_session_by_token(
     state: &Arc<AppState>,
     session_token: &str,
 ) -> anyhow::Result<OperatorSessionRecord> {

@@ -1,23 +1,26 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
 };
+use axum::http::StatusCode;
+use serde::Deserialize;
 use serde_json::json;
 
-use crate::app_state::AppState;
+use crate::{app_state::AppState, chat_ingress, identity};
 
 const CONTROL_UI_HTML: &str = include_str!("../../templates/frontend/control_ui.html");
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(page))
+        .route("/command", post(submit_command))
         .route("/ws", get(workbench_ws))
 }
 
@@ -30,6 +33,86 @@ async fn workbench_ws(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_workbench_ws(socket, state))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchCommandRequest {
+    session_token: String,
+    platform: String,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+    text: String,
+    route_to_task: Option<bool>,
+}
+
+async fn submit_command(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<WorkbenchCommandRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let session = identity::resolve_session_by_token(&state, &request.session_token)
+        .await
+        .map_err(auth_error)?;
+    let platform = request.platform.trim().to_ascii_lowercase();
+    let text = request.text.trim().to_string();
+    if platform.is_empty() {
+        return Err(bad_request("platform is required"));
+    }
+    if text.is_empty() {
+        return Err(bad_request("text is required"));
+    }
+    let record = chat_ingress::simulate_ingress_message(
+        state,
+        &platform,
+        "control_ui.command".to_string(),
+        request.chat_id,
+        request.sender_id,
+        request
+            .sender_display
+            .or_else(|| Some(session.operator_name.clone())),
+        text.clone(),
+        json!({
+            "source": "control_ui",
+            "platform": platform,
+            "text": text,
+            "actor": session.operator_name,
+        }),
+        request.route_to_task.unwrap_or(true),
+    )
+    .await
+    .map_err(service_error)?;
+    Ok(Json(json!({
+        "record": record,
+        "actor": session.operator_name,
+    })))
+}
+
+fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": message,
+        })),
+    )
+}
+
+fn auth_error(error: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": error.to_string(),
+        })),
+    )
+}
+
+fn service_error(error: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": error.to_string(),
+        })),
+    )
 }
 
 async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
@@ -98,8 +181,10 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("Dawn Personal Workbench"));
         assert!(CONTROL_UI_HTML.contains("id=\"bootstrap-form\""));
         assert!(CONTROL_UI_HTML.contains("id=\"task-form\""));
+        assert!(CONTROL_UI_HTML.contains("id=\"command-form\""));
         assert!(CONTROL_UI_HTML.contains("/api/gateway/identity/status"));
         assert!(CONTROL_UI_HTML.contains("/api/a2a/task"));
+        assert!(CONTROL_UI_HTML.contains("/app/command"));
         assert!(CONTROL_UI_HTML.contains("/app/ws"));
     }
 }

@@ -1623,6 +1623,24 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         "Logged in to {gateway_base_url} as {}",
         response.session.operator_name
     );
+    if interactive {
+        println!(
+            "Current workspace defaults: models = {}; chats = {}",
+            if workspace.default_model_providers.is_empty() {
+                "<none>".to_string()
+            } else {
+                workspace.default_model_providers.join(", ")
+            },
+            if workspace.default_chat_platforms.is_empty() {
+                "<none>".to_string()
+            } else {
+                workspace.default_chat_platforms.join(", ")
+            }
+        );
+        println!(
+            "If you pick a model/chat that is already configured, setup will ask whether to reuse the live/staged credentials or replace them."
+        );
+    }
 
     let selected_models = choose_setup_targets(
         "AI models",
@@ -2264,6 +2282,8 @@ fn ensure_setup_connector_ready(
                     target_label,
                     if live_ready && !env_ready {
                         " from the running gateway"
+                    } else if env_ready {
+                        " from the local staged profile"
                     } else {
                         ""
                     }

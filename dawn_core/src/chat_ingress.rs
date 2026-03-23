@@ -782,6 +782,31 @@ async fn qq_events(
     })))
 }
 
+pub(crate) async fn simulate_ingress_message(
+    state: Arc<AppState>,
+    platform: &str,
+    event_type: String,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+    text: String,
+    raw_payload: Value,
+    route_to_task: bool,
+) -> anyhow::Result<ChatIngressEventRecord> {
+    ingest_message(
+        state,
+        platform,
+        event_type,
+        chat_id,
+        sender_id,
+        sender_display,
+        text,
+        raw_payload,
+        route_to_task,
+    )
+    .await
+}
+
 async fn ingest_message(
     state: Arc<AppState>,
     platform: &str,
@@ -855,24 +880,39 @@ async fn ingest_message(
             let reply = format!(
                 "Pairing required for {platform}. Ask the operator to approve code {pairing_code} for {actor}."
             );
-            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
-                .await;
+            if let Err(error) =
+                dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                    .await
+            {
+                warn!(?error, platform, "failed to deliver pending-pairing ingress reply");
+                record.error = Some(format!(
+                    "{platform} sender is waiting for pairing approval ({pairing_code}); reply dispatch failed: {error}"
+                ));
+            }
             record.reply_text = Some(reply);
             record.status = ChatIngressStatus::PendingApproval;
-            record.error = Some(format!(
-                "{platform} sender is waiting for pairing approval ({pairing_code})"
-            ));
+            if record.error.is_none() {
+                record.error = Some(format!(
+                    "{platform} sender is waiting for pairing approval ({pairing_code})"
+                ));
+            }
             record.updated_at_unix_ms = unix_timestamp_ms();
             state.upsert_chat_ingress_event(record.clone()).await?;
             return Ok(record);
         }
         IngressAccessDecision::Rejected(message) => {
-            let _ =
+            if let Err(error) =
                 dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &message)
-                    .await;
+                    .await
+            {
+                warn!(?error, platform, "failed to deliver rejected ingress reply");
+                record.error = Some(format!("{message}; reply dispatch failed: {error}"));
+            }
             record.reply_text = Some(message.clone());
             record.status = ChatIngressStatus::Ignored;
-            record.error = Some(message);
+            if record.error.is_none() {
+                record.error = Some(message);
+            }
             record.updated_at_unix_ms = unix_timestamp_ms();
             state.upsert_chat_ingress_event(record.clone()).await?;
             return Ok(record);
@@ -882,9 +922,18 @@ async fn ingest_message(
     let command_task = if let Some(command) = parse_ingress_command(&record.text) {
         match execute_ingress_command(state.clone(), platform, &record, command).await? {
             IngressCommandResult::Reply(reply) => {
-                let _ =
+                if let Err(error) =
                     dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
-                        .await;
+                        .await
+                {
+                    warn!(?error, platform, "failed to deliver ingress command reply");
+                    record.reply_text = Some(reply);
+                    record.status = ChatIngressStatus::Failed;
+                    record.error = Some(format!("failed to dispatch command reply: {error}"));
+                    record.updated_at_unix_ms = unix_timestamp_ms();
+                    state.upsert_chat_ingress_event(record.clone()).await?;
+                    return Ok(record);
+                }
                 record.reply_text = Some(reply);
                 record.status = ChatIngressStatus::Replied;
                 record.updated_at_unix_ms = unix_timestamp_ms();
@@ -903,9 +952,19 @@ async fn ingest_message(
     if command_task.is_none() && should_attempt_default_model_reply(&record.text) {
         match try_default_model_reply(state.clone(), platform, &record.text).await {
             Ok(Some(reply)) => {
-                let _ =
+                if let Err(error) =
                     dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
-                        .await;
+                        .await
+                {
+                    warn!(?error, platform, "failed to deliver default model reply");
+                    record.reply_text = Some(reply);
+                    record.status = ChatIngressStatus::Failed;
+                    record.error =
+                        Some(format!("default model reply generated but dispatch failed: {error}"));
+                    record.updated_at_unix_ms = unix_timestamp_ms();
+                    state.upsert_chat_ingress_event(record.clone()).await?;
+                    return Ok(record);
+                }
                 record.reply_text = Some(reply);
                 record.status = ChatIngressStatus::Replied;
                 record.updated_at_unix_ms = unix_timestamp_ms();
@@ -916,9 +975,16 @@ async fn ingest_message(
             Err(error) => {
                 warn!(?error, platform, "default model reply failed for chat ingress");
                 let reply = format!("Model reply failed: {error}");
-                let _ =
+                if let Err(dispatch_error) =
                     dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
-                        .await;
+                        .await
+                {
+                    warn!(
+                        ?dispatch_error,
+                        platform,
+                        "failed to deliver default model failure reply"
+                    );
+                }
                 record.reply_text = Some(reply);
                 record.status = ChatIngressStatus::Failed;
                 record.error = Some(error.to_string());
@@ -962,8 +1028,16 @@ async fn ingest_message(
                 task_response.task.task_id, task_response.task.status
             ));
             let reply = record.reply_text.clone().unwrap_or_default();
-            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
-                .await;
+            if let Err(error) =
+                dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                    .await
+            {
+                warn!(?error, platform, "failed to deliver task-created ingress reply");
+                record.error = Some(format!(
+                    "task {} created, but reply dispatch failed: {error}",
+                    task_response.task.task_id
+                ));
+            }
             record.status = ChatIngressStatus::TaskCreated;
             record.updated_at_unix_ms = unix_timestamp_ms();
             state.upsert_chat_ingress_event(record.clone()).await?;
@@ -972,8 +1046,16 @@ async fn ingest_message(
         Err(error) => {
             warn!(?error, platform, "failed to route chat ingress into A2A");
             let reply = format!("Failed to route your message: {error}");
-            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
-                .await;
+            if let Err(dispatch_error) =
+                dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                    .await
+            {
+                warn!(
+                    ?dispatch_error,
+                    platform,
+                    "failed to deliver ingress routing failure reply"
+                );
+            }
             record.reply_text = Some(reply);
             record.status = ChatIngressStatus::Failed;
             record.error = Some(error.to_string());
@@ -1241,6 +1323,10 @@ fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
         None => (body, ""),
     };
     let remainder = remainder.trim();
+    let command = command
+        .split_once('@')
+        .map(|(base, _)| base)
+        .unwrap_or(command);
     match command.to_ascii_lowercase().as_str() {
         "help" | "start" | "commands" => Some(IngressCommand::Help),
         "new" => Some(IngressCommand::New),
@@ -3103,6 +3189,10 @@ mod tests {
     #[test]
     fn parses_help_and_skills_commands() {
         assert!(matches!(parse_ingress_command("/"), Some(IngressCommand::Help)));
+        assert!(matches!(
+            parse_ingress_command("/help@Helios042agentbot"),
+            Some(IngressCommand::Help)
+        ));
         assert!(matches!(
             parse_ingress_command("/commands"),
             Some(IngressCommand::Help)

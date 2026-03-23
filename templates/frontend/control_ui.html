@@ -419,6 +419,63 @@
           </form>
           <div class="notice" id="delegate-notice">等待 agent card 列表。</div>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-kicker">Command Studio</div>
+              <h2>直接调 slash command / skills</h2>
+              <p>在 Workbench 里直接模拟聊天入口，测试 <code>/help</code>、<code>/skills</code>、<code>/skill ...</code> 和普通文本回复，不用回 Telegram 反复切窗口。</p>
+            </div>
+            <div class="badge-row">
+              <button class="chip-button" type="button" data-command-template="/help">/help</button>
+              <button class="chip-button" type="button" data-command-template="/skills">/skills</button>
+              <button class="chip-button" type="button" data-command-template="/status">/status</button>
+              <button class="chip-button" type="button" data-command-template="/skill echo-skill">/skill echo-skill</button>
+              <button class="chip-button" type="button" data-command-template="你好">普通文本</button>
+            </div>
+          </div>
+          <form class="form-grid" id="command-form">
+            <div class="form-grid two">
+              <label>
+                Platform
+                <select id="command-platform">
+                  <option value="telegram">telegram</option>
+                  <option value="signal">signal</option>
+                  <option value="bluebubbles">bluebubbles</option>
+                  <option value="feishu">feishu</option>
+                  <option value="dingtalk">dingtalk</option>
+                  <option value="wecom">wecom</option>
+                  <option value="wechat_official_account">wechat_official_account</option>
+                  <option value="qq">qq</option>
+                </select>
+              </label>
+              <label>
+                Chat Id
+                <input id="command-chat-id" type="text" placeholder="Telegram / Signal / channel chat id" />
+              </label>
+            </div>
+            <div class="form-grid two">
+              <label>
+                Sender Id
+                <input id="command-sender-id" type="text" placeholder="Optional sender identity" />
+              </label>
+              <label>
+                Sender Display
+                <input id="command-sender-display" type="text" placeholder="Optional sender display name" />
+              </label>
+            </div>
+            <label>
+              Text / Slash Command
+              <textarea id="command-text" placeholder="/help"></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">执行命令</button>
+              <span class="microcopy">需要 session token。填写 chat id 时，若目标 connector 已 live，会尝试把回复发回原聊天。</span>
+            </div>
+          </form>
+          <div class="notice" id="command-notice">命令工作台就绪。</div>
+        </section>
       </div>
 
       <div class="column" id="right-column">
@@ -1065,6 +1122,34 @@
       }
     }
 
+    async function handleCommandSubmit(event) {
+      event.preventDefault();
+      if (!state.sessionToken) {
+        setNotice("command-notice", "error", "先创建或保存一个 session token。");
+        return;
+      }
+      try {
+        const response = await fetchJson("/app/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionToken: state.sessionToken,
+            platform: $("command-platform").value,
+            chatId: $("command-chat-id").value.trim() || null,
+            senderId: $("command-sender-id").value.trim() || null,
+            senderDisplay: $("command-sender-display").value.trim() || null,
+            text: $("command-text").value.trim()
+          })
+        });
+        const record = response.record || {};
+        const reply = record.replyText || "<no reply>";
+        setNotice("command-notice", "success", `状态：${record.status || "unknown"}${record.linkedTaskId ? ` · task ${record.linkedTaskId}` : ""}\n回复：${reply}`);
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("command-notice", "error", `命令执行失败：${error.message}`);
+      }
+    }
+
     async function handleApprovalAction(action, approvalId) {
       const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
       const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
@@ -1102,6 +1187,7 @@
       $("workspace-form").addEventListener("submit", handleWorkspaceSave);
       $("task-form").addEventListener("submit", handleTaskSubmit);
       $("delegate-form").addEventListener("submit", handleDelegateSubmit);
+      $("command-form").addEventListener("submit", handleCommandSubmit);
       $("clear-session-button").addEventListener("click", () => {
         state.sessionToken = "";
         rememberSession();
@@ -1112,6 +1198,11 @@
           if (!template) return;
           $("task-name").value = template.name;
           $("task-instruction").value = template.instruction;
+        });
+      });
+      document.querySelectorAll("[data-command-template]").forEach((button) => {
+        button.addEventListener("click", () => {
+          $("command-text").value = button.dataset.commandTemplate || "";
         });
       });
       $("approval-list").addEventListener("click", (event) => {
