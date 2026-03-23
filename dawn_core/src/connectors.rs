@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{io::Write as _, path::Path, process::Command as StdCommand, process::Stdio, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -6,14 +6,17 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use reqwest::{Client, Url};
 use reqwest::multipart::{Form, Part};
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::app_state::AppState;
+
+const DEFAULT_OPENAI_RESPONSES_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_OPENAI_COMPATIBLE_MODEL: &str = "openai/gpt-4o-mini";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +30,7 @@ struct ConnectorStatusReport {
 #[serde(rename_all = "camelCase")]
 struct ConfiguredConnectors {
     openai: bool,
+    openai_codex: bool,
     anthropic: bool,
     google: bool,
     bedrock: bool,
@@ -261,6 +265,7 @@ pub async fn execute_model_connector(
 ) -> anyhow::Result<ModelResponseResult> {
     match provider {
         "openai" => execute_openai_response(request).await,
+        "openai_codex" => execute_openai_codex_response(request).await,
         "anthropic" => execute_anthropic_response(request).await,
         "google" => execute_google_response(request).await,
         "bedrock" => execute_bedrock_response(request).await,
@@ -583,6 +588,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
         .route("/model/openai/respond", post(openai_respond))
+        .route("/model/openai-codex/respond", post(openai_codex_respond))
         .route("/model/anthropic/respond", post(anthropic_respond))
         .route("/model/google/respond", post(google_respond))
         .route("/model/bedrock/respond", post(bedrock_respond))
@@ -595,7 +601,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/model/openrouter/respond", post(openrouter_respond))
         .route("/model/groq/respond", post(groq_respond))
         .route("/model/together/respond", post(together_respond))
-        .route("/model/vercel-ai-gateway/respond", post(vercel_ai_gateway_respond))
+        .route(
+            "/model/vercel-ai-gateway/respond",
+            post(vercel_ai_gateway_respond),
+        )
         .route("/model/vllm/respond", post(vllm_respond))
         .route("/model/mistral/respond", post(mistral_respond))
         .route("/model/nvidia/respond", post(nvidia_respond))
@@ -628,9 +637,11 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 async fn status() -> Json<ConnectorStatusReport> {
+    let openai_codex = openai_codex_login_ready();
     Json(ConnectorStatusReport {
         configured: ConfiguredConnectors {
             openai: std::env::var("OPENAI_API_KEY").is_ok(),
+            openai_codex,
             anthropic: std::env::var("ANTHROPIC_API_KEY").is_ok(),
             google: resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]).is_some(),
             bedrock: resolve_first_present_env(&["BEDROCK_API_KEY"]).is_some()
@@ -698,6 +709,11 @@ async fn status() -> Json<ConnectorStatusReport> {
                 provider: "openai",
                 region: "global",
                 integration_mode: "live",
+            },
+            ModelProviderSupport {
+                provider: "openai_codex",
+                region: "global",
+                integration_mode: "live_chatgpt_codex_cli",
             },
             ModelProviderSupport {
                 provider: "anthropic",
@@ -890,6 +906,16 @@ async fn openai_respond(
     Json(request): Json<OpenAIResponseRequest>,
 ) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
     execute_openai_response(request)
+        .await
+        .map(Json)
+        .map_err(connector_anyhow_error)
+}
+
+async fn openai_codex_respond(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<OpenAIResponseRequest>,
+) -> Result<Json<ModelResponseResult>, (axum::http::StatusCode, Json<Value>)> {
+    execute_openai_codex_response(request)
         .await
         .map(Json)
         .map_err(connector_anyhow_error)
@@ -1258,7 +1284,10 @@ async fn send_qq_message(
 async fn execute_openai_response(
     request: OpenAIResponseRequest,
 ) -> anyhow::Result<ModelResponseResult> {
-    let model = request.model.unwrap_or_else(|| "gpt-4.1-mini".to_string());
+    let model = request
+        .model
+        .or_else(|| resolve_first_present_env(&["OPENAI_MODEL"]))
+        .unwrap_or_else(|| DEFAULT_OPENAI_RESPONSES_MODEL.to_string());
     let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() else {
         return Ok(ModelResponseResult {
             mode: "dry_run",
@@ -1298,6 +1327,231 @@ async fn execute_openai_response(
         output_text: extract_openai_text(&raw_response),
         raw_response: Some(raw_response),
     })
+}
+
+async fn execute_openai_codex_response(
+    request: OpenAIResponseRequest,
+) -> anyhow::Result<ModelResponseResult> {
+    let OpenAIResponseRequest {
+        input,
+        model,
+        instructions,
+    } = request;
+    let model = model
+        .or_else(|| resolve_first_present_env(&["OPENAI_CODEX_MODEL"]))
+        .unwrap_or_else(|| "gpt-5.3-codex".to_string());
+    if !openai_codex_login_ready() {
+        return Ok(ModelResponseResult {
+            mode: "dry_run",
+            provider: "openai_codex",
+            model,
+            output_text: format!(
+                "OpenAI Codex is not logged in locally. Run `codex login` or `dawn-node models auth-login openai-codex`. Dry-run request would send input: {input}"
+            ),
+            raw_response: None,
+        });
+    }
+
+    let prompt = build_openai_codex_prompt(&input, instructions.as_deref());
+    let model_for_result = model.clone();
+    let execution = tokio::task::spawn_blocking(move || run_openai_codex_exec(&model, &prompt))
+        .await
+        .map_err(|error| anyhow::anyhow!("OpenAI Codex execution task join failure: {error}"))??;
+
+    if !execution.success {
+        anyhow::bail!(
+            "OpenAI Codex connector request failed with status {}: {}",
+            execution
+                .status_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            serde_json::json!({
+                "stdout": execution.stdout,
+                "stderr": execution.stderr,
+            })
+        );
+    }
+
+    Ok(ModelResponseResult {
+        mode: "live",
+        provider: "openai_codex",
+        model: model_for_result,
+        output_text: execution.output_text,
+        raw_response: Some(json!({
+            "stdout": execution.stdout,
+            "stderr": execution.stderr,
+            "statusCode": execution.status_code,
+        })),
+    })
+}
+
+struct OpenAICodexExecResult {
+    success: bool,
+    status_code: Option<i32>,
+    output_text: String,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_openai_codex_exec(model: &str, prompt: &str) -> anyhow::Result<OpenAICodexExecResult> {
+    let output_path = std::env::temp_dir().join(format!("dawn-codex-output-{}.txt", Uuid::new_v4()));
+    let mut command = new_codex_command(&[
+            "exec",
+            "-m",
+            model,
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--color",
+            "never",
+            "--output-last-message",
+        ]);
+    let mut child = command
+        .arg(&output_path)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("failed to run `codex exec`: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|error| anyhow::anyhow!("failed to write prompt to `codex exec`: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| anyhow::anyhow!("failed while waiting on `codex exec`: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut output_text = std::fs::read_to_string(&output_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let _ = std::fs::remove_file(&output_path);
+    if output_text.is_empty() {
+        output_text = stdout
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+    }
+    Ok(OpenAICodexExecResult {
+        success: output.status.success(),
+        status_code: output.status.code(),
+        output_text,
+        stdout,
+        stderr,
+    })
+}
+
+fn build_openai_codex_prompt(input: &str, instructions: Option<&str>) -> String {
+    match instructions.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(instructions) => format!(
+            "System instructions:\n{instructions}\n\nUser input:\n{input}\n\nRespond to the user request directly."
+        ),
+        None => input.to_string(),
+    }
+}
+
+pub(crate) fn openai_codex_login_ready() -> bool {
+    if codex_auth_file_present() {
+        return true;
+    }
+    let output = new_codex_command(&["login", "status"]).output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.contains("Logged in using")
+                || stdout.to_ascii_lowercase().contains("logged in")
+        }
+        _ => false,
+    }
+}
+
+fn codex_auth_file_present() -> bool {
+    let base = std::env::var("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".codex"))
+        });
+    base.map(|dir| dir.join("auth.json").exists()).unwrap_or(false)
+}
+
+fn resolve_codex_cli_path() -> std::path::PathBuf {
+    if let Ok(explicit) = std::env::var("CODEX_CLI_PATH") {
+        let path = std::path::PathBuf::from(explicit);
+        if path.exists() {
+            return path;
+        }
+    }
+    if let Some(raw_path) = std::env::var_os("PATH") {
+        let path_dirs = std::env::split_paths(&raw_path).collect::<Vec<_>>();
+        for candidate_name in ["codex.cmd", "codex.exe", "codex"] {
+            if let Some(path) = path_dirs
+                .iter()
+                .map(|dir| dir.join(candidate_name))
+                .find(|candidate| candidate.exists())
+            {
+                return path;
+            }
+        }
+    }
+    if let Ok(output) = StdCommand::new("where").arg("codex").output() {
+        if output.status.success() {
+            let mut candidates = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|path| {
+                if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
+                {
+                    0
+                } else if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                {
+                    1
+                } else {
+                    2
+                }
+            });
+            if let Some(first) = candidates.into_iter().find(|path| path.exists())
+            {
+                return first;
+            }
+        }
+    }
+    std::path::PathBuf::from("codex")
+}
+
+fn new_codex_command(args: &[&str]) -> StdCommand {
+    let path = resolve_codex_cli_path();
+    let is_cmd_wrapper = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"));
+    let mut command = if is_cmd_wrapper {
+        let mut command = StdCommand::new("cmd");
+        command.arg("/C").arg(&path);
+        command
+    } else {
+        StdCommand::new(&path)
+    };
+    command.args(args);
+    command
 }
 
 async fn execute_anthropic_response(
@@ -1450,7 +1704,9 @@ async fn execute_openrouter_response(
         model,
         instructions,
     } = request;
-    let model = model.unwrap_or_else(|| "openai/gpt-4.1-mini".to_string());
+    let model = model
+        .or_else(|| resolve_first_present_env(&["OPENROUTER_MODEL", "OPENAI_MODEL"]))
+        .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_MODEL.to_string());
     let Some(api_key) = std::env::var("OPENROUTER_API_KEY").ok() else {
         return Ok(ModelResponseResult {
             mode: "dry_run",
@@ -1609,8 +1865,8 @@ async fn execute_litellm_response(
         instructions,
     } = request;
     let model = model
-        .or_else(|| resolve_first_present_env(&["LITELLM_MODEL"]))
-        .unwrap_or_else(|| "openai/gpt-4.1-mini".to_string());
+        .or_else(|| resolve_first_present_env(&["LITELLM_MODEL", "OPENAI_MODEL"]))
+        .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_MODEL.to_string());
     let Some(endpoint) = std::env::var("LITELLM_CHAT_COMPLETIONS_URL")
         .ok()
         .or_else(|| {
@@ -1666,7 +1922,7 @@ async fn execute_cloudflare_ai_gateway_response(
         request,
         resolve_first_present_env(&["CLOUDFLARE_AI_GATEWAY_MODEL", "OPENAI_MODEL"])
             .as_deref()
-            .or(Some("gpt-4.1-mini")),
+            .or(Some(DEFAULT_OPENAI_RESPONSES_MODEL)),
         &["CLOUDFLARE_AI_GATEWAY_API_KEY", "OPENAI_API_KEY"],
         endpoint.as_str(),
     )
@@ -1679,7 +1935,7 @@ async fn execute_github_models_response(
     execute_openai_compatible_chat_response(
         "github_models",
         request,
-        "openai/gpt-4.1-mini",
+        DEFAULT_OPENAI_COMPATIBLE_MODEL,
         &["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"],
         Some("GITHUB_MODELS_CHAT_COMPLETIONS_URL"),
         "https://models.github.ai/inference/chat/completions",
@@ -1707,7 +1963,7 @@ async fn execute_vercel_ai_gateway_response(
     execute_openai_compatible_chat_response(
         "vercel_ai_gateway",
         request,
-        "openai/gpt-4.1-mini",
+        DEFAULT_OPENAI_COMPATIBLE_MODEL,
         &["VERCEL_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"],
         Some("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL"),
         "https://ai-gateway.vercel.sh/v1/chat/completions",
@@ -1846,12 +2102,7 @@ async fn send_telegram_connector(request: TelegramSendRequest) -> anyhow::Result
             "https://api.telegram.org/bot{}/sendMessage",
             bot_token
         ))
-        .json(&json!({
-            "chat_id": request.chat_id,
-            "text": request.text,
-            "parse_mode": request.parse_mode,
-            "disable_notification": request.disable_notification.unwrap_or(false)
-        }))
+        .json(&build_telegram_send_payload(&request))
         .send()
         .await?;
     let status = response.status();
@@ -1870,6 +2121,23 @@ async fn send_telegram_connector(request: TelegramSendRequest) -> anyhow::Result
             .unwrap_or(false),
         raw_response: Some(raw_response),
     })
+}
+
+fn build_telegram_send_payload(request: &TelegramSendRequest) -> Value {
+    let mut payload = json!({
+        "chat_id": request.chat_id,
+        "text": request.text,
+        "disable_notification": request.disable_notification.unwrap_or(false)
+    });
+    if let Some(parse_mode) = request
+        .parse_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        payload["parse_mode"] = Value::String(parse_mode.to_string());
+    }
+    payload
 }
 
 async fn send_webhook_connector(
@@ -2239,14 +2507,21 @@ async fn send_signal_message_connector(
     request: ChatTargetTextRequest,
 ) -> anyhow::Result<ChatSendResult> {
     let attachment = decode_attachment(&request)?;
-    let text = request.text.as_deref().filter(|value| !value.trim().is_empty());
+    let text = request
+        .text
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
     if text.is_none() && attachment.is_none() {
         anyhow::bail!("signal connector requires text or attachment content");
     }
 
     let endpoint = resolve_signal_send_endpoint(account)?;
-    let payload =
-        build_signal_send_payload(&account.account, &request.chat_id, text, attachment.as_ref());
+    let payload = build_signal_send_payload(
+        &account.account,
+        &request.chat_id,
+        text,
+        attachment.as_ref(),
+    );
 
     info!("Dispatching live Signal message through gateway connector");
     let response = Client::new().post(endpoint).json(&payload).send().await?;
@@ -2428,8 +2703,9 @@ async fn send_bluebubbles_attachment_connector(
         anyhow::bail!("bluebubbles attachment send currently supports attachment-only messages");
     }
 
-    let attachment = decode_attachment(&request)?
-        .ok_or_else(|| anyhow::anyhow!("bluebubbles attachment send requires attachment content"))?;
+    let attachment = decode_attachment(&request)?.ok_or_else(|| {
+        anyhow::anyhow!("bluebubbles attachment send requires attachment content")
+    })?;
     let endpoint = resolve_bluebubbles_attachment_endpoint(account)?;
     let mut form = Form::new()
         .text("chatGuid", request.chat_id)
@@ -2534,7 +2810,10 @@ async fn send_bluebubbles_typing_connector(
     let raw_response = parse_connector_response(response).await?;
 
     if !status.is_success() {
-        anyhow::bail!("bluebubbles {} typing request failed with status {status}: {raw_response}", action.0);
+        anyhow::bail!(
+            "bluebubbles {} typing request failed with status {status}: {raw_response}",
+            action.0
+        );
     }
 
     Ok(ChatSendResult {
@@ -2580,7 +2859,9 @@ async fn send_bluebubbles_mark_unread_connector(
     let raw_response = parse_connector_response(response).await?;
 
     if !status.is_success() {
-        anyhow::bail!("bluebubbles mark-unread request failed with status {status}: {raw_response}");
+        anyhow::bail!(
+            "bluebubbles mark-unread request failed with status {status}: {raw_response}"
+        );
     }
 
     Ok(ChatSendResult {
@@ -2674,7 +2955,9 @@ async fn send_bluebubbles_participant_connector(
         .participant_address
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("bluebubbles participant changes require participantAddress"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("bluebubbles participant changes require participantAddress")
+        })?;
     let method = match action.as_str() {
         "add" => reqwest::Method::POST,
         "remove" => reqwest::Method::DELETE,
@@ -3096,7 +3379,9 @@ fn build_bluebubbles_text_payload(
         "message": text,
         "tempGuid": temp_guid
     });
-    if let Some(selected_message_guid) = selected_message_guid.filter(|value| !value.trim().is_empty()) {
+    if let Some(selected_message_guid) =
+        selected_message_guid.filter(|value| !value.trim().is_empty())
+    {
         payload["selectedMessageGuid"] = json!(selected_message_guid);
     }
     if let Some(effect_id) = effect_id.filter(|value| !value.trim().is_empty()) {
@@ -3135,11 +3420,19 @@ fn resolve_signal_send_endpoint(account: &ResolvedSignalAccount) -> anyhow::Resu
 }
 
 fn resolve_signal_reaction_endpoint(account: &ResolvedSignalAccount) -> anyhow::Result<Url> {
-    resolve_signal_account_endpoint(account, account.reaction_api_url.as_deref(), &["v1", "reactions"])
+    resolve_signal_account_endpoint(
+        account,
+        account.reaction_api_url.as_deref(),
+        &["v1", "reactions"],
+    )
 }
 
 fn resolve_signal_receipt_endpoint(account: &ResolvedSignalAccount) -> anyhow::Result<Url> {
-    resolve_signal_account_endpoint(account, account.receipt_api_url.as_deref(), &["v1", "receipts"])
+    resolve_signal_account_endpoint(
+        account,
+        account.receipt_api_url.as_deref(),
+        &["v1", "receipts"],
+    )
 }
 
 fn resolve_signal_account_endpoint(
@@ -3223,11 +3516,7 @@ fn resolve_bluebubbles_chat_action_endpoint(
     chat_guid: &str,
     action: &str,
 ) -> anyhow::Result<Url> {
-    resolve_bluebubbles_authed_endpoint(
-        account,
-        None,
-        &["api", "v1", "chat", chat_guid, action],
-    )
+    resolve_bluebubbles_authed_endpoint(account, None, &["api", "v1", "chat", chat_guid, action])
 }
 
 fn resolve_bluebubbles_chat_update_endpoint(
@@ -3242,7 +3531,11 @@ fn resolve_bluebubbles_message_action_endpoint(
     message_guid: &str,
     action: &str,
 ) -> anyhow::Result<Url> {
-    resolve_bluebubbles_authed_endpoint(account, None, &["api", "v1", "message", message_guid, action])
+    resolve_bluebubbles_authed_endpoint(
+        account,
+        None,
+        &["api", "v1", "message", message_guid, action],
+    )
 }
 
 fn resolve_bluebubbles_authed_endpoint(
@@ -3360,13 +3653,15 @@ fn resolve_signal_account_config(account_key: Option<&str>) -> Option<ResolvedSi
         return Some(config);
     }
 
-    resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]).map(|account| ResolvedSignalAccount {
-        account,
-        base_url: resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
-            .unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
-        send_api_url: std::env::var("SIGNAL_SEND_API_URL").ok(),
-        reaction_api_url: std::env::var("SIGNAL_REACTION_API_URL").ok(),
-        receipt_api_url: std::env::var("SIGNAL_RECEIPT_API_URL").ok(),
+    resolve_first_present_env(&["SIGNAL_ACCOUNT", "SIGNAL_NUMBER"]).map(|account| {
+        ResolvedSignalAccount {
+            account,
+            base_url: resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
+                .unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
+            send_api_url: std::env::var("SIGNAL_SEND_API_URL").ok(),
+            reaction_api_url: std::env::var("SIGNAL_REACTION_API_URL").ok(),
+            receipt_api_url: std::env::var("SIGNAL_RECEIPT_API_URL").ok(),
+        }
     })
 }
 
@@ -3391,8 +3686,12 @@ fn parse_signal_account_registry(account_key: &str) -> Option<ResolvedSignalAcco
         account,
         base_url,
         send_api_url: config.send_api_url.filter(|value| !value.trim().is_empty()),
-        reaction_api_url: config.reaction_api_url.filter(|value| !value.trim().is_empty()),
-        receipt_api_url: config.receipt_api_url.filter(|value| !value.trim().is_empty()),
+        reaction_api_url: config
+            .reaction_api_url
+            .filter(|value| !value.trim().is_empty()),
+        receipt_api_url: config
+            .receipt_api_url
+            .filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -3442,9 +3741,15 @@ fn parse_bluebubbles_account_registry(account_key: &str) -> Option<ResolvedBlueB
     Some(ResolvedBlueBubblesAccount {
         password,
         base_url,
-        send_message_url: config.send_message_url.filter(|value| !value.trim().is_empty()),
-        send_attachment_url: config.send_attachment_url.filter(|value| !value.trim().is_empty()),
-        send_reaction_url: config.send_reaction_url.filter(|value| !value.trim().is_empty()),
+        send_message_url: config
+            .send_message_url
+            .filter(|value| !value.trim().is_empty()),
+        send_attachment_url: config
+            .send_attachment_url
+            .filter(|value| !value.trim().is_empty()),
+        send_reaction_url: config
+            .send_reaction_url
+            .filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -3491,7 +3796,9 @@ fn build_signal_group_action_payload(
                 .group_members
                 .clone()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("signal create_group requires at least one groupMember"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("signal create_group requires at least one groupMember")
+                })?;
             Some(json!({
                 "name": name,
                 "members": members,
@@ -3537,7 +3844,7 @@ fn normalize_bluebubbles_reaction(reaction: &str, remove: bool) -> anyhow::Resul
         "‼️" | "!!" | "emphasize" => "emphasize",
         "❓" | "?" | "question" => "question",
         "-love" | "-like" | "-dislike" | "-laugh" | "-emphasize" | "-question" => {
-            return Ok(reaction.trim().to_ascii_lowercase())
+            return Ok(reaction.trim().to_ascii_lowercase());
         }
         other => anyhow::bail!("unsupported BlueBubbles reaction: {other}"),
     };
@@ -3778,15 +4085,15 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DecodedAttachment, QQSendRequest, build_bluebubbles_reaction_payload,
+        DecodedAttachment, QQSendRequest, TelegramSendRequest, build_bluebubbles_reaction_payload,
         build_bluebubbles_text_payload, build_chat_completion_messages, build_line_push_payload,
         build_matrix_send_endpoint, build_matrix_text_payload, build_qq_message_payload,
         build_signal_reaction_payload, build_signal_receipt_payload, build_signal_send_payload,
-        build_wechat_official_account_payload, build_whatsapp_text_payload,
-        extract_anthropic_text, extract_chat_completion_text, extract_google_text,
-        extract_ollama_text, extract_openai_text, normalize_bluebubbles_reaction,
-        normalize_qq_target_type, resolve_cloudflare_ai_gateway_endpoint,
-        resolve_openai_style_endpoint,
+        build_telegram_send_payload, build_wechat_official_account_payload,
+        build_whatsapp_text_payload, extract_anthropic_text, extract_chat_completion_text,
+        extract_google_text, extract_ollama_text, extract_openai_text,
+        normalize_bluebubbles_reaction, normalize_qq_target_type,
+        resolve_cloudflare_ai_gateway_endpoint, resolve_openai_style_endpoint,
     };
 
     #[test]
@@ -3868,6 +4175,19 @@ mod tests {
         });
 
         assert_eq!(extract_ollama_text(&raw), "ollama reply");
+    }
+
+    #[test]
+    fn telegram_payload_omits_parse_mode_when_not_requested() {
+        let payload = build_telegram_send_payload(&TelegramSendRequest {
+            chat_id: "123".to_string(),
+            text: "hello".to_string(),
+            parse_mode: None,
+            disable_notification: Some(false),
+        });
+
+        assert_eq!(payload["chat_id"], "123");
+        assert!(payload.get("parse_mode").is_none());
     }
 
     #[test]
@@ -3988,12 +4308,8 @@ mod tests {
 
     #[test]
     fn builds_signal_send_payload() {
-        let payload = build_signal_send_payload(
-            "+15550001111",
-            "+15550002222",
-            Some("hello signal"),
-            None,
-        );
+        let payload =
+            build_signal_send_payload("+15550001111", "+15550002222", Some("hello signal"), None);
 
         assert_eq!(
             payload,

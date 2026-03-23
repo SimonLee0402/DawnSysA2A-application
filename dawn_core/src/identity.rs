@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{process::Command as StdCommand, sync::Arc};
 
 use anyhow::{Context, anyhow};
 use axum::{
@@ -1021,6 +1021,17 @@ async fn issue_node_claim_inner(
 
 fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfile> {
     match (surface, target) {
+        ("model", "openai_codex") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "openai_codex",
+            label: "OpenAI Codex",
+            region: "global",
+            integration_mode: "live_chatgpt_codex_cli",
+            endpoint: "/api/gateway/connectors/model/openai-codex/respond",
+            note: "Uses the locally logged-in OpenAI Codex CLI account session.",
+            env_hints: vec!["Run `codex login` or `dawn-node models auth-login openai-codex`"],
+            env_requirement_groups: vec![],
+        }),
         ("model", "openai") => Some(SetupTargetProfile {
             surface: "model",
             target: "openai",
@@ -1235,7 +1246,15 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
 fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
     IdentityEnvironmentReadiness {
         public_base_url: public_base_url(),
-        configured_model_providers: ["openai", "deepseek", "qwen", "zhipu", "moonshot", "doubao"]
+        configured_model_providers: [
+            "openai_codex",
+            "openai",
+            "deepseek",
+            "qwen",
+            "zhipu",
+            "moonshot",
+            "doubao",
+        ]
             .into_iter()
             .filter(|provider| is_model_provider_configured(provider))
             .map(ToString::to_string)
@@ -1908,6 +1927,7 @@ fn has_qq_bot_credentials() -> bool {
 
 fn is_model_provider_configured(provider: &str) -> bool {
     match provider {
+        "openai_codex" => openai_codex_login_ready(),
         "openai" => env_var_present("OPENAI_API_KEY"),
         "deepseek" => env_var_present("DEEPSEEK_API_KEY"),
         "qwen" => any_env_var_present(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]),
@@ -1916,6 +1936,104 @@ fn is_model_provider_configured(provider: &str) -> bool {
         "doubao" => any_env_var_present(&["DOUBAO_API_KEY", "ARK_API_KEY"]),
         _ => false,
     }
+}
+
+fn openai_codex_login_ready() -> bool {
+    if codex_auth_file_present() {
+        return true;
+    }
+    let output = new_codex_command(&["login", "status"]).output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.contains("Logged in using")
+                || stdout.to_ascii_lowercase().contains("logged in")
+        }
+        _ => false,
+    }
+}
+
+fn codex_auth_file_present() -> bool {
+    let base = std::env::var("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".codex"))
+        });
+    base.map(|dir| dir.join("auth.json").exists()).unwrap_or(false)
+}
+
+fn resolve_codex_cli_path() -> std::path::PathBuf {
+    if let Ok(explicit) = std::env::var("CODEX_CLI_PATH") {
+        let path = std::path::PathBuf::from(explicit);
+        if path.exists() {
+            return path;
+        }
+    }
+    if let Some(raw_path) = std::env::var_os("PATH") {
+        let path_dirs = std::env::split_paths(&raw_path).collect::<Vec<_>>();
+        for candidate_name in ["codex.cmd", "codex.exe", "codex"] {
+            if let Some(path) = path_dirs
+                .iter()
+                .map(|dir| dir.join(candidate_name))
+                .find(|candidate| candidate.exists())
+            {
+                return path;
+            }
+        }
+    }
+    if let Ok(output) = StdCommand::new("where").arg("codex").output() {
+        if output.status.success() {
+            let mut candidates = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|path| {
+                if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
+                {
+                    0
+                } else if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                {
+                    1
+                } else {
+                    2
+                }
+            });
+            if let Some(first) = candidates.into_iter().find(|path| path.exists())
+            {
+                return first;
+            }
+        }
+    }
+    std::path::PathBuf::from("codex")
+}
+
+fn new_codex_command(args: &[&str]) -> StdCommand {
+    let path = resolve_codex_cli_path();
+    let is_cmd_wrapper = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"));
+    let mut command = if is_cmd_wrapper {
+        let mut command = StdCommand::new("cmd");
+        command.arg("/C").arg(&path);
+        command
+    } else {
+        StdCommand::new(&path)
+    };
+    command.args(args);
+    command
 }
 
 fn chat_connector_target(platform: &str) -> &str {
@@ -2073,7 +2191,9 @@ async fn count_pending_end_user_sessions(state: &Arc<AppState>) -> anyhow::Resul
     Ok(count.max(0) as usize)
 }
 
-async fn ensure_workspace_profile(state: &Arc<AppState>) -> anyhow::Result<WorkspaceProfileRecord> {
+pub(crate) async fn ensure_workspace_profile(
+    state: &Arc<AppState>,
+) -> anyhow::Result<WorkspaceProfileRecord> {
     if let Some(record) = get_workspace_profile(state).await? {
         return Ok(record);
     }

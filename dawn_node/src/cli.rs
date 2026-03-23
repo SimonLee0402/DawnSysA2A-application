@@ -296,6 +296,18 @@ enum ModelCommand {
         #[arg(long)]
         gateway: Option<String>,
     },
+    #[command(name = "auth-login")]
+    AuthLogin {
+        provider: String,
+    },
+    #[command(name = "auth-status")]
+    AuthStatus {
+        provider: Option<String>,
+    },
+    #[command(name = "auth-logout")]
+    AuthLogout {
+        provider: String,
+    },
     Connect(ConnectorConnectArgs),
     Test(ModelTestArgs),
     Add {
@@ -1244,10 +1256,19 @@ struct NodeClaimRecord {
     display_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeClaimSummaryRecord {
+    claim_id: String,
+    node_id: String,
+    status: String,
+    expires_at_unix_ms: u128,
+}
+
 pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
     let cli = DawnCli::parse();
     let Some(command) = cli.command else {
-        let profile = load_profile_or_default();
+        let mut profile = load_profile_or_default();
         let interactive_terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
         if interactive_terminal {
             if should_auto_launch_setup(&profile) {
@@ -1277,6 +1298,7 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
 
             match prompt_startup_action(&profile)? {
                 StartupAction::RunNode => {
+                    ensure_node_runtime_preflight(&mut profile).await?;
                     println!("Starting local node runtime...");
                     return Ok(CliOutcome::RunNode);
                 }
@@ -1311,11 +1333,16 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
                 StartupAction::Exit => return Ok(CliOutcome::Exit),
             }
         }
+        ensure_node_runtime_preflight(&mut profile).await?;
         return Ok(CliOutcome::RunNode);
     };
 
     match command {
-        Commands::Run => Ok(CliOutcome::RunNode),
+        Commands::Run => {
+            let mut profile = load_profile_or_default();
+            ensure_node_runtime_preflight(&mut profile).await?;
+            Ok(CliOutcome::RunNode)
+        }
         Commands::Login(args) => {
             login(args).await?;
             Ok(CliOutcome::Exit)
@@ -1614,6 +1641,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     )?;
 
     let mut staged_env = profile.connector_env.clone();
+    let original_staged_env = staged_env.clone();
     for target in &selected_models {
         ensure_setup_connector_ready(
             &mut staged_env,
@@ -1727,6 +1755,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         Vec::new()
     };
 
+    let connectors_reconfigured = staged_env != original_staged_env;
     profile.connector_env = staged_env;
     let mut allow_unsigned_skills = args.allow_unsigned_skills;
     if interactive
@@ -1820,6 +1849,11 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         println!("Skills installed: {}", installed_skills.join(", "));
     }
     println!("Profile saved: {}", path.display());
+    if connectors_reconfigured {
+        println!(
+            "Connector credentials were updated locally. Restart the gateway to switch the live model/chat configuration to the new credentials."
+        );
+    }
     println!("Next: run `dawn-node gateway start` or `dawn-node run`.");
     Ok(())
 }
@@ -2130,9 +2164,42 @@ fn ensure_setup_connector_ready(
     interactive: bool,
     gateway: Option<&str>,
 ) -> anyhow::Result<()> {
-    if connector_env_ready(is_models, target, staged_env)
-        || connector_is_live_configured(connectors_status, target)
-    {
+    let env_ready = connector_env_ready(is_models, target, staged_env);
+    let live_ready = connector_is_live_configured(connectors_status, target);
+    if env_ready || live_ready {
+        if interactive {
+            let target_label = connector_setup_label(is_models, target);
+            let reuse_existing = prompt_confirm(
+                &format!(
+                    "Reuse existing {} `{}` credentials{}",
+                    if is_models {
+                        "model provider"
+                    } else {
+                        "chat platform"
+                    },
+                    target_label,
+                    if live_ready && !env_ready {
+                        " from the running gateway"
+                    } else {
+                        ""
+                    }
+                ),
+                true,
+            )?;
+            if reuse_existing {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+    }
+    if is_models && target == "openai_codex" {
+        if !interactive {
+            bail!(
+                "selected model provider `OpenAI Codex` is not ready on the gateway and requires an interactive `codex login`"
+            );
+        }
+        ensure_openai_codex_auth_ready(true)?;
         return Ok(());
     }
     let target_label = connector_setup_label(is_models, target);
@@ -2589,6 +2656,7 @@ fn connector_env_ready(
 
 fn connector_requirement_groups(is_models: bool, target: &str) -> Vec<Vec<&'static str>> {
     match (is_models, target) {
+        (true, "openai_codex") => vec![vec!["OPENAI_CODEX_AUTH"]],
         (true, "openai") => vec![vec!["OPENAI_API_KEY"]],
         (true, "anthropic") => vec![vec!["ANTHROPIC_API_KEY"]],
         (true, "google") => vec![vec!["GEMINI_API_KEY"], vec!["GOOGLE_API_KEY"]],
@@ -2679,6 +2747,7 @@ fn connector_is_live_configured(connectors_status: &Value, target: &str) -> bool
 
 fn connector_configured_key(target: &str) -> &str {
     match target {
+        "openai_codex" => "openaiCodex",
         "cloudflare_ai_gateway" => "cloudflareAiGateway",
         "google_chat" => "googleChat",
         "wecom_bot" => "wecomBot",
@@ -2731,6 +2800,7 @@ fn parse_named_selection(
 fn order_setup_targets(options: &[String], is_models: bool) -> Vec<String> {
     let preferred: &[&str] = if is_models {
         &[
+            "openai_codex",
             "openai",
             "anthropic",
             "google",
@@ -2770,6 +2840,7 @@ fn order_setup_targets(options: &[String], is_models: bool) -> Vec<String> {
 fn connector_setup_label(is_models: bool, target: &str) -> String {
     if is_models {
         match target {
+            "openai_codex" => "OpenAI Codex".to_string(),
             "openai" => "OpenAI".to_string(),
             "anthropic" => "Anthropic Claude".to_string(),
             "google" => "Google Gemini".to_string(),
@@ -2819,6 +2890,7 @@ fn connector_setup_label(is_models: bool, target: &str) -> String {
 fn connector_setup_option_label(is_models: bool, target: &str) -> String {
     let label = connector_setup_label(is_models, target);
     let hint = match (is_models, target) {
+        (true, "openai_codex") => "ChatGPT login",
         (true, "openai") | (true, "anthropic") | (true, "google") => "API key",
         (true, "deepseek") | (true, "qwen") | (true, "zhipu") | (true, "moonshot") => "API key",
         (true, "doubao") => "API key + endpoint ID",
@@ -3121,6 +3193,17 @@ async fn handle_models(args: ModelArgs) -> anyhow::Result<()> {
             println!("{}", workspace.default_model_providers.join(", "));
             Ok(())
         }
+        ModelCommand::AuthLogin { provider } => {
+            handle_model_auth(&normalize_connector_target(true, &provider), ModelAuthAction::Login)
+        }
+        ModelCommand::AuthStatus { provider } => handle_model_auth(
+            &normalize_connector_target(true, provider.as_deref().unwrap_or("openai_codex")),
+            ModelAuthAction::Status,
+        ),
+        ModelCommand::AuthLogout { provider } => handle_model_auth(
+            &normalize_connector_target(true, &provider),
+            ModelAuthAction::Logout,
+        ),
         ModelCommand::Connect(args) => connect_metadata_target(profile, true, args).await,
         ModelCommand::Test(args) => test_model(profile, args).await,
         ModelCommand::Add { values, gateway } => {
@@ -3129,6 +3212,40 @@ async fn handle_models(args: ModelArgs) -> anyhow::Result<()> {
         ModelCommand::Remove { values, gateway } => {
             update_workspace_metadata(profile, gateway, values, true, false, "model providers")
                 .await
+        }
+    }
+}
+
+enum ModelAuthAction {
+    Login,
+    Status,
+    Logout,
+}
+
+fn handle_model_auth(provider: &str, action: ModelAuthAction) -> anyhow::Result<()> {
+    if provider != "openai_codex" {
+        bail!("model auth is currently only supported for openai-codex");
+    }
+    match action {
+        ModelAuthAction::Login => {
+            ensure_openai_codex_auth_ready(true)?;
+            println!("OpenAI Codex login is ready.");
+            Ok(())
+        }
+        ModelAuthAction::Status => {
+            let output = run_codex_login_status()?;
+            print!("{}", output);
+            Ok(())
+        }
+        ModelAuthAction::Logout => {
+            let status = new_codex_command(&["logout"])
+                .status()
+                .context("failed to launch `codex logout`")?;
+            if !status.success() {
+                bail!("`codex logout` exited with status {status}");
+            }
+            println!("Logged out of OpenAI Codex.");
+            Ok(())
         }
     }
 }
@@ -3292,6 +3409,23 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                     string_at_path(&response, &["supportedPlatforms"])
                         .unwrap_or_else(|| "[]".to_string())
                 );
+                let telegram_secret = value_at_path(&response, &["telegramWebhookSecretConfigured"])
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let telegram_polling = value_at_path(&response, &["telegramPollingEnabled"])
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let telegram_mode = string_at_path(&response, &["telegramIngressMode"])
+                    .unwrap_or_else(|| {
+                        if telegram_polling {
+                            "polling".to_string()
+                        } else {
+                            "webhook".to_string()
+                        }
+                    });
+                println!(
+                    "telegram\tsecret={telegram_secret}\tmode={telegram_mode}\tpolling={telegram_polling}"
+                );
                 for platform in ["signal", "bluebubbles"] {
                     let configured =
                         value_at_path(&response, &[&format!("{platform}CallbackSecretConfigured")])
@@ -3397,8 +3531,11 @@ async fn connect_metadata_target(
     let workspace: WorkspaceProfileRecord =
         client.get_json("/api/gateway/identity/workspace").await?;
     let target = normalize_connector_target(is_models, &args.target);
+    if is_models && target == "openai_codex" {
+        ensure_openai_codex_auth_ready(true)?;
+    }
     let env_pairs = connector_secret_pairs(is_models, &target, &args)?;
-    if env_pairs.is_empty() {
+    if env_pairs.is_empty() && !(is_models && target == "openai_codex") {
         bail!("no connector credentials were provided for {}", args.target);
     }
 
@@ -3535,9 +3672,10 @@ async fn run_model_test(
     model: Option<&str>,
     instructions: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let route_provider = model_provider_route_segment(provider);
     client
         .post_json(
-            &format!("/api/gateway/connectors/model/{provider}/respond"),
+            &format!("/api/gateway/connectors/model/{route_provider}/respond"),
             &json!({
                 "input": input,
                 "model": model,
@@ -3545,6 +3683,155 @@ async fn run_model_test(
             }),
         )
         .await
+}
+
+fn model_provider_route_segment(provider: &str) -> String {
+    match provider {
+        "cloudflare_ai_gateway" => "cloudflare-ai-gateway".to_string(),
+        "github_models" => "github-models".to_string(),
+        "vercel_ai_gateway" => "vercel-ai-gateway".to_string(),
+        "openai_codex" => "openai-codex".to_string(),
+        _ => provider.to_string(),
+    }
+}
+
+fn run_codex_login_status() -> anyhow::Result<String> {
+    let output = new_codex_command(&["login", "status"])
+        .output()
+        .context("failed to run `codex login status`")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        bail!(
+            "`codex login status` exited with status {}: {}",
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            if stderr.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                stderr.trim().to_string()
+            }
+        );
+    }
+    Ok(stdout)
+}
+
+fn openai_codex_auth_ready() -> bool {
+    if codex_auth_file_present() {
+        return true;
+    }
+    run_codex_login_status()
+        .map(|output| {
+            output.contains("Logged in using")
+                || output.to_ascii_lowercase().contains("logged in")
+        })
+        .unwrap_or(false)
+}
+
+fn codex_auth_file_present() -> bool {
+    let base = env::var("CODEX_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            env::var_os("USERPROFILE")
+                .or_else(|| env::var_os("HOME"))
+                .map(PathBuf::from)
+                .map(|home| home.join(".codex"))
+        });
+    base.map(|dir| dir.join("auth.json").exists()).unwrap_or(false)
+}
+
+fn ensure_openai_codex_auth_ready(interactive: bool) -> anyhow::Result<()> {
+    if openai_codex_auth_ready() {
+        return Ok(());
+    }
+    if !interactive {
+        bail!("OpenAI Codex login is required; run `dawn-node models auth-login openai-codex`");
+    }
+    println!("OpenAI Codex uses your local ChatGPT login via the official `codex` CLI.");
+    let status = new_codex_command(&["login"])
+        .status()
+        .context("failed to launch `codex login`")?;
+    if !status.success() {
+        bail!("`codex login` exited with status {status}");
+    }
+    if !openai_codex_auth_ready() {
+        bail!("OpenAI Codex login did not become ready after `codex login`");
+    }
+    Ok(())
+}
+
+fn resolve_codex_cli_path() -> PathBuf {
+    if let Ok(explicit) = env::var("CODEX_CLI_PATH") {
+        let path = PathBuf::from(explicit);
+        if path.exists() {
+            return path;
+        }
+    }
+    if let Some(raw_path) = env::var_os("PATH") {
+        let path_dirs = env::split_paths(&raw_path).collect::<Vec<_>>();
+        for candidate_name in ["codex.cmd", "codex.exe", "codex"] {
+            if let Some(path) = path_dirs
+                .iter()
+                .map(|dir| dir.join(candidate_name))
+                .find(|candidate| candidate.exists())
+            {
+                return path;
+            }
+        }
+    }
+    if let Ok(output) = StdCommand::new("where").arg("codex").output() {
+        if output.status.success() {
+            let mut candidates = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|path| {
+                if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
+                {
+                    0
+                } else if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                {
+                    1
+                } else {
+                    2
+                }
+            });
+            if let Some(first) = candidates.into_iter().find(|path| path.exists())
+            {
+                return first;
+            }
+        }
+    }
+    PathBuf::from("codex")
+}
+
+fn new_codex_command(args: &[&str]) -> StdCommand {
+    let path = resolve_codex_cli_path();
+    let is_cmd_wrapper = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"));
+    let mut command = if is_cmd_wrapper {
+        let mut command = StdCommand::new("cmd");
+        command.arg("/C").arg(&path);
+        command
+    } else {
+        StdCommand::new(&path)
+    };
+    command.args(args);
+    command
 }
 
 async fn send_channel_message(
@@ -5421,6 +5708,147 @@ async fn create_node_claim(args: NodeClaimArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn ensure_node_runtime_preflight(profile: &mut DawnCliProfile) -> anyhow::Result<()> {
+    if profile.session_token.is_none() {
+        return Ok(());
+    }
+
+    let node_id = profile
+        .node_id
+        .clone()
+        .unwrap_or_else(|| "node-local".to_string());
+    let node_name = profile
+        .node_name
+        .clone()
+        .unwrap_or_else(|| "Dawn Local Node".to_string());
+    let requested_capabilities = if profile.requested_capabilities.is_empty() {
+        default_requested_capabilities(false)
+    } else {
+        profile.requested_capabilities.clone()
+    };
+    let gateway_base_url = resolve_gateway_base_url(None, profile);
+    let client = GatewayClient::new(gateway_base_url)?;
+
+    if gateway_node_exists(&client, &node_id).await? {
+        if profile.claim_token.take().is_some() {
+            let path = save_profile(profile)?;
+            println!(
+                "Node {node_id} is already registered. Cleared the stale local claim token in {}.",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let latest_claim = latest_node_claim_for(&client, &node_id).await?;
+    let needs_fresh_claim = latest_claim
+        .as_ref()
+        .map(|claim| claim.status != "pending")
+        .unwrap_or(true);
+
+    if needs_fresh_claim {
+        let mut session_token = require_session_token(profile)?;
+        let claim = match issue_node_claim(
+            &client,
+            &session_token,
+            &node_id,
+            &node_name,
+            requested_capabilities.clone(),
+            1800,
+        )
+        .await
+        {
+            Ok(claim) => claim,
+            Err(error) if error.to_string().contains("invalid or unknown session token") => {
+                session_token = refresh_stored_cli_session(profile, &client).await?;
+                issue_node_claim(
+                    &client,
+                    &session_token,
+                    &node_id,
+                    &node_name,
+                    requested_capabilities,
+                    1800,
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
+        profile.node_id = Some(node_id);
+        profile.node_name = Some(node_name);
+        profile.claim_token = Some(claim.claim_token.clone());
+        let path = save_profile(profile)?;
+        println!(
+            "Refreshed node claim for {} (reason: {}). claimToken hint: {}",
+            claim.claim.node_id,
+            latest_claim
+                .as_ref()
+                .map(|record| format!("latest claim {} is {}", record.claim_id, record.status))
+                .unwrap_or_else(|| "no pending claim was available".to_string()),
+            claim.token_hint
+        );
+        println!("Updated local profile: {}", path.display());
+    }
+
+    Ok(())
+}
+
+async fn refresh_stored_cli_session(
+    profile: &mut DawnCliProfile,
+    client: &GatewayClient,
+) -> anyhow::Result<String> {
+    let bootstrap_mode = profile.bootstrap_mode.as_deref().unwrap_or("development_default");
+    if bootstrap_mode != "development_default" {
+        bail!(
+            "stored CLI session expired and bootstrap mode `{bootstrap_mode}` does not support automatic refresh; run `dawn-node login` again"
+        );
+    }
+    let operator_name = default_operator_name(profile);
+    let response = bootstrap_session(client, DEFAULT_BOOTSTRAP_TOKEN, &operator_name).await?;
+    profile.session_token = Some(response.session_token.clone());
+    profile.operator_name = Some(response.session.operator_name);
+    profile.bootstrap_mode = Some(response.bootstrap_mode);
+    let path = save_profile(profile)?;
+    println!(
+        "Refreshed the local CLI session automatically for {}. Updated profile: {}",
+        operator_name,
+        path.display()
+    );
+    Ok(response.session_token)
+}
+
+async fn gateway_node_exists(client: &GatewayClient, node_id: &str) -> anyhow::Result<bool> {
+    let url = format!("{}/api/gateway/control-plane/nodes/{node_id}", client.base_url);
+    let response = client
+        .http
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to query node presence from {url}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unavailable>".to_string());
+        bail!("request to {url} failed with status {status}: {body}");
+    }
+    Ok(true)
+}
+
+async fn latest_node_claim_for(
+    client: &GatewayClient,
+    node_id: &str,
+) -> anyhow::Result<Option<NodeClaimSummaryRecord>> {
+    let claims: Vec<NodeClaimSummaryRecord> = client.get_json("/api/gateway/identity/node-claims").await?;
+    Ok(claims
+        .into_iter()
+        .filter(|record| record.node_id == node_id)
+        .max_by_key(|record| record.expires_at_unix_ms))
+}
+
 async fn trust_self_node(args: NodeTrustSelfArgs) -> anyhow::Result<()> {
     let profile = load_profile_or_default();
     let gateway_base_url = resolve_gateway_base_url(args.gateway.as_deref(), &profile);
@@ -5695,6 +6123,9 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
     let normalized = target.trim().to_ascii_lowercase();
     if is_models {
         match normalized.as_str() {
+            "openai-codex" | "openai_codex" | "codex" | "chatgpt" => {
+                "openai_codex".to_string()
+            }
             "claude" => "anthropic".to_string(),
             "gemini" => "google".to_string(),
             "aws-bedrock" | "aws_bedrock" => "bedrock".to_string(),

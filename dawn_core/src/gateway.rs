@@ -86,6 +86,7 @@ async fn capabilities() -> Json<GatewayCapabilities> {
         ],
         supported_model_providers: vec![
             "openai",
+            "openai_codex",
             "anthropic",
             "google",
             "bedrock",

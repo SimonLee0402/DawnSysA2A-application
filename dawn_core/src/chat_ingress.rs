@@ -7,10 +7,12 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
-use tracing::warn;
+use tokio::time::{Duration, sleep};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -19,7 +21,8 @@ use crate::{
         AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus, ChatIngressEventRecord,
         ChatIngressStatus, unix_timestamp_ms,
     },
-    connectors::{self, ChatDispatchRequest},
+    connectors::{self, ChatDispatchRequest, OpenAIResponseRequest},
+    identity,
 };
 
 #[derive(Debug, Serialize)]
@@ -27,6 +30,8 @@ use crate::{
 struct ChatIngressStatusReport {
     supported_platforms: Vec<&'static str>,
     telegram_webhook_secret_configured: bool,
+    telegram_polling_enabled: bool,
+    telegram_ingress_mode: &'static str,
     signal_callback_secret_configured: bool,
     signal_dm_policy: &'static str,
     signal_allowlist_count: usize,
@@ -76,6 +81,13 @@ struct TelegramUpdate {
 }
 
 #[derive(Debug, Deserialize)]
+struct TelegramGetUpdatesResponse {
+    ok: bool,
+    #[serde(default)]
+    result: Vec<TelegramUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TelegramMessage {
     message_id: Option<i64>,
     text: Option<String>,
@@ -117,8 +129,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/status", get(status))
         .route("/events", get(list_events))
         .route("/pairings", get(list_pairings))
-        .route("/pairings/:platform/:identity_key/approve", post(approve_pairing))
-        .route("/pairings/:platform/:identity_key/reject", post(reject_pairing))
+        .route(
+            "/pairings/:platform/:identity_key/approve",
+            post(approve_pairing),
+        )
+        .route(
+            "/pairings/:platform/:identity_key/reject",
+            post(reject_pairing),
+        )
         .route("/telegram/webhook/:secret", post(telegram_webhook))
         .route("/signal/events/:secret", post(signal_events))
         .route("/bluebubbles/events/:secret", post(bluebubbles_events))
@@ -172,6 +190,8 @@ async fn status(
             "qq",
         ],
         telegram_webhook_secret_configured: std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET").is_ok(),
+        telegram_polling_enabled: telegram_polling_enabled(),
+        telegram_ingress_mode: telegram_ingress_mode(),
         signal_callback_secret_configured: std::env::var("DAWN_SIGNAL_CALLBACK_SECRET").is_ok(),
         signal_dm_policy: chat_dm_policy_label(signal_policy),
         signal_allowlist_count: signal_allowlist.len(),
@@ -208,7 +228,11 @@ async fn list_pairings(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListPairingsQuery>,
 ) -> Result<Json<Vec<ChatChannelIdentityRecord>>, (StatusCode, Json<Value>)> {
-    let platform = query.platform.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let platform = query
+        .platform
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let status = parse_pairing_status(query.status.as_deref())?;
     state
         .list_chat_channel_identities(platform, status)
@@ -243,12 +267,31 @@ async fn telegram_webhook(
     Json(update): Json<TelegramUpdate>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_telegram_secret(&secret).map_err(bad_request)?;
-    let Some(message) = update.message else {
+    let Some(record) = process_telegram_update(state, update)
+        .await
+        .map_err(service_error)?
+    else {
         return Ok(Json(json!({
             "ok": true,
             "ignored": true,
             "reason": "telegram update did not contain a message payload"
         })));
+    };
+
+    Ok(Json(json!({
+        "ok": true,
+        "ingressId": record.ingress_id,
+        "status": record.status,
+        "taskId": record.linked_task_id
+    })))
+}
+
+async fn process_telegram_update(
+    state: Arc<AppState>,
+    update: TelegramUpdate,
+) -> anyhow::Result<Option<ChatIngressEventRecord>> {
+    let Some(message) = update.message else {
+        return Ok(None);
     };
 
     let text = message.text.unwrap_or_default();
@@ -277,15 +320,9 @@ async fn telegram_webhook(
         }),
         true,
     )
-    .await
-    .map_err(service_error)?;
+    .await?;
 
-    Ok(Json(json!({
-        "ok": true,
-        "ingressId": record.ingress_id,
-        "status": record.status,
-        "taskId": record.linked_task_id
-    })))
+    Ok(Some(record))
 }
 
 async fn signal_events(
@@ -790,7 +827,8 @@ async fn ingest_message(
             let reply = format!(
                 "Pairing required for {platform}. Ask the operator to approve code {pairing_code} for {actor}."
             );
-            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply).await;
+            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                .await;
             record.reply_text = Some(reply);
             record.status = ChatIngressStatus::PendingApproval;
             record.error = Some(format!(
@@ -810,6 +848,35 @@ async fn ingest_message(
             record.updated_at_unix_ms = unix_timestamp_ms();
             state.upsert_chat_ingress_event(record.clone()).await?;
             return Ok(record);
+        }
+    }
+
+    if should_attempt_default_model_reply(&record.text) {
+        match try_default_model_reply(state.clone(), platform, &record.text).await {
+            Ok(Some(reply)) => {
+                let _ =
+                    dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                        .await;
+                record.reply_text = Some(reply);
+                record.status = ChatIngressStatus::Replied;
+                record.updated_at_unix_ms = unix_timestamp_ms();
+                state.upsert_chat_ingress_event(record.clone()).await?;
+                return Ok(record);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(?error, platform, "default model reply failed for chat ingress");
+                let reply = format!("Model reply failed: {error}");
+                let _ =
+                    dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                        .await;
+                record.reply_text = Some(reply);
+                record.status = ChatIngressStatus::Failed;
+                record.error = Some(error.to_string());
+                record.updated_at_unix_ms = unix_timestamp_ms();
+                state.upsert_chat_ingress_event(record.clone()).await?;
+                return Ok(record);
+            }
         }
     }
 
@@ -841,6 +908,9 @@ async fn ingest_message(
                 "Task {} accepted with status {:?}",
                 task_response.task.task_id, task_response.task.status
             ));
+            let reply = record.reply_text.clone().unwrap_or_default();
+            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                .await;
             record.status = ChatIngressStatus::TaskCreated;
             record.updated_at_unix_ms = unix_timestamp_ms();
             state.upsert_chat_ingress_event(record.clone()).await?;
@@ -848,6 +918,10 @@ async fn ingest_message(
         }
         Err(error) => {
             warn!(?error, platform, "failed to route chat ingress into A2A");
+            let reply = format!("Failed to route your message: {error}");
+            let _ = dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                .await;
+            record.reply_text = Some(reply);
             record.status = ChatIngressStatus::Failed;
             record.error = Some(error.to_string());
             record.updated_at_unix_ms = unix_timestamp_ms();
@@ -888,7 +962,10 @@ async fn evaluate_ingress_access(
     if allowlist_contains(platform, sender_id, chat_id) {
         return Ok(IngressAccessDecision::Allow);
     }
-    if let Some(identity) = state.get_chat_channel_identity(platform, &identity_key).await? {
+    if let Some(identity) = state
+        .get_chat_channel_identity(platform, &identity_key)
+        .await?
+    {
         return match identity.status {
             ChatChannelIdentityStatus::Paired => Ok(IngressAccessDecision::Allow),
             ChatChannelIdentityStatus::Pending if policy == ChatDmPolicy::Pairing => {
@@ -1047,11 +1124,19 @@ fn allowlist_contains(platform: &str, sender_id: Option<&str>, chat_id: Option<&
     }
     sender_id
         .map(str::trim)
-        .filter(|value| values.iter().any(|allowed| allowed.eq_ignore_ascii_case(value)))
+        .filter(|value| {
+            values
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(value))
+        })
         .is_some()
         || chat_id
             .map(str::trim)
-            .filter(|value| values.iter().any(|allowed| allowed.eq_ignore_ascii_case(value)))
+            .filter(|value| {
+                values
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(value))
+            })
             .is_some()
 }
 
@@ -1084,6 +1169,94 @@ fn normalize_ingress_instruction(text: &str) -> String {
         return value.trim().to_string();
     }
     trimmed.to_string()
+}
+
+fn should_attempt_default_model_reply(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('/')
+}
+
+async fn try_default_model_reply(
+    state: Arc<AppState>,
+    platform: &str,
+    text: &str,
+) -> anyhow::Result<Option<String>> {
+    let workspace = identity::ensure_workspace_profile(&state).await?;
+    let Some(provider) = workspace
+        .default_model_providers
+        .iter()
+        .find(|value| is_model_provider_live_configured(value))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+
+    let response = connectors::execute_model_connector(
+        &provider,
+        OpenAIResponseRequest {
+            input: text.trim().to_string(),
+            model: None,
+            instructions: Some(format!(
+                "You are Dawn, a concise desktop AI assistant replying inside a {platform} chat. Respond directly in the user's language. Keep replies short unless the user asks for detail."
+            )),
+        },
+    )
+    .await?;
+
+    let output = response.output_text.trim().to_string();
+    if output.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(output))
+}
+
+fn is_model_provider_live_configured(provider: &str) -> bool {
+    match provider {
+        "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
+        "openai_codex" => connectors::openai_codex_login_ready(),
+        "anthropic" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
+        "google" => std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok(),
+        "bedrock" => std::env::var("BEDROCK_API_KEY").is_ok()
+            && (std::env::var("BEDROCK_CHAT_COMPLETIONS_URL").is_ok()
+                || std::env::var("BEDROCK_BASE_URL").is_ok()
+                || std::env::var("BEDROCK_RUNTIME_ENDPOINT").is_ok()),
+        "cloudflare_ai_gateway" => (std::env::var("CLOUDFLARE_AI_GATEWAY_API_KEY").is_ok()
+            || std::env::var("OPENAI_API_KEY").is_ok())
+            && (std::env::var("CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok()
+                || std::env::var("CLOUDFLARE_AI_GATEWAY_BASE_URL").is_ok()
+                || (std::env::var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID").is_ok()
+                    && std::env::var("CLOUDFLARE_AI_GATEWAY_ID").is_ok())),
+        "github_models" => {
+            std::env::var("GITHUB_MODELS_API_KEY").is_ok() || std::env::var("GITHUB_TOKEN").is_ok()
+        }
+        "huggingface" => {
+            std::env::var("HUGGINGFACE_API_KEY").is_ok() || std::env::var("HF_TOKEN").is_ok()
+        }
+        "openrouter" => std::env::var("OPENROUTER_API_KEY").is_ok(),
+        "groq" => std::env::var("GROQ_API_KEY").is_ok(),
+        "together" => std::env::var("TOGETHER_API_KEY").is_ok(),
+        "vercel_ai_gateway" => std::env::var("VERCEL_AI_GATEWAY_API_KEY").is_ok()
+            || std::env::var("AI_GATEWAY_API_KEY").is_ok()
+            || std::env::var("VERCEL_AI_GATEWAY_BASE_URL").is_ok()
+            || std::env::var("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok(),
+        "vllm" => {
+            std::env::var("VLLM_CHAT_COMPLETIONS_URL").is_ok() || std::env::var("VLLM_BASE_URL").is_ok()
+        }
+        "mistral" => std::env::var("MISTRAL_API_KEY").is_ok(),
+        "nvidia" => std::env::var("NVIDIA_API_KEY").is_ok() || std::env::var("NVIDIA_NIM_API_KEY").is_ok(),
+        "litellm" => {
+            std::env::var("LITELLM_CHAT_COMPLETIONS_URL").is_ok() || std::env::var("LITELLM_BASE_URL").is_ok()
+        }
+        "deepseek" => std::env::var("DEEPSEEK_API_KEY").is_ok(),
+        "qwen" => std::env::var("QWEN_API_KEY").is_ok() || std::env::var("DASHSCOPE_API_KEY").is_ok(),
+        "zhipu" => std::env::var("ZHIPU_API_KEY").is_ok(),
+        "moonshot" => std::env::var("MOONSHOT_API_KEY").is_ok(),
+        "doubao" => std::env::var("DOUBAO_API_KEY").is_ok() || std::env::var("ARK_API_KEY").is_ok(),
+        "ollama" => {
+            std::env::var("OLLAMA_CHAT_URL").is_ok() || std::env::var("OLLAMA_BASE_URL").is_ok()
+        }
+        _ => false,
+    }
 }
 
 fn telegram_display_name(user: &TelegramUser) -> Option<String> {
@@ -1344,7 +1517,11 @@ fn extract_bluebubbles_receipt_summary(payload: &Value) -> Option<String> {
         .or_else(|| payload.pointer("/type").and_then(Value::as_str))
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if event.contains("read") || payload.pointer("/message/dateRead").and_then(value_as_i64).is_some()
+    if event.contains("read")
+        || payload
+            .pointer("/message/dateRead")
+            .and_then(value_as_i64)
+            .is_some()
     {
         return Some("BlueBubbles read receipt".to_string());
     }
@@ -1555,6 +1732,93 @@ fn verify_telegram_secret(secret: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn telegram_ingress_mode() -> &'static str {
+    if telegram_polling_enabled() {
+        "polling"
+    } else if std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET").is_ok() {
+        "webhook"
+    } else {
+        "disabled"
+    }
+}
+
+fn telegram_polling_enabled() -> bool {
+    let explicit = std::env::var("DAWN_TELEGRAM_POLLING")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+    if explicit {
+        return std::env::var("TELEGRAM_BOT_TOKEN").is_ok();
+    }
+    if std::env::var("TELEGRAM_BOT_TOKEN").is_err() {
+        return false;
+    }
+    if std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET").is_err() {
+        return true;
+    }
+    matches!(
+        std::env::var("DAWN_PUBLIC_BASE_URL"),
+        Ok(value) if public_base_url_is_local_only(&value)
+    )
+}
+
+fn public_base_url_is_local_only(raw: &str) -> bool {
+    let value = raw.trim().to_ascii_lowercase();
+    value.contains("127.0.0.1")
+        || value.contains("localhost")
+        || value.contains("0.0.0.0")
+        || value.contains("[::1]")
+}
+
+pub fn spawn_telegram_ingress_worker(state: Arc<AppState>) {
+    if !telegram_polling_enabled() {
+        return;
+    }
+    let Ok(bot_token) = std::env::var("TELEGRAM_BOT_TOKEN") else {
+        return;
+    };
+    info!("Starting Telegram long-poll ingress worker");
+    tokio::spawn(async move {
+        let client = Client::new();
+        let mut next_offset: Option<i64> = None;
+        loop {
+            let mut request = client
+                .get(format!("https://api.telegram.org/bot{bot_token}/getUpdates"))
+                .query(&[("timeout", "30"), ("allowed_updates", "[\"message\"]")]);
+            if let Some(offset) = next_offset {
+                request = request.query(&[("offset", offset)]);
+            }
+            match request.send().await {
+                Ok(response) => match response.json::<TelegramGetUpdatesResponse>().await {
+                    Ok(payload) if payload.ok => {
+                        for update in payload.result {
+                            if let Some(update_id) = update.update_id {
+                                next_offset = Some(update_id + 1);
+                            }
+                            if let Err(error) = process_telegram_update(state.clone(), update).await
+                            {
+                                warn!(?error, "telegram polling worker failed to process update");
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        warn!("telegram polling worker received non-ok getUpdates response");
+                        sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(error) => {
+                        warn!(?error, "telegram polling worker failed to decode getUpdates response");
+                        sleep(Duration::from_secs(2)).await;
+                    }
+                },
+                Err(error) => {
+                    warn!(?error, "telegram polling worker failed to fetch updates");
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    });
 }
 
 fn verify_callback_secret(env_var: &str, platform: &str, secret: &str) -> anyhow::Result<()> {
@@ -2152,8 +2416,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signal_event_can_require_pairing_and_then_create_task_after_approval(
-    ) -> anyhow::Result<()> {
+    async fn signal_event_can_require_pairing_and_then_create_task_after_approval()
+    -> anyhow::Result<()> {
         let _guard = env_lock().lock().expect("env mutex");
         let _env = ScopedEnvRestore::apply(&[("DAWN_SIGNAL_DM_POLICY", Some("pairing"))]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
