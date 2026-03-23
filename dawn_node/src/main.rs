@@ -5,7 +5,9 @@ mod profile;
 use std::{
     collections::{BTreeMap, HashMap},
     env,
+    future::Future,
     path::PathBuf,
+    pin::Pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -527,162 +529,7 @@ async fn execute_command(
     envelope: GatewayCommandEnvelope,
 ) -> String {
     let fallback_command_id = envelope.command_id.clone();
-    let response = match envelope.command_type.as_str() {
-        "echo" => CommandResultEnvelope {
-            message_type: "command_result",
-            command_id: envelope.command_id,
-            status: "succeeded",
-            result: Some(envelope.payload),
-            error: None,
-        },
-        "list_capabilities" => CommandResultEnvelope {
-            message_type: "command_result",
-            command_id: envelope.command_id,
-            status: "succeeded",
-            result: Some(json!({
-                "nodeId": config.node_id,
-                "capabilities": config.capabilities,
-                "allowShell": config.allow_shell
-            })),
-            error: None,
-        },
-        "agent_ping" => CommandResultEnvelope {
-            message_type: "command_result",
-            command_id: envelope.command_id,
-            status: "succeeded",
-            result: Some(json!({
-                "nodeId": config.node_id,
-                "nodeName": config.node_name,
-                "observedAtUnixMs": unix_timestamp_ms()
-            })),
-            error: None,
-        },
-        "system_info" => execute_system_info_command(config, envelope).await,
-        "list_directory" => execute_list_directory_command(envelope).await,
-        "read_file_preview" => execute_read_file_preview_command(envelope).await,
-        "stat_path" => execute_stat_path_command(envelope).await,
-        "process_snapshot" => execute_process_snapshot_command(envelope).await,
-        "browser_start" => execute_browser_start_command(runtime_state, envelope).await,
-        "browser_profiles" => execute_browser_profiles_command(runtime_state, envelope).await,
-        "browser_profile_inspect" => {
-            execute_browser_profile_inspect_command(runtime_state, envelope).await
-        }
-        "browser_profile_import" => {
-            execute_browser_profile_import_command(runtime_state, envelope).await
-        }
-        "browser_profile_export" => {
-            execute_browser_profile_export_command(runtime_state, envelope).await
-        }
-        "browser_profile_delete" => {
-            execute_browser_profile_delete_command(runtime_state, envelope).await
-        }
-        "browser_status" => execute_browser_status_command(runtime_state, envelope).await,
-        "browser_stop" => execute_browser_stop_command(runtime_state, envelope).await,
-        "browser_navigate" => execute_browser_navigate_command(runtime_state, envelope).await,
-        "browser_new_tab" => execute_browser_new_tab_command(runtime_state, envelope).await,
-        "browser_new_window" => execute_browser_new_window_command(runtime_state, envelope).await,
-        "browser_extract" => execute_browser_extract_command(runtime_state, envelope).await,
-        "browser_click" => execute_browser_click_command(runtime_state, envelope).await,
-        "browser_back" => execute_browser_back_command(runtime_state, envelope).await,
-        "browser_forward" => execute_browser_forward_command(runtime_state, envelope).await,
-        "browser_reload" => execute_browser_reload_command(runtime_state, envelope).await,
-        "browser_focus" => execute_browser_focus_command(runtime_state, envelope).await,
-        "browser_close" => execute_browser_close_command(runtime_state, envelope).await,
-        "browser_tabs" => execute_browser_tabs_command(runtime_state, envelope).await,
-        "browser_snapshot" => execute_browser_snapshot_command(runtime_state, envelope).await,
-        "browser_screenshot" => execute_browser_screenshot_command(runtime_state, envelope).await,
-        "browser_pdf" => execute_browser_pdf_command(runtime_state, envelope).await,
-        "browser_console_messages" => {
-            execute_browser_console_messages_command(runtime_state, envelope).await
-        }
-        "browser_network_requests" => {
-            execute_browser_network_requests_command(runtime_state, envelope).await
-        }
-        "browser_network_export" => {
-            execute_browser_network_export_command(runtime_state, envelope).await
-        }
-        "browser_trace" => execute_browser_trace_command(runtime_state, envelope).await,
-        "browser_trace_export" => {
-            execute_browser_trace_export_command(runtime_state, envelope).await
-        }
-        "browser_errors" => execute_browser_errors_command(runtime_state, envelope).await,
-        "browser_errors_export" => {
-            execute_browser_errors_export_command(runtime_state, envelope).await
-        }
-        "browser_cookies" => execute_browser_cookies_command(runtime_state, envelope).await,
-        "browser_storage" => execute_browser_storage_command(runtime_state, envelope).await,
-        "browser_storage_set" => execute_browser_storage_set_command(runtime_state, envelope).await,
-        "browser_set_headers" => execute_browser_set_headers_command(runtime_state, envelope).await,
-        "browser_set_offline" => execute_browser_set_offline_command(runtime_state, envelope).await,
-        "browser_set_geolocation" => {
-            execute_browser_set_geolocation_command(runtime_state, envelope).await
-        }
-        "browser_emulate_device" => {
-            execute_browser_emulate_device_command(runtime_state, envelope).await
-        }
-        "browser_evaluate" => execute_browser_evaluate_command(runtime_state, envelope).await,
-        "browser_wait_for" => execute_browser_wait_for_command(runtime_state, envelope).await,
-        "browser_handle_dialog" => {
-            execute_browser_handle_dialog_command(runtime_state, envelope).await
-        }
-        "browser_press_key" => execute_browser_press_key_command(runtime_state, envelope).await,
-        "browser_type" => execute_browser_type_command(runtime_state, envelope).await,
-        "browser_upload" => execute_browser_upload_command(runtime_state, envelope).await,
-        "browser_download" => execute_browser_download_command(runtime_state, envelope).await,
-        "browser_form_fill" => execute_browser_form_fill_command(runtime_state, envelope).await,
-        "browser_form_submit" => execute_browser_form_submit_command(runtime_state, envelope).await,
-        "browser_open" => execute_browser_open_command(envelope).await,
-        "browser_search" => execute_browser_search_command(envelope).await,
-        "desktop_open" => execute_desktop_open_command(envelope).await,
-        "system_lock" => execute_system_lock_command(envelope).await,
-        "system_sleep" => execute_system_sleep_command(envelope).await,
-        "desktop_notification" => execute_desktop_notification_command(envelope).await,
-        "desktop_clipboard_set" => execute_desktop_clipboard_set_command(envelope).await,
-        "desktop_type_text" => execute_desktop_type_text_command(envelope).await,
-        "desktop_key_press" => execute_desktop_key_press_command(envelope).await,
-        "desktop_windows_list" => execute_desktop_windows_list_command(envelope).await,
-        "desktop_window_focus" => execute_desktop_window_focus_command(envelope).await,
-        "desktop_wait_for_window" => execute_desktop_wait_for_window_command(envelope).await,
-        "desktop_focus_app" => execute_desktop_focus_app_command(envelope).await,
-        "desktop_launch_and_focus" => execute_desktop_launch_and_focus_command(envelope).await,
-        "desktop_mouse_move" => execute_desktop_mouse_move_command(envelope).await,
-        "desktop_mouse_click" => execute_desktop_mouse_click_command(envelope).await,
-        "desktop_screenshot" => execute_desktop_screenshot_command(envelope).await,
-        "desktop_ocr" => execute_desktop_ocr_command(envelope).await,
-        "desktop_accessibility_query" => {
-            execute_desktop_accessibility_query_command(envelope).await
-        }
-        "desktop_accessibility_click" => {
-            execute_desktop_accessibility_click_command(envelope).await
-        }
-        "desktop_accessibility_wait_for" => {
-            execute_desktop_accessibility_wait_for_command(envelope).await
-        }
-        "desktop_accessibility_fill" => execute_desktop_accessibility_fill_command(envelope).await,
-        "desktop_accessibility_workflow" => {
-            execute_desktop_accessibility_workflow_command(envelope).await
-        }
-        "desktop_accessibility_snapshot" => {
-            execute_desktop_accessibility_snapshot_command(envelope).await
-        }
-        "desktop_accessibility_focus" => {
-            execute_desktop_accessibility_focus_command(envelope).await
-        }
-        "desktop_accessibility_invoke" => {
-            execute_desktop_accessibility_invoke_command(envelope).await
-        }
-        "desktop_accessibility_set_value" => {
-            execute_desktop_accessibility_set_value_command(envelope).await
-        }
-        "shell_exec" => execute_shell_command(config, envelope).await,
-        other => CommandResultEnvelope {
-            message_type: "command_result",
-            command_id: envelope.command_id,
-            status: "failed",
-            result: None,
-            error: Some(format!("unsupported command type: {other}")),
-        },
-    };
+    let response = dispatch_command_future(config, runtime_state, envelope).await;
 
     serde_json::to_string(&response).unwrap_or_else(|_| {
         json!({
@@ -693,6 +540,207 @@ async fn execute_command(
         })
         .to_string()
     })
+}
+
+fn dispatch_command_future<'a>(
+    config: &'a NodeConfig,
+    runtime_state: &'a mut NodeRuntimeState,
+    envelope: GatewayCommandEnvelope,
+) -> Pin<Box<dyn Future<Output = CommandResultEnvelope> + 'a>> {
+    let command_type = envelope.command_type.clone();
+    match command_type.as_str() {
+        "echo" => Box::pin(async move {
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(envelope.payload),
+                error: None,
+            }
+        }),
+        "list_capabilities" => Box::pin(async move {
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "nodeId": config.node_id,
+                    "capabilities": config.capabilities,
+                    "allowShell": config.allow_shell
+                })),
+                error: None,
+            }
+        }),
+        "agent_ping" => Box::pin(async move {
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "nodeId": config.node_id,
+                    "nodeName": config.node_name,
+                    "observedAtUnixMs": unix_timestamp_ms()
+                })),
+                error: None,
+            }
+        }),
+        "system_info" => Box::pin(execute_system_info_command(config, envelope)),
+        "list_directory" => Box::pin(execute_list_directory_command(envelope)),
+        "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
+        "stat_path" => Box::pin(execute_stat_path_command(envelope)),
+        "process_snapshot" => Box::pin(execute_process_snapshot_command(envelope)),
+        "browser_start" => Box::pin(execute_browser_start_command(runtime_state, envelope)),
+        "browser_profiles" => Box::pin(execute_browser_profiles_command(runtime_state, envelope)),
+        "browser_profile_inspect" => Box::pin(execute_browser_profile_inspect_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_profile_import" => Box::pin(execute_browser_profile_import_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_profile_export" => Box::pin(execute_browser_profile_export_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_profile_delete" => Box::pin(execute_browser_profile_delete_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_status" => Box::pin(execute_browser_status_command(runtime_state, envelope)),
+        "browser_stop" => Box::pin(execute_browser_stop_command(runtime_state, envelope)),
+        "browser_navigate" => Box::pin(execute_browser_navigate_command(runtime_state, envelope)),
+        "browser_new_tab" => Box::pin(execute_browser_new_tab_command(runtime_state, envelope)),
+        "browser_new_window" => {
+            Box::pin(execute_browser_new_window_command(runtime_state, envelope))
+        }
+        "browser_extract" => Box::pin(execute_browser_extract_command(runtime_state, envelope)),
+        "browser_click" => Box::pin(execute_browser_click_command(runtime_state, envelope)),
+        "browser_back" => Box::pin(execute_browser_back_command(runtime_state, envelope)),
+        "browser_forward" => Box::pin(execute_browser_forward_command(runtime_state, envelope)),
+        "browser_reload" => Box::pin(execute_browser_reload_command(runtime_state, envelope)),
+        "browser_focus" => Box::pin(execute_browser_focus_command(runtime_state, envelope)),
+        "browser_close" => Box::pin(execute_browser_close_command(runtime_state, envelope)),
+        "browser_tabs" => Box::pin(execute_browser_tabs_command(runtime_state, envelope)),
+        "browser_snapshot" => Box::pin(execute_browser_snapshot_command(runtime_state, envelope)),
+        "browser_screenshot" => {
+            Box::pin(execute_browser_screenshot_command(runtime_state, envelope))
+        }
+        "browser_pdf" => Box::pin(execute_browser_pdf_command(runtime_state, envelope)),
+        "browser_console_messages" => Box::pin(execute_browser_console_messages_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_network_requests" => Box::pin(execute_browser_network_requests_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_network_export" => Box::pin(execute_browser_network_export_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_trace" => Box::pin(execute_browser_trace_command(runtime_state, envelope)),
+        "browser_trace_export" => Box::pin(execute_browser_trace_export_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_errors" => Box::pin(execute_browser_errors_command(runtime_state, envelope)),
+        "browser_errors_export" => Box::pin(execute_browser_errors_export_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_cookies" => Box::pin(execute_browser_cookies_command(runtime_state, envelope)),
+        "browser_storage" => Box::pin(execute_browser_storage_command(runtime_state, envelope)),
+        "browser_storage_set" => {
+            Box::pin(execute_browser_storage_set_command(runtime_state, envelope))
+        }
+        "browser_set_headers" => {
+            Box::pin(execute_browser_set_headers_command(runtime_state, envelope))
+        }
+        "browser_set_offline" => {
+            Box::pin(execute_browser_set_offline_command(runtime_state, envelope))
+        }
+        "browser_set_geolocation" => Box::pin(execute_browser_set_geolocation_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_emulate_device" => Box::pin(execute_browser_emulate_device_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_evaluate" => Box::pin(execute_browser_evaluate_command(runtime_state, envelope)),
+        "browser_wait_for" => Box::pin(execute_browser_wait_for_command(runtime_state, envelope)),
+        "browser_handle_dialog" => Box::pin(execute_browser_handle_dialog_command(
+            runtime_state,
+            envelope,
+        )),
+        "browser_press_key" => Box::pin(execute_browser_press_key_command(runtime_state, envelope)),
+        "browser_type" => Box::pin(execute_browser_type_command(runtime_state, envelope)),
+        "browser_upload" => Box::pin(execute_browser_upload_command(runtime_state, envelope)),
+        "browser_download" => Box::pin(execute_browser_download_command(runtime_state, envelope)),
+        "browser_form_fill" => Box::pin(execute_browser_form_fill_command(runtime_state, envelope)),
+        "browser_form_submit" => {
+            Box::pin(execute_browser_form_submit_command(runtime_state, envelope))
+        }
+        "browser_open" => Box::pin(execute_browser_open_command(envelope)),
+        "browser_search" => Box::pin(execute_browser_search_command(envelope)),
+        "desktop_open" => Box::pin(execute_desktop_open_command(envelope)),
+        "system_lock" => Box::pin(execute_system_lock_command(envelope)),
+        "system_sleep" => Box::pin(execute_system_sleep_command(envelope)),
+        "desktop_notification" => Box::pin(execute_desktop_notification_command(envelope)),
+        "desktop_clipboard_set" => Box::pin(execute_desktop_clipboard_set_command(envelope)),
+        "desktop_type_text" => Box::pin(execute_desktop_type_text_command(envelope)),
+        "desktop_key_press" => Box::pin(execute_desktop_key_press_command(envelope)),
+        "desktop_windows_list" => Box::pin(execute_desktop_windows_list_command(envelope)),
+        "desktop_window_focus" => Box::pin(execute_desktop_window_focus_command(envelope)),
+        "desktop_wait_for_window" => Box::pin(execute_desktop_wait_for_window_command(envelope)),
+        "desktop_focus_app" => Box::pin(execute_desktop_focus_app_command(envelope)),
+        "desktop_launch_and_focus" => Box::pin(execute_desktop_launch_and_focus_command(envelope)),
+        "desktop_mouse_move" => Box::pin(execute_desktop_mouse_move_command(envelope)),
+        "desktop_mouse_click" => Box::pin(execute_desktop_mouse_click_command(envelope)),
+        "desktop_screenshot" => Box::pin(execute_desktop_screenshot_command(envelope)),
+        "desktop_ocr" => Box::pin(execute_desktop_ocr_command(envelope)),
+        "desktop_accessibility_query" => {
+            Box::pin(execute_desktop_accessibility_query_command(envelope))
+        }
+        "desktop_accessibility_click" => {
+            Box::pin(execute_desktop_accessibility_click_command(envelope))
+        }
+        "desktop_accessibility_wait_for" => {
+            Box::pin(execute_desktop_accessibility_wait_for_command(envelope))
+        }
+        "desktop_accessibility_fill" => {
+            Box::pin(execute_desktop_accessibility_fill_command(envelope))
+        }
+        "desktop_accessibility_workflow" => {
+            Box::pin(execute_desktop_accessibility_workflow_command(envelope))
+        }
+        "desktop_accessibility_snapshot" => {
+            Box::pin(execute_desktop_accessibility_snapshot_command(envelope))
+        }
+        "desktop_accessibility_focus" => {
+            Box::pin(execute_desktop_accessibility_focus_command(envelope))
+        }
+        "desktop_accessibility_invoke" => {
+            Box::pin(execute_desktop_accessibility_invoke_command(envelope))
+        }
+        "desktop_accessibility_set_value" => {
+            Box::pin(execute_desktop_accessibility_set_value_command(envelope))
+        }
+        "shell_exec" => Box::pin(execute_shell_command(config, envelope)),
+        other => {
+            let other = other.to_string();
+            Box::pin(async move {
+                CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(format!("unsupported command type: {other}")),
+                }
+            })
+        }
+    }
 }
 
 fn apply_rollout_bundle(
@@ -9673,7 +9721,10 @@ async fn lock_host_system() -> anyhow::Result<&'static str> {
         return Ok("osascript:lock-screen-shortcut");
     }
     if cfg!(target_os = "linux") {
-        let status = Command::new("loginctl").arg("lock-session").status().await?;
+        let status = Command::new("loginctl")
+            .arg("lock-session")
+            .status()
+            .await?;
         if !status.success() {
             anyhow::bail!("system_lock exited with status {:?}", status.code());
         }
@@ -11368,30 +11419,19 @@ fn load_config() -> NodeConfig {
             .unwrap_or_else(|| profile::http_base_to_ws_base(&profile::default_gateway_base_url()));
         format!("{ws_base}/api/gateway/control-plane/nodes/{node_id}/session")
     });
-    let capabilities = env::var("DAWN_NODE_CAPABILITIES")
-        .map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|_| default_capabilities());
     let claim_token = env::var("DAWN_NODE_CLAIM_TOKEN")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| profile.claim_token.clone());
-    let allow_shell = env::var("DAWN_NODE_ALLOW_SHELL")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
-        .unwrap_or(false);
+    let allow_shell = resolve_allow_shell(&profile);
+    let capabilities = resolve_node_capabilities(&profile, allow_shell);
     let enforce_trusted_rollout = env::var("DAWN_NODE_ENFORCE_TRUSTED_ROLLOUT")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
     let require_signed_skills = env::var("DAWN_NODE_REQUIRE_SIGNED_SKILLS")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
-    let capabilities = normalize_capabilities(capabilities, allow_shell);
     let (signing_seed, uses_derived_identity) = load_signing_seed(&node_id);
     let signing_key = SigningKey::from_bytes(&signing_seed);
     let issuer_did = format!(
@@ -11532,6 +11572,40 @@ fn default_capabilities() -> Vec<String> {
         "stat_path".to_string(),
         "process_snapshot".to_string(),
     ]
+}
+
+fn parse_capability_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn resolve_allow_shell(profile: &profile::DawnCliProfile) -> bool {
+    env::var("DAWN_NODE_ALLOW_SHELL")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or_else(|_| {
+            profile
+                .requested_capabilities
+                .iter()
+                .any(|value| value == "shell_exec")
+        })
+}
+
+fn resolve_node_capabilities(profile: &profile::DawnCliProfile, allow_shell: bool) -> Vec<String> {
+    let capabilities = env::var("DAWN_NODE_CAPABILITIES")
+        .map(|raw| parse_capability_list(&raw))
+        .ok()
+        .or_else(|| {
+            if profile.requested_capabilities.is_empty() {
+                None
+            } else {
+                Some(profile.requested_capabilities.clone())
+            }
+        })
+        .unwrap_or_else(default_capabilities);
+    normalize_capabilities(capabilities, allow_shell)
 }
 
 fn normalize_capabilities(mut capabilities: Vec<String>, allow_shell: bool) -> Vec<String> {
@@ -11921,6 +11995,26 @@ mod tests {
             policy_trust_roots: HashMap::new(),
             skill_publisher_trust_roots: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn execute_command_future_stays_small_enough_for_background_hosts() {
+        let config = base_config();
+        let mut runtime_state = NodeRuntimeState::default();
+        let future = execute_command(
+            &config,
+            &mut runtime_state,
+            GatewayCommandEnvelope {
+                command_id: "cmd-test".to_string(),
+                command_type: "system_info".to_string(),
+                payload: json!({}),
+            },
+        );
+        let future_size = std::mem::size_of_val(&future);
+        assert!(
+            future_size <= 2048,
+            "execute_command future grew too large for background-host safety: {future_size} bytes"
+        );
     }
 
     fn signed_rollout_bundle() -> (NodeConfig, GatewayRolloutBundle) {
@@ -13108,5 +13202,36 @@ mod tests {
         assert_eq!(parsed["imageName"], "cmd.exe");
         assert_eq!(parsed["pid"], "1234");
         assert_eq!(parsed["memory"], "8,192 K");
+    }
+
+    #[test]
+    fn resolves_allow_shell_from_profile_requested_capabilities() {
+        let profile = profile::DawnCliProfile {
+            requested_capabilities: vec!["shell_exec".to_string(), "system_info".to_string()],
+            ..Default::default()
+        };
+
+        assert!(resolve_allow_shell(&profile));
+    }
+
+    #[test]
+    fn resolves_node_capabilities_from_profile_when_env_is_absent() {
+        let profile = profile::DawnCliProfile {
+            requested_capabilities: vec![
+                "desktop_notification".to_string(),
+                "system_info".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let capabilities = resolve_node_capabilities(&profile, false);
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_notification")
+        );
+        assert!(capabilities.iter().any(|value| value == "system_info"));
+        assert!(!capabilities.iter().any(|value| value == "shell_exec"));
     }
 }

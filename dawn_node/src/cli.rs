@@ -10,6 +10,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use sha2::Digest;
 use std::{collections::BTreeMap, env, fs, path::PathBuf, process::Command as StdCommand};
 
 use crate::profile::{
@@ -20,6 +21,13 @@ use crate::profile::{
 pub enum CliOutcome {
     Exit,
     RunNode,
+}
+
+enum StartupAction {
+    RunNode,
+    Setup,
+    Status,
+    Exit,
 }
 
 const DEFAULT_BOOTSTRAP_TOKEN: &str = "dawn-dev-bootstrap";
@@ -861,6 +869,8 @@ struct NodeArgs {
 #[derive(Subcommand)]
 enum NodeCommand {
     Claim(NodeClaimArgs),
+    #[command(name = "trust-self")]
+    TrustSelf(NodeTrustSelfArgs),
 }
 
 #[derive(Args)]
@@ -915,6 +925,50 @@ struct NodeClaimArgs {
     allow_shell: bool,
     #[arg(long, default_value_t = 1800)]
     expires_seconds: u64,
+}
+
+#[derive(Args)]
+struct NodeTrustSelfArgs {
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    node_id: Option<String>,
+    #[arg(long)]
+    actor: Option<String>,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeTrustRootUpsertRequest {
+    actor: String,
+    reason: String,
+    issuer_did: String,
+    label: String,
+    public_key_hex: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeTrustRootRecord {
+    issuer_did: String,
+    label: String,
+    public_key_hex: String,
+    updated_by: String,
+    updated_reason: String,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeTrustRootUpsertResponse {
+    trust_root: NodeTrustRootRecord,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1193,30 +1247,68 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
     let cli = DawnCli::parse();
     let Some(command) = cli.command else {
         let profile = load_profile_or_default();
-        if should_auto_launch_setup(&profile) && io::stdin().is_terminal() && io::stdout().is_terminal()
-        {
-            println!("No Dawn CLI login found. Starting guided setup...");
-            setup(SetupArgs {
-                gateway: None,
-                bootstrap_token: DEFAULT_BOOTSTRAP_TOKEN.to_string(),
-                operator_name: None,
-                display_name: None,
-                tenant_id: None,
-                project_id: None,
-                region: None,
-                model: Vec::new(),
-                channel: Vec::new(),
-                skill: Vec::new(),
-                federated_skills: false,
-                allow_unsigned_skills: false,
-                allow_shell: false,
-                no_claim: false,
-                yes: false,
-                advanced: false,
-                env: Vec::new(),
-            })
-            .await?;
-            return Ok(CliOutcome::Exit);
+        let interactive_terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
+        if interactive_terminal {
+            if should_auto_launch_setup(&profile) {
+                println!("No Dawn CLI login found. Starting guided setup...");
+                setup(SetupArgs {
+                    gateway: None,
+                    bootstrap_token: DEFAULT_BOOTSTRAP_TOKEN.to_string(),
+                    operator_name: None,
+                    display_name: None,
+                    tenant_id: None,
+                    project_id: None,
+                    region: None,
+                    model: Vec::new(),
+                    channel: Vec::new(),
+                    skill: Vec::new(),
+                    federated_skills: false,
+                    allow_unsigned_skills: false,
+                    allow_shell: false,
+                    no_claim: false,
+                    yes: false,
+                    advanced: false,
+                    env: Vec::new(),
+                })
+                .await?;
+                return Ok(CliOutcome::Exit);
+            }
+
+            match prompt_startup_action(&profile)? {
+                StartupAction::RunNode => {
+                    println!("Starting local node runtime...");
+                    return Ok(CliOutcome::RunNode);
+                }
+                StartupAction::Setup => {
+                    println!("Opening guided setup...");
+                    setup(SetupArgs {
+                        gateway: None,
+                        bootstrap_token: DEFAULT_BOOTSTRAP_TOKEN.to_string(),
+                        operator_name: None,
+                        display_name: None,
+                        tenant_id: None,
+                        project_id: None,
+                        region: None,
+                        model: Vec::new(),
+                        channel: Vec::new(),
+                        skill: Vec::new(),
+                        federated_skills: false,
+                        allow_unsigned_skills: false,
+                        allow_shell: false,
+                        no_claim: false,
+                        yes: false,
+                        advanced: false,
+                        env: Vec::new(),
+                    })
+                    .await?;
+                    return Ok(CliOutcome::Exit);
+                }
+                StartupAction::Status => {
+                    print_local_status()?;
+                    return Ok(CliOutcome::Exit);
+                }
+                StartupAction::Exit => return Ok(CliOutcome::Exit),
+            }
         }
         return Ok(CliOutcome::RunNode);
     };
@@ -1356,7 +1448,9 @@ async fn login(args: LoginArgs) -> anyhow::Result<()> {
     println!("Operator: {}", response.session.operator_name);
     println!("Bootstrap mode: {}", response.bootstrap_mode);
     println!("Profile saved: {}", path.display());
-    println!("Next: run `dawn-node login` for the full guided setup or `dawn-node setup --advanced`.");
+    println!(
+        "Next: run `dawn-node login` for the full guided setup or `dawn-node setup --advanced`."
+    );
     Ok(())
 }
 
@@ -1462,7 +1556,12 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
 
     if interactive {
         println!("Dawn CLI guided setup");
-        println!("This flow will log you in, choose an AI model, choose a chat app, and optionally install skills and claim a local node.");
+        println!(
+            "This flow will log you in, choose an AI model, choose a chat app, and optionally install skills and claim a local node."
+        );
+        println!(
+            "Fast path: choose OpenAI, Anthropic Claude, or Google Gemini and paste an API key; choose Telegram Bot and paste a bot token."
+        );
         println!();
     }
     let default_operator = args
@@ -1491,7 +1590,10 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     let supported_channels =
         connector_targets_from_status(&connectors_status, "supportedChatPlatforms", "platform");
 
-    println!("Logged in to {gateway_base_url} as {}", response.session.operator_name);
+    println!(
+        "Logged in to {gateway_base_url} as {}",
+        response.session.operator_name
+    );
 
     let selected_models = choose_setup_targets(
         "AI models",
@@ -1532,7 +1634,8 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    let workspace_defaults = suggest_setup_workspace_identity(&workspace, &response.session.operator_name);
+    let workspace_defaults =
+        suggest_setup_workspace_identity(&workspace, &response.session.operator_name);
     let advanced_identity = args.advanced
         || args.display_name.is_some()
         || args.tenant_id.is_some()
@@ -1578,7 +1681,10 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             .project_id
             .clone()
             .unwrap_or(workspace_defaults.project_id.clone());
-        let region = args.region.clone().unwrap_or(workspace_defaults.region.clone());
+        let region = args
+            .region
+            .clone()
+            .unwrap_or(workspace_defaults.region.clone());
         println!(
             "Using workspace identity: {} [{}] tenant={} project={}",
             display_name, region, tenant_id, project_id
@@ -1678,6 +1784,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             "Issued node claim for {}. claimToken hint: {}",
             claim.claim.node_id, claim.token_hint
         );
+        println!("Next: run `dawn-node node trust-self` so the gateway trusts this local node.");
     }
 
     let path = save_profile(&profile)?;
@@ -1719,7 +1826,11 @@ fn default_operator_name(profile: &DawnCliProfile) -> String {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .or_else(|| env::var("USER").ok().filter(|value| !value.trim().is_empty()))
+        .or_else(|| {
+            env::var("USER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
         .unwrap_or_else(|| DEFAULT_OPERATOR_NAME.to_string())
 }
 
@@ -1754,6 +1865,39 @@ fn suggest_setup_workspace_identity(
         } else {
             workspace.region.clone()
         },
+    }
+}
+
+fn prompt_startup_action(profile: &DawnCliProfile) -> anyhow::Result<StartupAction> {
+    println!("Dawn CLI");
+    println!(
+        "Operator: {}",
+        profile
+            .operator_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("<not logged in>")
+    );
+    println!(
+        "Gateway: {}",
+        profile
+            .gateway_base_url
+            .clone()
+            .unwrap_or_else(default_gateway_base_url)
+    );
+    println!("1. Start local node runtime");
+    println!("2. Guided setup / change AI model and chat app");
+    println!("3. Show local status");
+    println!("4. Exit");
+    loop {
+        let input = prompt_line("Choose an action [1]: ")?;
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "1" | "run" => return Ok(StartupAction::RunNode),
+            "2" | "setup" | "login" => return Ok(StartupAction::Setup),
+            "3" | "status" => return Ok(StartupAction::Status),
+            "4" | "exit" | "quit" => return Ok(StartupAction::Exit),
+            _ => println!("Enter 1, 2, 3, or 4."),
+        }
     }
 }
 
@@ -1868,14 +2012,23 @@ fn choose_setup_targets(
     if supported.is_empty() {
         return Ok(unique_targets(current.to_vec()));
     }
+    let ordered = order_setup_targets(supported, is_models);
     println!("{label}:");
-    for (index, option) in supported.iter().enumerate() {
-        println!("  {}. {}", index + 1, option);
+    for (index, option) in ordered.iter().enumerate() {
+        println!(
+            "  {}. {}",
+            index + 1,
+            connector_setup_option_label(is_models, option)
+        );
     }
     let default_display = if current.is_empty() {
         "<none>".to_string()
     } else {
-        current.join(", ")
+        current
+            .iter()
+            .map(|value| connector_setup_option_label(is_models, value))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let input = prompt_line(&format!(
         "{label} (comma-separated names or indices, blank keeps {default_display}): "
@@ -1883,7 +2036,7 @@ fn choose_setup_targets(
     if input.trim().is_empty() {
         return Ok(unique_targets(current.to_vec()));
     }
-    parse_named_selection(&input, supported)
+    parse_named_selection(&input, &ordered, is_models)
 }
 
 async fn prompt_setup_skills(client: &GatewayClient) -> anyhow::Result<Vec<SetupSkillCandidate>> {
@@ -1957,6 +2110,7 @@ fn ensure_setup_connector_ready(
     {
         return Ok(());
     }
+    let target_label = connector_setup_label(is_models, target);
     if !interactive {
         bail!(
             "selected {} `{}` is not configured on the gateway and no staged credentials were provided",
@@ -1965,7 +2119,7 @@ fn ensure_setup_connector_ready(
             } else {
                 "chat platform"
             },
-            target
+            target_label
         );
     }
     println!(
@@ -1975,7 +2129,7 @@ fn ensure_setup_connector_ready(
         } else {
             "chat platform"
         },
-        target
+        target_label
     );
     let prompt_args = prompt_connector_connect_args(is_models, target, staged_env, gateway)?;
     let env_pairs = connector_secret_pairs(is_models, target, &prompt_args)?;
@@ -2004,6 +2158,7 @@ fn prompt_connector_connect_args(
     staged_env: &BTreeMap<String, String>,
     gateway: Option<&str>,
 ) -> anyhow::Result<ConnectorConnectArgs> {
+    let target_label = connector_setup_label(is_models, target);
     let mut args = ConnectorConnectArgs {
         target: target.to_string(),
         gateway: gateway.map(str::to_string),
@@ -2019,7 +2174,7 @@ fn prompt_connector_connect_args(
     };
     for spec in connector_prompt_specs(is_models, target) {
         let existing = connector_existing_value(is_models, target, spec.kind, staged_env);
-        let value = prompt_connector_field(target, spec, existing.as_deref())?;
+        let value = prompt_connector_field(&target_label, spec, existing.as_deref())?;
         if let Some(value) = value {
             apply_setup_field(&mut args, spec.kind, value);
         }
@@ -2301,9 +2456,7 @@ fn connector_existing_value(
             &["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"]
         }
         (true, "github_models", SetupFieldKind::BaseUrl) => &["GITHUB_MODELS_CHAT_COMPLETIONS_URL"],
-        (true, "huggingface", SetupFieldKind::ApiKey) => {
-            &["HUGGINGFACE_API_KEY", "HF_TOKEN"]
-        }
+        (true, "huggingface", SetupFieldKind::ApiKey) => &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
         (true, "huggingface", SetupFieldKind::BaseUrl) => &["HUGGINGFACE_CHAT_COMPLETIONS_URL"],
         (true, "openrouter", SetupFieldKind::ApiKey) => &["OPENROUTER_API_KEY"],
         (true, "cloudflare_ai_gateway", SetupFieldKind::ApiKey) => {
@@ -2324,9 +2477,10 @@ fn connector_existing_value(
         (true, "vercel_ai_gateway", SetupFieldKind::ApiKey) => {
             &["VERCEL_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"]
         }
-        (true, "vercel_ai_gateway", SetupFieldKind::BaseUrl) => {
-            &["VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL", "VERCEL_AI_GATEWAY_BASE_URL"]
-        }
+        (true, "vercel_ai_gateway", SetupFieldKind::BaseUrl) => &[
+            "VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+            "VERCEL_AI_GATEWAY_BASE_URL",
+        ],
         (true, "vllm", SetupFieldKind::ApiKey) => &["VLLM_API_KEY"],
         (true, "vllm", SetupFieldKind::BaseUrl) => &["VLLM_BASE_URL"],
         (true, "mistral", SetupFieldKind::ApiKey) => &["MISTRAL_API_KEY"],
@@ -2517,7 +2671,11 @@ fn connector_targets_from_status(status: &Value, key: &str, field: &str) -> Vec<
         .collect()
 }
 
-fn parse_named_selection(input: &str, options: &[String]) -> anyhow::Result<Vec<String>> {
+fn parse_named_selection(
+    input: &str,
+    options: &[String],
+    is_models: bool,
+) -> anyhow::Result<Vec<String>> {
     let mut selected = Vec::new();
     let mut seen = BTreeSet::new();
     for raw in input.split(',') {
@@ -2531,7 +2689,7 @@ fn parse_named_selection(input: &str, options: &[String]) -> anyhow::Result<Vec<
                 .ok_or_else(|| anyhow!("selection index {index} is out of range"))?
                 .clone()
         } else {
-            let normalized = token.to_ascii_lowercase();
+            let normalized = normalize_connector_target(is_models, token);
             options
                 .iter()
                 .find(|option| option.eq_ignore_ascii_case(&normalized))
@@ -2543,6 +2701,112 @@ fn parse_named_selection(input: &str, options: &[String]) -> anyhow::Result<Vec<
         }
     }
     Ok(selected)
+}
+
+fn order_setup_targets(options: &[String], is_models: bool) -> Vec<String> {
+    let preferred: &[&str] = if is_models {
+        &[
+            "openai",
+            "anthropic",
+            "google",
+            "deepseek",
+            "qwen",
+            "zhipu",
+            "moonshot",
+            "doubao",
+        ]
+    } else {
+        &[
+            "telegram",
+            "signal",
+            "bluebubbles",
+            "feishu",
+            "dingtalk",
+            "wecom_bot",
+            "wechat_official_account",
+            "qq",
+        ]
+    };
+    let mut remaining = options.to_vec();
+    remaining.sort();
+    let mut ordered = Vec::new();
+    for preferred_target in preferred {
+        if let Some(index) = remaining
+            .iter()
+            .position(|option| option.eq_ignore_ascii_case(preferred_target))
+        {
+            ordered.push(remaining.remove(index));
+        }
+    }
+    ordered.extend(remaining);
+    ordered
+}
+
+fn connector_setup_label(is_models: bool, target: &str) -> String {
+    if is_models {
+        match target {
+            "openai" => "OpenAI".to_string(),
+            "anthropic" => "Anthropic Claude".to_string(),
+            "google" => "Google Gemini".to_string(),
+            "bedrock" => "AWS Bedrock".to_string(),
+            "github_models" => "GitHub Models".to_string(),
+            "huggingface" => "Hugging Face".to_string(),
+            "openrouter" => "OpenRouter".to_string(),
+            "cloudflare_ai_gateway" => "Cloudflare AI Gateway".to_string(),
+            "groq" => "Groq".to_string(),
+            "together" => "Together AI".to_string(),
+            "vercel_ai_gateway" => "Vercel AI Gateway".to_string(),
+            "vllm" => "vLLM".to_string(),
+            "mistral" => "Mistral".to_string(),
+            "nvidia" => "NVIDIA NIM".to_string(),
+            "litellm" => "LiteLLM".to_string(),
+            "deepseek" => "DeepSeek".to_string(),
+            "qwen" => "Qwen".to_string(),
+            "zhipu" => "Zhipu".to_string(),
+            "moonshot" => "Moonshot".to_string(),
+            "doubao" => "Doubao".to_string(),
+            "ollama" => "Ollama".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        match target {
+            "telegram" => "Telegram Bot".to_string(),
+            "slack" => "Slack".to_string(),
+            "discord" => "Discord".to_string(),
+            "mattermost" => "Mattermost".to_string(),
+            "msteams" => "Microsoft Teams".to_string(),
+            "whatsapp" => "WhatsApp".to_string(),
+            "line" => "LINE".to_string(),
+            "matrix" => "Matrix".to_string(),
+            "google_chat" => "Google Chat".to_string(),
+            "signal" => "Signal".to_string(),
+            "bluebubbles" => "BlueBubbles".to_string(),
+            "feishu" => "Feishu".to_string(),
+            "dingtalk" => "DingTalk".to_string(),
+            "wecom_bot" => "WeCom Bot".to_string(),
+            "wechat_official_account" => "WeChat Official Account".to_string(),
+            "qq" => "QQ Bot".to_string(),
+            other => other.to_string(),
+        }
+    }
+}
+
+fn connector_setup_option_label(is_models: bool, target: &str) -> String {
+    let label = connector_setup_label(is_models, target);
+    let hint = match (is_models, target) {
+        (true, "openai") | (true, "anthropic") | (true, "google") => "API key",
+        (true, "deepseek") | (true, "qwen") | (true, "zhipu") | (true, "moonshot") => "API key",
+        (true, "doubao") => "API key + endpoint ID",
+        (true, "vllm") | (true, "ollama") => "base URL",
+        (false, "telegram") => "bot token",
+        (false, "signal") => "account + server URL",
+        (false, "bluebubbles") => "server URL + password",
+        (false, "feishu") | (false, "dingtalk") | (false, "wecom_bot") => "webhook",
+        (false, "wechat_official_account") => "app id + app secret",
+        (false, "qq") => "app id + client secret",
+        _ => "connector credentials",
+    };
+    format!("{} ({}) [{}]", label, hint, target)
 }
 
 fn parse_index_selection(
@@ -2908,10 +3172,12 @@ async fn handle_channel_pairings(
                 for item in items {
                     println!(
                         "{}\t{}\t{}\t{}\t{}",
-                        string_at_path(item, &["platform"]).unwrap_or_else(|| "<unknown>".to_string()),
+                        string_at_path(item, &["platform"])
+                            .unwrap_or_else(|| "<unknown>".to_string()),
                         string_at_path(item, &["identityKey"])
                             .unwrap_or_else(|| "<unknown>".to_string()),
-                        string_at_path(item, &["status"]).unwrap_or_else(|| "<unknown>".to_string()),
+                        string_at_path(item, &["status"])
+                            .unwrap_or_else(|| "<unknown>".to_string()),
                         string_at_path(item, &["pairingCode"]).unwrap_or_else(|| "-".to_string()),
                         string_at_path(item, &["senderDisplay"])
                             .or_else(|| string_at_path(item, &["senderId"]))
@@ -2927,14 +3193,36 @@ async fn handle_channel_pairings(
             gateway,
             actor,
             reason,
-        } => decide_channel_pairing(profile, gateway, &platform, &identity_key, true, &actor, reason.as_deref()).await,
+        } => {
+            decide_channel_pairing(
+                profile,
+                gateway,
+                &platform,
+                &identity_key,
+                true,
+                &actor,
+                reason.as_deref(),
+            )
+            .await
+        }
         ChannelPairingCommand::Reject {
             platform,
             identity_key,
             gateway,
             actor,
             reason,
-        } => decide_channel_pairing(profile, gateway, &platform, &identity_key, false, &actor, reason.as_deref()).await,
+        } => {
+            decide_channel_pairing(
+                profile,
+                gateway,
+                &platform,
+                &identity_key,
+                false,
+                &actor,
+                reason.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -2952,9 +3240,7 @@ async fn decide_channel_pairing(
     let action = if approved { "approve" } else { "reject" };
     let response: Value = client
         .post_json(
-            &format!(
-                "/api/gateway/ingress/pairings/{target}/{identity_key}/{action}"
-            ),
+            &format!("/api/gateway/ingress/pairings/{target}/{identity_key}/{action}"),
             &json!({
                 "actor": actor,
                 "reason": reason,
@@ -2982,26 +3268,20 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                         .unwrap_or_else(|| "[]".to_string())
                 );
                 for platform in ["signal", "bluebubbles"] {
-                    let configured = value_at_path(
-                        &response,
-                        &[&format!("{platform}CallbackSecretConfigured")],
-                    )
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                    let configured =
+                        value_at_path(&response, &[&format!("{platform}CallbackSecretConfigured")])
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                     let policy = string_at_path(&response, &[&format!("{platform}DmPolicy")])
                         .unwrap_or_else(|| "open".to_string());
-                    let allowlist_count = value_at_path(
-                        &response,
-                        &[&format!("{platform}AllowlistCount")],
-                    )
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                    let pending_pairings = value_at_path(
-                        &response,
-                        &[&format!("{platform}PendingPairings")],
-                    )
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                    let allowlist_count =
+                        value_at_path(&response, &[&format!("{platform}AllowlistCount")])
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                    let pending_pairings =
+                        value_at_path(&response, &[&format!("{platform}PendingPairings")])
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
                     println!(
                         "{platform}\tsecret={configured}\tdmPolicy={policy}\tallowlist={allowlist_count}\tpendingPairings={pending_pairings}"
                     );
@@ -3292,12 +3572,20 @@ fn build_channel_send_request(
                 .as_deref()
                 .ok_or_else(|| anyhow!("telegram send requires --chat-id"))?;
             let text = require_channel_text(args, "telegram")?;
-            json!({
+            let mut payload = json!({
                 "chatId": chat_id,
                 "text": text,
-                "parseMode": args.parse_mode,
                 "disableNotification": args.disable_notification,
-            })
+            });
+            if let Some(parse_mode) = args
+                .parse_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                payload["parseMode"] = Value::String(parse_mode.to_string());
+            }
+            payload
         }
         "slack" | "discord" | "mattermost" | "msteams" | "google_chat" | "feishu" | "dingtalk"
         | "wecom_bot" => {
@@ -3343,13 +3631,25 @@ fn build_channel_send_request(
                 bail!("signal send does not support --typing or --mark-read");
             }
             let mut payload = json!({});
-            if let Some(chat_id) = args.chat_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(chat_id) = args
+                .chat_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["chatId"] = json!(chat_id);
             }
-            if let Some(account_key) = args.account_key.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(account_key) = args
+                .account_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["accountKey"] = json!(account_key);
             }
-            if let Some(text) = args.text.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(text) = args
+                .text
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["text"] = json!(text);
             }
             if let Some(attachment_name) = attachment_name {
@@ -3376,19 +3676,39 @@ fn build_channel_send_request(
             if let Some(receipt_type) = args.receipt_type.as_deref() {
                 payload["receiptType"] = json!(receipt_type);
             }
-            if let Some(group_action) = args.group_action.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(group_action) = args
+                .group_action
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["groupAction"] = json!(group_action);
             }
-            if let Some(group_id) = args.group_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(group_id) = args
+                .group_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["groupId"] = json!(group_id);
             }
-            if let Some(group_name) = args.group_name.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(group_name) = args
+                .group_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["groupName"] = json!(group_name);
             }
-            if let Some(group_description) = args.group_description.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(group_description) = args
+                .group_description
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["groupDescription"] = json!(group_description);
             }
-            if let Some(group_link_mode) = args.group_link_mode.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(group_link_mode) = args
+                .group_link_mode
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["groupLinkMode"] = json!(group_link_mode);
             }
             if !args.group_members.is_empty() {
@@ -3421,20 +3741,35 @@ fn build_channel_send_request(
                 && args.participant_action.is_none()
                 && args.participant_address.is_none()
                 && args.group_name.is_none()
-                && args.text.as_deref().is_none_or(|value| value.trim().is_empty())
+                && args
+                    .text
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
             {
                 bail!(
                     "bluebubbles send requires text or a native action such as attachment, reaction, typing, mark-read, mark-unread, edit, unsend, participant, or group rename"
                 );
             }
             let mut payload = json!({});
-            if let Some(chat_id) = args.chat_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(chat_id) = args
+                .chat_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["chatId"] = json!(chat_id);
             }
-            if let Some(account_key) = args.account_key.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(account_key) = args
+                .account_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["accountKey"] = json!(account_key);
             }
-            if let Some(text) = args.text.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(text) = args
+                .text
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["text"] = json!(text);
             }
             if let Some(attachment_name) = attachment_name {
@@ -3467,25 +3802,53 @@ fn build_channel_send_request(
             if let Some(part_index) = args.part_index {
                 payload["partIndex"] = json!(part_index);
             }
-            if let Some(effect_id) = args.effect_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(effect_id) = args
+                .effect_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["effectId"] = json!(effect_id);
             }
-            if let Some(edit_message_id) = args.edit_message_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(edit_message_id) = args
+                .edit_message_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["editMessageId"] = json!(edit_message_id);
             }
-            if let Some(edited_text) = args.edited_text.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(edited_text) = args
+                .edited_text
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["editedText"] = json!(edited_text);
             }
-            if let Some(unsend_message_id) = args.unsend_message_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(unsend_message_id) = args
+                .unsend_message_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["unsendMessageId"] = json!(unsend_message_id);
             }
-            if let Some(participant_action) = args.participant_action.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(participant_action) = args
+                .participant_action
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["participantAction"] = json!(participant_action);
             }
-            if let Some(participant_address) = args.participant_address.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(participant_address) = args
+                .participant_address
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["participantAddress"] = json!(participant_address);
             }
-            if let Some(group_name) = args.group_name.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(group_name) = args
+                .group_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 payload["groupName"] = json!(group_name);
             }
             payload
@@ -4909,6 +5272,7 @@ fn decision_past_tense(decision: &str) -> String {
 async fn handle_node(args: NodeArgs) -> anyhow::Result<()> {
     match args.command {
         NodeCommand::Claim(claim) => create_node_claim(claim).await,
+        NodeCommand::TrustSelf(args) => trust_self_node(args).await,
     }
 }
 
@@ -5028,6 +5392,51 @@ async fn create_node_claim(args: NodeClaimArgs) -> anyhow::Result<()> {
     println!("Session URL: {}", response.session_url);
     println!("Launch URL: {}", response.launch_url);
     println!("Profile saved: {}", path.display());
+    println!("Next: run `dawn-node node trust-self` so the gateway trusts this local node.");
+    Ok(())
+}
+
+async fn trust_self_node(args: NodeTrustSelfArgs) -> anyhow::Result<()> {
+    let profile = load_profile_or_default();
+    let gateway_base_url = resolve_gateway_base_url(args.gateway.as_deref(), &profile);
+    let client = GatewayClient::new(gateway_base_url)?;
+    let node_id = args
+        .node_id
+        .clone()
+        .or_else(|| profile.node_id.clone())
+        .unwrap_or_else(|| "node-local".to_string());
+    let (issuer_did, public_key_hex) = derive_local_node_trust_root(&node_id)?;
+    let actor = args
+        .actor
+        .or_else(|| profile.operator_name.clone())
+        .unwrap_or_else(|| default_operator_name(&profile));
+    let reason = args
+        .reason
+        .unwrap_or_else(|| format!("trust local CLI node {node_id}"));
+    let label = args
+        .label
+        .or_else(|| profile.node_name.clone())
+        .unwrap_or_else(|| format!("Local node {node_id}"));
+    let response: NodeTrustRootUpsertResponse = client
+        .post_json(
+            "/api/gateway/control-plane/nodes/trust-roots",
+            &NodeTrustRootUpsertRequest {
+                actor,
+                reason,
+                issuer_did,
+                label,
+                public_key_hex,
+            },
+        )
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!(
+            "Trusted local node issuer {} ({})",
+            response.trust_root.issuer_did, response.trust_root.label
+        );
+    }
     Ok(())
 }
 
@@ -5064,6 +5473,26 @@ async fn issue_node_claim(
             },
         )
         .await
+}
+
+fn derive_local_node_trust_root(node_id: &str) -> anyhow::Result<(String, String)> {
+    let signing_seed = resolve_local_node_signing_seed(node_id)?;
+    let signing_key = SigningKey::from_bytes(&signing_seed);
+    let public_key_hex = hex::encode(signing_key.verifying_key().as_bytes());
+    Ok((format!("did:dawn:node:{public_key_hex}"), public_key_hex))
+}
+
+fn resolve_local_node_signing_seed(node_id: &str) -> anyhow::Result<[u8; 32]> {
+    if let Ok(raw) = env::var("DAWN_NODE_SIGNING_SEED_HEX") {
+        let bytes =
+            hex::decode(raw.trim()).context("failed to decode DAWN_NODE_SIGNING_SEED_HEX")?;
+        return <[u8; 32]>::try_from(bytes.as_slice())
+            .context("DAWN_NODE_SIGNING_SEED_HEX must decode to 32 bytes");
+    }
+    let digest = sha2::Sha256::digest(format!("dawn-node:{node_id}").as_bytes());
+    let mut seed = [0_u8; 32];
+    seed.copy_from_slice(&digest[..32]);
+    Ok(seed)
 }
 
 async fn fetch_local_catalog(
@@ -5400,11 +5829,7 @@ fn connector_secret_pairs(
                         Some(base_or_url),
                     );
                 } else {
-                    insert_if_some(
-                        &mut pairs,
-                        "VERCEL_AI_GATEWAY_BASE_URL",
-                        Some(base_or_url),
-                    );
+                    insert_if_some(&mut pairs, "VERCEL_AI_GATEWAY_BASE_URL", Some(base_or_url));
                 }
             }
         }
@@ -5720,7 +6145,9 @@ fn normalize_dm_policy(value: Option<&str>) -> anyhow::Result<Option<String>> {
         "allowlist" | "allow_list" => "allowlist",
         "pairing" | "pair" => "pairing",
         "disabled" | "off" => "disabled",
-        other => bail!("unsupported dm policy `{other}`; expected open, allowlist, pairing, or disabled"),
+        other => {
+            bail!("unsupported dm policy `{other}`; expected open, allowlist, pairing, or disabled")
+        }
     };
     Ok(Some(normalized.to_string()))
 }
@@ -6026,11 +6453,12 @@ mod tests {
     use std::{env, fs};
 
     use super::{
-        ApprovalRequestSummary, PaymentRecordSummary, build_ap2_signature_payload,
+        ApprovalRequestSummary, ChannelSendArgs, PaymentRecordSummary, build_ap2_signature_payload,
         build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
-        default_requested_capabilities, extract_text_from_value, find_pending_approval_record,
-        format_payment_approval_summary, ingress_secret_pairs, normalize_connector_target,
-        normalize_ingress_target_name, resolve_ap2_mcu_seed_hex, sign_ap2_payload, update_values,
+        connector_setup_option_label, default_requested_capabilities, derive_local_node_trust_root,
+        extract_text_from_value, find_pending_approval_record, format_payment_approval_summary,
+        ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
+        parse_named_selection, resolve_ap2_mcu_seed_hex, sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
     use serde_json::json;
@@ -6234,6 +6662,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_named_selection_accepts_model_aliases() {
+        let selected = parse_named_selection(
+            "gemini, claude, 1",
+            &[
+                "openai".to_string(),
+                "anthropic".to_string(),
+                "google".to_string(),
+            ],
+            true,
+        )
+        .expect("aliases should resolve");
+        assert_eq!(selected, vec!["google", "anthropic", "openai"]);
+    }
+
+    #[test]
+    fn parse_named_selection_accepts_chat_aliases() {
+        let selected = parse_named_selection(
+            "telegram, google-chat, qq",
+            &[
+                "telegram".to_string(),
+                "google_chat".to_string(),
+                "qq".to_string(),
+            ],
+            false,
+        )
+        .expect("chat aliases should resolve");
+        assert_eq!(selected, vec!["telegram", "google_chat", "qq"]);
+    }
+
+    #[test]
+    fn setup_option_labels_show_friendly_provider_names() {
+        assert_eq!(
+            connector_setup_option_label(true, "google"),
+            "Google Gemini (API key) [google]"
+        );
+        assert_eq!(
+            connector_setup_option_label(false, "telegram"),
+            "Telegram Bot (bot token) [telegram]"
+        );
+    }
+
+    #[test]
     fn requested_capabilities_include_desktop_notification() {
         let capabilities = default_requested_capabilities(false);
         assert!(
@@ -6241,6 +6711,64 @@ mod tests {
                 .iter()
                 .any(|value| value == "desktop_notification")
         );
+    }
+
+    #[test]
+    fn telegram_channel_request_omits_parse_mode_when_not_provided() {
+        let args = ChannelSendArgs {
+            target: "telegram".to_string(),
+            text: Some("hello".to_string()),
+            gateway: None,
+            chat_id: Some("123".to_string()),
+            account_key: None,
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            mark_unread: false,
+            part_index: None,
+            effect_id: None,
+            edit_message_id: None,
+            edited_text: None,
+            unsend_message_id: None,
+            participant_action: None,
+            participant_address: None,
+            group_action: None,
+            group_id: None,
+            group_name: None,
+            group_description: None,
+            group_link_mode: None,
+            group_members: Vec::new(),
+            group_admins: Vec::new(),
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+
+        let (_, body) = build_channel_send_request("telegram", &args).unwrap();
+        assert_eq!(body["chatId"], "123");
+        assert!(body.get("parseMode").is_none());
+    }
+
+    #[test]
+    fn derives_stable_local_node_trust_root() {
+        let (issuer_did, public_key_hex) = derive_local_node_trust_root("node-local").unwrap();
+        assert!(issuer_did.starts_with("did:dawn:node:"));
+        assert_eq!(
+            issuer_did.strip_prefix("did:dawn:node:"),
+            Some(public_key_hex.as_str())
+        );
+        assert_eq!(public_key_hex.len(), 64);
     }
 
     #[test]
@@ -7053,11 +7581,15 @@ mod tests {
             Some("signal-secret")
         );
         assert_eq!(
-            signal_pairs.get("DAWN_SIGNAL_DM_POLICY").map(String::as_str),
+            signal_pairs
+                .get("DAWN_SIGNAL_DM_POLICY")
+                .map(String::as_str),
             Some("pairing")
         );
         assert_eq!(
-            signal_pairs.get("DAWN_SIGNAL_ALLOWLIST").map(String::as_str),
+            signal_pairs
+                .get("DAWN_SIGNAL_ALLOWLIST")
+                .map(String::as_str),
             Some("+15550001111,+15550002222")
         );
 
