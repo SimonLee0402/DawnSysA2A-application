@@ -452,6 +452,11 @@
               <div class="list" id="approval-list"></div>
             </div>
           </div>
+          <div style="margin-top: 18px;">
+            <h3 style="margin-bottom: 12px;">Pending Pairings</h3>
+            <div class="list" id="pairing-list"></div>
+            <div class="footer-note" id="pairing-footer">等待 Signal / BlueBubbles pairing 状态。</div>
+          </div>
           <div class="split" style="margin-top: 18px;">
             <div>
               <h3 style="margin-bottom: 12px;">Recent Tasks</h3>
@@ -499,6 +504,7 @@
       workspace: null,
       cards: [],
       approvals: [],
+      pairings: [],
       tasks: [],
       nodes: [],
       refreshTimer: null,
@@ -711,6 +717,32 @@
         : "当前主要是 node approvals";
     }
 
+    function renderPairings(pairings, ingressStatus) {
+      state.pairings = Array.isArray(pairings) ? pairings : [];
+      $("pairing-list").innerHTML = state.pairings.length
+        ? state.pairings.slice(0, 8).map((pairing) => `
+            <article class="list-card">
+              <strong>${escapeHtml(pairing.senderDisplay || pairing.senderId || pairing.identityKey)}</strong>
+              <div>${escapeHtml(pairing.platform)} · ${escapeHtml(pairing.identityKey)}</div>
+              <div class="list-meta">
+                <span class="badge warn">${escapeHtml(pairing.status || "pending")}</span>
+                <span>code ${escapeHtml(pairing.pairingCode || "-")}</span>
+                <span>${formatTime(pairing.updatedAtUnixMs)}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(pairing.decisionReason || "等待 operator 决策。")}</div>
+              <div class="inline-actions">
+                <button class="secondary" type="button" data-pairing-action="approve" data-pairing-platform="${escapeHtml(pairing.platform)}" data-pairing-id="${escapeHtml(pairing.identityKey)}">Approve</button>
+                <button class="secondary" type="button" data-pairing-action="reject" data-pairing-platform="${escapeHtml(pairing.platform)}" data-pairing-id="${escapeHtml(pairing.identityKey)}">Reject</button>
+              </div>
+            </article>
+          `).join("")
+        : `<div class="empty">当前没有 pending Signal / BlueBubbles pairings。</div>`;
+
+      const signalSummary = `signal=${escapeHtml(ingressStatus?.signalDmPolicy || "open")} · allowlist ${Number(ingressStatus?.signalAllowlistCount || 0)} · pending ${Number(ingressStatus?.signalPendingPairings || 0)}`;
+      const blueSummary = `bluebubbles=${escapeHtml(ingressStatus?.bluebubblesDmPolicy || "open")} · allowlist ${Number(ingressStatus?.bluebubblesAllowlistCount || 0)} · pending ${Number(ingressStatus?.bluebubblesPendingPairings || 0)}`;
+      $("pairing-footer").textContent = `${signalSummary} | ${blueSummary}`;
+    }
+
     function renderTasks(tasks) {
       state.tasks = Array.isArray(tasks) ? tasks : [];
       const liveCount = state.tasks.filter((task) => ["accepted", "queued", "running", "waiting_payment_authorization"].includes(task.status)).length;
@@ -838,6 +870,8 @@
         fetchJson("/api/gateway/connectors/status"),
         fetchJson("/api/a2a/tasks"),
         fetchJson("/api/gateway/approvals?status=pending"),
+        fetchJson("/api/gateway/ingress/pairings?status=pending"),
+        fetchJson("/api/gateway/ingress/status"),
         fetchJson("/api/gateway/control-plane/nodes"),
         fetchJsonFallback(["/api/gateway/agent-cards", "/api/gateway/agent-cards/"]),
         fetchJsonFallback(["/api/gateway/skills", "/api/gateway/skills/"]),
@@ -845,7 +879,7 @@
         fetchJson("/api/gateway/agent-cards/invocations")
       ]);
 
-      const [identityStatus, connectorStatus, tasks, approvals, nodes, cards, skills, ingress, invocations] = responses.map((item) =>
+      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations] = responses.map((item) =>
         item.status === "fulfilled" ? item.value : null
       );
 
@@ -857,6 +891,7 @@
       renderConnectorStatus(connectorStatus || {});
       renderTasks(tasks || []);
       renderApprovals(approvals || []);
+      renderPairings(pairings || [], ingressStatus || {});
       renderNodes(nodes || []);
       renderCards(cards || []);
       renderSkills(skills || []);
@@ -1009,6 +1044,22 @@
       }
     }
 
+    async function handlePairingAction(action, platform, identityKey) {
+      const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
+      const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} pairing reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
+      if (reason === null) return;
+      try {
+        await fetchJson(`/api/gateway/ingress/pairings/${encodeURIComponent(platform)}/${encodeURIComponent(identityKey)}/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actor, reason })
+        });
+        await refreshDashboard();
+      } catch (error) {
+        alert(`Pairing action failed: ${error.message}`);
+      }
+    }
+
     function bindInteractions() {
       $("bootstrap-form").addEventListener("submit", handleBootstrap);
       $("workspace-form").addEventListener("submit", handleWorkspaceSave);
@@ -1030,6 +1081,11 @@
         const target = event.target.closest("[data-approval-action]");
         if (!target) return;
         handleApprovalAction(target.dataset.approvalAction, target.dataset.approvalId);
+      });
+      $("pairing-list").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-pairing-action]");
+        if (!target) return;
+        handlePairingAction(target.dataset.pairingAction, target.dataset.pairingPlatform, target.dataset.pairingId);
       });
     }
 

@@ -28,7 +28,13 @@ struct ChatIngressStatusReport {
     supported_platforms: Vec<&'static str>,
     telegram_webhook_secret_configured: bool,
     signal_callback_secret_configured: bool,
+    signal_dm_policy: &'static str,
+    signal_allowlist_count: usize,
+    signal_pending_pairings: usize,
     bluebubbles_callback_secret_configured: bool,
+    bluebubbles_dm_policy: &'static str,
+    bluebubbles_allowlist_count: usize,
+    bluebubbles_pending_pairings: usize,
     dingtalk_callback_token_configured: bool,
     wecom_callback_token_configured: bool,
     wechat_official_account_token_configured: bool,
@@ -127,6 +133,23 @@ async fn status(
         .list_chat_ingress_events(None)
         .await
         .map_err(internal_error)?;
+    let signal_policy = chat_dm_policy_for_platform("signal");
+    let bluebubbles_policy = chat_dm_policy_for_platform("bluebubbles");
+    let signal_allowlist = allowlist_values_for_platform("signal");
+    let bluebubbles_allowlist = allowlist_values_for_platform("bluebubbles");
+    let signal_pending_pairings = state
+        .list_chat_channel_identities(Some("signal"), Some(ChatChannelIdentityStatus::Pending))
+        .await
+        .map_err(internal_error)?
+        .len();
+    let bluebubbles_pending_pairings = state
+        .list_chat_channel_identities(
+            Some("bluebubbles"),
+            Some(ChatChannelIdentityStatus::Pending),
+        )
+        .await
+        .map_err(internal_error)?
+        .len();
     let task_created_events = events
         .iter()
         .filter(|event| event.status == ChatIngressStatus::TaskCreated)
@@ -144,8 +167,14 @@ async fn status(
         ],
         telegram_webhook_secret_configured: std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET").is_ok(),
         signal_callback_secret_configured: std::env::var("DAWN_SIGNAL_CALLBACK_SECRET").is_ok(),
+        signal_dm_policy: chat_dm_policy_label(signal_policy),
+        signal_allowlist_count: signal_allowlist.len(),
+        signal_pending_pairings,
         bluebubbles_callback_secret_configured: std::env::var("DAWN_BLUEBUBBLES_CALLBACK_SECRET")
             .is_ok(),
+        bluebubbles_dm_policy: chat_dm_policy_label(bluebubbles_policy),
+        bluebubbles_allowlist_count: bluebubbles_allowlist.len(),
+        bluebubbles_pending_pairings,
         dingtalk_callback_token_configured: std::env::var("DAWN_DINGTALK_CALLBACK_TOKEN").is_ok(),
         wecom_callback_token_configured: std::env::var("DAWN_WECOM_CALLBACK_TOKEN").is_ok(),
         wechat_official_account_token_configured: std::env::var(
@@ -963,23 +992,10 @@ fn chat_dm_policy_label(policy: ChatDmPolicy) -> &'static str {
 }
 
 fn allowlist_contains(platform: &str, sender_id: Option<&str>, chat_id: Option<&str>) -> bool {
-    let env_keys: &[&str] = match platform {
-        "signal" => &["DAWN_SIGNAL_ALLOW_FROM", "DAWN_SIGNAL_ALLOWLIST"],
-        "bluebubbles" => &["DAWN_BLUEBUBBLES_ALLOW_FROM", "DAWN_BLUEBUBBLES_ALLOWLIST"],
-        _ => &[],
-    };
-    let allowlist = env_keys
-        .iter()
-        .find_map(|key| std::env::var(key).ok())
-        .unwrap_or_default();
-    if allowlist.trim().is_empty() {
+    let values = allowlist_values_for_platform(platform);
+    if values.is_empty() {
         return false;
     }
-    let values = allowlist
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
     sender_id
         .map(str::trim)
         .filter(|value| values.iter().any(|allowed| allowed.eq_ignore_ascii_case(value)))
@@ -988,6 +1004,23 @@ fn allowlist_contains(platform: &str, sender_id: Option<&str>, chat_id: Option<&
             .map(str::trim)
             .filter(|value| values.iter().any(|allowed| allowed.eq_ignore_ascii_case(value)))
             .is_some()
+}
+
+fn allowlist_values_for_platform(platform: &str) -> Vec<String> {
+    let env_keys: &[&str] = match platform {
+        "signal" => &["DAWN_SIGNAL_ALLOW_FROM", "DAWN_SIGNAL_ALLOWLIST"],
+        "bluebubbles" => &["DAWN_BLUEBUBBLES_ALLOW_FROM", "DAWN_BLUEBUBBLES_ALLOWLIST"],
+        _ => &[],
+    };
+    env_keys
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn normalize_ingress_instruction(text: &str) -> String {
@@ -1720,6 +1753,34 @@ mod tests {
 
         let events = state.list_chat_ingress_events(Some(10)).await?;
         assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingress_status_reports_pairing_policy_and_allowlist_counts() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_SIGNAL_DM_POLICY", Some("pairing")),
+            ("DAWN_SIGNAL_ALLOWLIST", Some("+15550001111,+15550002222")),
+            ("DAWN_BLUEBUBBLES_DM_POLICY", Some("allowlist")),
+            ("DAWN_BLUEBUBBLES_ALLOWLIST", Some("iMessage;+15550003333")),
+        ]);
+        let (base_url, handle, _state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("{base_url}/api/gateway/ingress/status"))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["signalDmPolicy"], "pairing");
+        assert_eq!(body["signalAllowlistCount"], 2);
+        assert_eq!(body["bluebubblesDmPolicy"], "allowlist");
+        assert_eq!(body["bluebubblesAllowlistCount"], 1);
 
         handle.abort();
         fs::remove_file(db_path).ok();

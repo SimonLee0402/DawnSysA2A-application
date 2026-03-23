@@ -326,8 +326,9 @@ Control Center:
 Control UI:
 
 - `GET /app` serves a user-facing workbench that is intentionally separate from `/console`.
-- the page focuses on the end-user flow: bootstrap an operator session token, review workspace defaults, inspect connector readiness, create A2A tasks, invoke remote agent cards, and watch nodes, approvals, tasks, ingress events, skills, and recent remote invocations from one screen.
-- the workbench reuses the existing API surface rather than introducing a parallel frontend backend: `/api/gateway/identity/status`, `/api/gateway/connectors/status`, `/api/a2a/tasks`, `/api/gateway/approvals`, `/api/gateway/control-plane/nodes`, `/api/gateway/agent-cards`, `/api/gateway/skills`, `/api/gateway/ingress/events`, and `/api/gateway/agent-cards/invocations`.
+- the page focuses on the end-user flow: bootstrap an operator session token, review workspace defaults, inspect connector readiness, create A2A tasks, invoke remote agent cards, and watch nodes, approvals, tasks, ingress events, pending Signal/BlueBubbles pairings, skills, and recent remote invocations from one screen.
+- the workbench now includes a `Pending Pairings` board backed by `/api/gateway/ingress/pairings?status=pending` and `/api/gateway/ingress/status`, so a local operator can approve or reject Signal/BlueBubbles inbound chats without leaving `/app`.
+- the workbench reuses the existing API surface rather than introducing a parallel frontend backend: `/api/gateway/identity/status`, `/api/gateway/connectors/status`, `/api/a2a/tasks`, `/api/gateway/approvals`, `/api/gateway/control-plane/nodes`, `/api/gateway/agent-cards`, `/api/gateway/skills`, `/api/gateway/ingress/events`, `/api/gateway/ingress/pairings`, `/api/gateway/ingress/status`, and `/api/gateway/agent-cards/invocations`.
 - the page also subscribes to `/console/events` over SSE for lightweight refresh triggers, but it does not embed operator-only approval controls or replace the existing `/console` operations deck.
 
 Approval Center:
@@ -361,6 +362,8 @@ Identity And Onboarding:
 - `POST /api/gateway/identity/node-claims/{claim_id}/reissue`
 - the desktop CLI now exposes a top-level `dawn-node setup` flow that bootstraps an operator session, lets the user choose default model providers and chat platforms, stages connector secrets locally, installs selected skills, and optionally issues a first local node claim in one pass
 - the desktop CLI now also exposes `dawn-node channels pairings list|approve|reject`, so Signal and BlueBubbles inbound pairing decisions can be resolved from the local workstation without dropping into raw HTTP calls
+- the desktop CLI now also exposes `dawn-node ingress status`, which prints ingress callback readiness together with Signal/BlueBubbles DM policy, allowlist counts, and pending-pairing counts
+- `dawn-node ingress connect signal|bluebubbles` now accepts `--dm-policy open|allowlist|pairing|disabled` and repeated `--allow-from` values so inbound chat policy can be staged from the local workstation instead of editing environment variables by hand
 - `GET /api/gateway/identity/status` now also returns a durable readiness summary with `completionPercent`, `nextStep`, per-surface checklist items, and counts for sessions, nodes, default connectors, ingress, and end-user approval backlog
 - the control-center `Setup Navigator` and `Identity & Onboarding` panels now consume that readiness payload so the operator sees concrete onboarding gaps instead of only raw forms
 - `POST /api/gateway/identity/setup-verifications` records a persistent verification receipt for one setup target (`model`, `chat`, or `ingress`) and captures the operator, endpoint, env-key gap, and whether the target belongs to the current workspace default path

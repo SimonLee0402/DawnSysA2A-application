@@ -214,6 +214,12 @@ struct IngressArgs {
 #[derive(Subcommand)]
 enum IngressCommand {
     Connect(IngressConnectArgs),
+    Status {
+        #[arg(long)]
+        gateway: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Verify {
         target: String,
         #[arg(long)]
@@ -230,6 +236,10 @@ struct IngressConnectArgs {
     secret: Option<String>,
     #[arg(long)]
     token: Option<String>,
+    #[arg(long)]
+    dm_policy: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    allow_from: Vec<String>,
     #[arg(long)]
     env: Vec<String>,
 }
@@ -2690,6 +2700,46 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
     let profile = load_profile_or_default();
     match args.command {
         IngressCommand::Connect(args) => connect_ingress_target(profile, args),
+        IngressCommand::Status { gateway, json } => {
+            let client =
+                GatewayClient::new(resolve_gateway_base_url(gateway.as_deref(), &profile))?;
+            let response: Value = client.get_json("/api/gateway/ingress/status").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!(
+                    "supported={}",
+                    string_at_path(&response, &["supportedPlatforms"])
+                        .unwrap_or_else(|| "[]".to_string())
+                );
+                for platform in ["signal", "bluebubbles"] {
+                    let configured = value_at_path(
+                        &response,
+                        &[&format!("{platform}CallbackSecretConfigured")],
+                    )
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                    let policy = string_at_path(&response, &[&format!("{platform}DmPolicy")])
+                        .unwrap_or_else(|| "open".to_string());
+                    let allowlist_count = value_at_path(
+                        &response,
+                        &[&format!("{platform}AllowlistCount")],
+                    )
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                    let pending_pairings = value_at_path(
+                        &response,
+                        &[&format!("{platform}PendingPairings")],
+                    )
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                    println!(
+                        "{platform}\tsecret={configured}\tdmPolicy={policy}\tallowlist={allowlist_count}\tpendingPairings={pending_pairings}"
+                    );
+                }
+            }
+            Ok(())
+        }
         IngressCommand::Verify { target, gateway } => {
             let session_token = require_session_token(&profile)?;
             let client =
@@ -5058,16 +5108,40 @@ fn ingress_secret_pairs(
             "DAWN_TELEGRAM_WEBHOOK_SECRET",
             args.secret.as_deref(),
         ),
-        "signal" => insert_if_some(
-            &mut pairs,
-            "DAWN_SIGNAL_CALLBACK_SECRET",
-            args.secret.as_deref(),
-        ),
-        "bluebubbles" => insert_if_some(
-            &mut pairs,
-            "DAWN_BLUEBUBBLES_CALLBACK_SECRET",
-            args.secret.as_deref(),
-        ),
+        "signal" => {
+            insert_if_some(
+                &mut pairs,
+                "DAWN_SIGNAL_CALLBACK_SECRET",
+                args.secret.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "DAWN_SIGNAL_DM_POLICY",
+                normalize_dm_policy(args.dm_policy.as_deref())?.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "DAWN_SIGNAL_ALLOWLIST",
+                join_allowlist_values(&args.allow_from).as_deref(),
+            );
+        }
+        "bluebubbles" => {
+            insert_if_some(
+                &mut pairs,
+                "DAWN_BLUEBUBBLES_CALLBACK_SECRET",
+                args.secret.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "DAWN_BLUEBUBBLES_DM_POLICY",
+                normalize_dm_policy(args.dm_policy.as_deref())?.as_deref(),
+            );
+            insert_if_some(
+                &mut pairs,
+                "DAWN_BLUEBUBBLES_ALLOWLIST",
+                join_allowlist_values(&args.allow_from).as_deref(),
+            );
+        }
         "feishu" => {}
         "dingtalk" => insert_if_some(
             &mut pairs,
@@ -5100,6 +5174,35 @@ fn normalize_ingress_target_name(target: &str) -> String {
         "signal-cli" | "signal_cli" | "signal-messenger" => "signal".to_string(),
         "blue-bubbles" | "blue_bubbles" => "bluebubbles".to_string(),
         other => other.to_string(),
+    }
+}
+
+fn normalize_dm_policy(value: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let normalized = match value.to_ascii_lowercase().as_str() {
+        "open" => "open",
+        "allowlist" | "allow_list" => "allowlist",
+        "pairing" | "pair" => "pairing",
+        "disabled" | "off" => "disabled",
+        other => bail!("unsupported dm policy `{other}`; expected open, allowlist, pairing, or disabled"),
+    };
+    Ok(Some(normalized.to_string()))
+}
+
+fn join_allowlist_values(values: &[String]) -> Option<String> {
+    let joined = values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
     }
 }
 
@@ -6110,6 +6213,8 @@ mod tests {
             gateway: None,
             secret: Some("signal-secret".to_string()),
             token: None,
+            dm_policy: Some("pair".to_string()),
+            allow_from: vec!["+15550001111".to_string(), "+15550002222".to_string()],
             env: Vec::new(),
         };
         let signal_pairs =
@@ -6120,12 +6225,22 @@ mod tests {
                 .map(String::as_str),
             Some("signal-secret")
         );
+        assert_eq!(
+            signal_pairs.get("DAWN_SIGNAL_DM_POLICY").map(String::as_str),
+            Some("pairing")
+        );
+        assert_eq!(
+            signal_pairs.get("DAWN_SIGNAL_ALLOWLIST").map(String::as_str),
+            Some("+15550001111,+15550002222")
+        );
 
         let bluebubbles_args = super::IngressConnectArgs {
             target: "blue-bubbles".to_string(),
             gateway: None,
             secret: Some("blue-secret".to_string()),
             token: None,
+            dm_policy: Some("allow_list".to_string()),
+            allow_from: vec!["iMessage;+15550003333,+15550004444".to_string()],
             env: Vec::new(),
         };
         let bluebubbles_pairs = ingress_secret_pairs("bluebubbles", &bluebubbles_args)
@@ -6136,11 +6251,40 @@ mod tests {
                 .map(String::as_str),
             Some("blue-secret")
         );
+        assert_eq!(
+            bluebubbles_pairs
+                .get("DAWN_BLUEBUBBLES_DM_POLICY")
+                .map(String::as_str),
+            Some("allowlist")
+        );
+        assert_eq!(
+            bluebubbles_pairs
+                .get("DAWN_BLUEBUBBLES_ALLOWLIST")
+                .map(String::as_str),
+            Some("iMessage;+15550003333,+15550004444")
+        );
     }
 
     #[test]
     fn normalizes_ingress_aliases_for_new_targets() {
         assert_eq!(normalize_ingress_target_name("signal-cli"), "signal");
         assert_eq!(normalize_ingress_target_name("blue-bubbles"), "bluebubbles");
+    }
+
+    #[test]
+    fn normalizes_ingress_dm_policy_aliases() {
+        assert_eq!(
+            super::normalize_dm_policy(Some("pair")).expect("pair policy"),
+            Some("pairing".to_string())
+        );
+        assert_eq!(
+            super::normalize_dm_policy(Some("allow_list")).expect("allowlist policy"),
+            Some("allowlist".to_string())
+        );
+        assert_eq!(
+            super::normalize_dm_policy(Some("off")).expect("disabled policy"),
+            Some("disabled".to_string())
+        );
+        assert!(super::normalize_dm_policy(Some("unknown")).is_err());
     }
 }
