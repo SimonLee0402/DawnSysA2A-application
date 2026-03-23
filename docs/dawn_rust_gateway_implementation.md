@@ -360,7 +360,9 @@ Identity And Onboarding:
 - `POST /api/gateway/identity/node-claims`
 - `POST /api/gateway/identity/node-claims/{claim_id}/revoke`
 - `POST /api/gateway/identity/node-claims/{claim_id}/reissue`
+- the primary desktop onboarding entry is now `dawn-node login`, which defaults to the full guided setup flow instead of only storing a session token; `--session-only` keeps the older one-step bootstrap behavior, while `--model`, `--channel`, `--skill`, and `--env` allow the same flow to be scripted
 - the desktop CLI now exposes a top-level `dawn-node setup` flow that bootstraps an operator session, lets the user choose default model providers and chat platforms, stages connector secrets locally, installs selected skills, and optionally issues a first local node claim in one pass
+- guided setup now defaults to a simpler OpenClaw-style path: it auto-suggests workspace identity values, avoids prompting for tenant/project/region unless `--advanced` is used, and a first interactive `dawn-node` run will auto-launch setup when no local CLI session is present
 - the desktop CLI now also exposes `dawn-node channels pairings list|approve|reject`, so Signal and BlueBubbles inbound pairing decisions can be resolved from the local workstation without dropping into raw HTTP calls
 - the desktop CLI now also exposes `dawn-node ingress status`, which prints ingress callback readiness together with Signal/BlueBubbles DM policy, allowlist counts, and pending-pairing counts
 - `dawn-node ingress connect signal|bluebubbles` now accepts `--dm-policy open|allowlist|pairing|disabled` and repeated `--allow-from` values so inbound chat policy can be staged from the local workstation instead of editing environment variables by hand

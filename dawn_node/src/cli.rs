@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -20,6 +20,13 @@ pub enum CliOutcome {
     Exit,
     RunNode,
 }
+
+const DEFAULT_BOOTSTRAP_TOKEN: &str = "dawn-dev-bootstrap";
+const DEFAULT_OPERATOR_NAME: &str = "desktop-operator";
+const DEFAULT_REGION: &str = "global";
+const DEFAULT_WORKSPACE_DISPLAY_NAME: &str = "Dawn Agent Commerce";
+const DEFAULT_WORKSPACE_TENANT_ID: &str = "dawn-labs";
+const DEFAULT_WORKSPACE_PROJECT_ID: &str = "agent-commerce";
 
 #[derive(Parser)]
 #[command(
@@ -63,10 +70,32 @@ enum Commands {
 struct LoginArgs {
     #[arg(long)]
     gateway: Option<String>,
-    #[arg(long, default_value = "dawn-dev-bootstrap")]
+    #[arg(long, default_value = DEFAULT_BOOTSTRAP_TOKEN)]
     bootstrap_token: String,
-    #[arg(long, default_value = "desktop-operator")]
-    operator_name: String,
+    #[arg(long)]
+    operator_name: Option<String>,
+    #[arg(long)]
+    model: Vec<String>,
+    #[arg(long)]
+    channel: Vec<String>,
+    #[arg(long)]
+    skill: Vec<String>,
+    #[arg(long)]
+    federated_skills: bool,
+    #[arg(long)]
+    allow_unsigned_skills: bool,
+    #[arg(long)]
+    allow_shell: bool,
+    #[arg(long)]
+    no_claim: bool,
+    #[arg(long)]
+    session_only: bool,
+    #[arg(long)]
+    yes: bool,
+    #[arg(long)]
+    advanced: bool,
+    #[arg(long)]
+    env: Vec<String>,
 }
 
 #[derive(Args)]
@@ -103,7 +132,7 @@ struct OnboardArgs {
 struct SetupArgs {
     #[arg(long)]
     gateway: Option<String>,
-    #[arg(long, default_value = "dawn-dev-bootstrap")]
+    #[arg(long, default_value = DEFAULT_BOOTSTRAP_TOKEN)]
     bootstrap_token: String,
     #[arg(long)]
     operator_name: Option<String>,
@@ -131,6 +160,8 @@ struct SetupArgs {
     no_claim: bool,
     #[arg(long)]
     yes: bool,
+    #[arg(long)]
+    advanced: bool,
     #[arg(long)]
     env: Vec<String>,
 }
@@ -1108,6 +1139,32 @@ struct NodeClaimRecord {
 pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
     let cli = DawnCli::parse();
     let Some(command) = cli.command else {
+        let profile = load_profile_or_default();
+        if should_auto_launch_setup(&profile) && io::stdin().is_terminal() && io::stdout().is_terminal()
+        {
+            println!("No Dawn CLI login found. Starting guided setup...");
+            setup(SetupArgs {
+                gateway: None,
+                bootstrap_token: DEFAULT_BOOTSTRAP_TOKEN.to_string(),
+                operator_name: None,
+                display_name: None,
+                tenant_id: None,
+                project_id: None,
+                region: None,
+                model: Vec::new(),
+                channel: Vec::new(),
+                skill: Vec::new(),
+                federated_skills: false,
+                allow_unsigned_skills: false,
+                allow_shell: false,
+                no_claim: false,
+                yes: false,
+                advanced: false,
+                env: Vec::new(),
+            })
+            .await?;
+            return Ok(CliOutcome::Exit);
+        }
         return Ok(CliOutcome::RunNode);
     };
 
@@ -1201,10 +1258,40 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
 }
 
 async fn login(args: LoginArgs) -> anyhow::Result<()> {
+    if !args.session_only {
+        return setup(SetupArgs {
+            gateway: args.gateway,
+            bootstrap_token: args.bootstrap_token,
+            operator_name: args.operator_name,
+            display_name: None,
+            tenant_id: None,
+            project_id: None,
+            region: None,
+            model: args.model,
+            channel: args.channel,
+            skill: args.skill,
+            federated_skills: args.federated_skills,
+            allow_unsigned_skills: args.allow_unsigned_skills,
+            allow_shell: args.allow_shell,
+            no_claim: args.no_claim,
+            yes: args.yes,
+            advanced: args.advanced,
+            env: args.env,
+        })
+        .await;
+    }
     let mut profile = load_profile_or_default();
     let gateway_base_url = resolve_gateway_base_url(args.gateway.as_deref(), &profile);
     let client = GatewayClient::new(gateway_base_url.clone())?;
-    let response = bootstrap_session(&client, &args.bootstrap_token, &args.operator_name).await?;
+    let interactive = !args.yes;
+    let operator_default = default_operator_name(&profile);
+    let operator_name = prompt_setup_text(
+        "Operator name",
+        args.operator_name.as_deref(),
+        Some(operator_default.as_str()),
+        interactive,
+    )?;
+    let response = bootstrap_session(&client, &args.bootstrap_token, &operator_name).await?;
 
     profile.gateway_base_url = Some(gateway_base_url.clone());
     profile.session_token = Some(response.session_token);
@@ -1216,6 +1303,7 @@ async fn login(args: LoginArgs) -> anyhow::Result<()> {
     println!("Operator: {}", response.session.operator_name);
     println!("Bootstrap mode: {}", response.bootstrap_mode);
     println!("Profile saved: {}", path.display());
+    println!("Next: run `dawn-node login` for the full guided setup or `dawn-node setup --advanced`.");
     Ok(())
 }
 
@@ -1319,11 +1407,16 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         profile.connector_env.insert(key, value);
     }
 
+    if interactive {
+        println!("Dawn CLI guided setup");
+        println!("This flow will log you in, choose an AI model, choose a chat app, and optionally install skills and claim a local node.");
+        println!();
+    }
     let default_operator = args
         .operator_name
         .clone()
         .or_else(|| profile.operator_name.clone())
-        .unwrap_or_else(|| "desktop-operator".to_string());
+        .unwrap_or_else(|| default_operator_name(&profile));
     let operator_name = prompt_setup_text(
         "Operator name",
         args.operator_name.as_deref(),
@@ -1345,11 +1438,10 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     let supported_channels =
         connector_targets_from_status(&connectors_status, "supportedChatPlatforms", "platform");
 
-    println!("Bootstrapped operator session against {gateway_base_url}");
-    println!("Current workspace: {}", workspace.display_name);
+    println!("Logged in to {gateway_base_url} as {}", response.session.operator_name);
 
     let selected_models = choose_setup_targets(
-        "Default model providers",
+        "AI models",
         &args.model,
         &supported_models,
         &workspace.default_model_providers,
@@ -1357,7 +1449,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         interactive,
     )?;
     let selected_channels = choose_setup_targets(
-        "Default chat platforms",
+        "Chat apps",
         &args.channel,
         &supported_channels,
         &workspace.default_chat_platforms,
@@ -1387,30 +1479,60 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    let display_name = prompt_setup_text(
-        "Workspace display name",
-        args.display_name.as_deref(),
-        Some(workspace.display_name.as_str()),
-        interactive,
-    )?;
-    let tenant_id = prompt_setup_text(
-        "Tenant ID",
-        args.tenant_id.as_deref(),
-        Some(workspace.tenant_id.as_str()),
-        interactive,
-    )?;
-    let project_id = prompt_setup_text(
-        "Project ID",
-        args.project_id.as_deref(),
-        Some(workspace.project_id.as_str()),
-        interactive,
-    )?;
-    let region = prompt_setup_text(
-        "Region",
-        args.region.as_deref(),
-        Some(workspace.region.as_str()),
-        interactive,
-    )?;
+    let workspace_defaults = suggest_setup_workspace_identity(&workspace, &response.session.operator_name);
+    let advanced_identity = args.advanced
+        || args.display_name.is_some()
+        || args.tenant_id.is_some()
+        || args.project_id.is_some()
+        || args.region.is_some();
+    let (display_name, tenant_id, project_id, region) = if advanced_identity {
+        (
+            prompt_setup_text(
+                "Workspace display name",
+                args.display_name.as_deref(),
+                Some(workspace_defaults.display_name.as_str()),
+                interactive,
+            )?,
+            prompt_setup_text(
+                "Tenant ID",
+                args.tenant_id.as_deref(),
+                Some(workspace_defaults.tenant_id.as_str()),
+                interactive,
+            )?,
+            prompt_setup_text(
+                "Project ID",
+                args.project_id.as_deref(),
+                Some(workspace_defaults.project_id.as_str()),
+                interactive,
+            )?,
+            prompt_setup_text(
+                "Region",
+                args.region.as_deref(),
+                Some(workspace_defaults.region.as_str()),
+                interactive,
+            )?,
+        )
+    } else {
+        let display_name = args
+            .display_name
+            .clone()
+            .unwrap_or(workspace_defaults.display_name.clone());
+        let tenant_id = args
+            .tenant_id
+            .clone()
+            .unwrap_or(workspace_defaults.tenant_id.clone());
+        let project_id = args
+            .project_id
+            .clone()
+            .unwrap_or(workspace_defaults.project_id.clone());
+        let region = args.region.clone().unwrap_or(workspace_defaults.region.clone());
+        println!(
+            "Using workspace identity: {} [{}] tenant={} project={}",
+            display_name, region, tenant_id, project_id
+        );
+        println!("Use `dawn-node setup --advanced` if you want to edit these fields manually.");
+        (display_name, tenant_id, project_id, region)
+    };
 
     let updated_workspace = upsert_workspace(
         &client,
@@ -1507,6 +1629,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
 
     let path = save_profile(&profile)?;
     println!("Setup complete.");
+    println!("Operator login: ready");
     println!(
         "Workspace defaults: models = {}; channels = {}",
         updated_workspace.default_model_providers.join(", "),
@@ -1520,6 +1643,96 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     println!("Profile saved: {}", path.display());
     println!("Next: run `dawn-node gateway start` or `dawn-node run`.");
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SetupWorkspaceIdentity {
+    display_name: String,
+    tenant_id: String,
+    project_id: String,
+    region: String,
+}
+
+fn should_auto_launch_setup(profile: &DawnCliProfile) -> bool {
+    profile.session_token.is_none()
+}
+
+fn default_operator_name(profile: &DawnCliProfile) -> String {
+    profile
+        .operator_name
+        .clone()
+        .or_else(|| {
+            env::var("USERNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| env::var("USER").ok().filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| DEFAULT_OPERATOR_NAME.to_string())
+}
+
+fn suggest_setup_workspace_identity(
+    workspace: &WorkspaceProfileRecord,
+    operator_name: &str,
+) -> SetupWorkspaceIdentity {
+    let operator_slug = slugify_setup_identifier(operator_name, "desktop");
+    let host_slug = env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| env::var("HOSTNAME").ok())
+        .map(|value| slugify_setup_identifier(&value, "desktop"))
+        .unwrap_or_else(|| "desktop".to_string());
+    SetupWorkspaceIdentity {
+        display_name: preferred_setup_value(
+            &workspace.display_name,
+            DEFAULT_WORKSPACE_DISPLAY_NAME,
+            format!("{operator_name} workspace"),
+        ),
+        tenant_id: preferred_setup_value(
+            &workspace.tenant_id,
+            DEFAULT_WORKSPACE_TENANT_ID,
+            operator_slug,
+        ),
+        project_id: preferred_setup_value(
+            &workspace.project_id,
+            DEFAULT_WORKSPACE_PROJECT_ID,
+            format!("{host_slug}-desktop"),
+        ),
+        region: if workspace.region.trim().is_empty() {
+            DEFAULT_REGION.to_string()
+        } else {
+            workspace.region.clone()
+        },
+    }
+}
+
+fn preferred_setup_value(current: &str, placeholder: &str, fallback: String) -> String {
+    let trimmed = current.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(placeholder) {
+        fallback
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn slugify_setup_identifier(value: &str, fallback: &str) -> String {
+    let slug = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        fallback.to_string()
+    } else {
+        slug
+    }
 }
 
 fn prompt_setup_text(
@@ -2477,6 +2690,9 @@ fn print_local_status() -> anyhow::Result<()> {
             "<none>"
         }
     );
+    if profile.session_token.is_none() {
+        println!("Tip: run `dawn-node login` to start the guided CLI onboarding flow.");
+    }
     Ok(())
 }
 
@@ -6286,5 +6502,51 @@ mod tests {
             Some("disabled".to_string())
         );
         assert!(super::normalize_dm_policy(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn suggests_easy_workspace_identity_from_placeholder_defaults() {
+        let workspace = super::WorkspaceProfileRecord {
+            tenant_id: super::DEFAULT_WORKSPACE_TENANT_ID.to_string(),
+            project_id: super::DEFAULT_WORKSPACE_PROJECT_ID.to_string(),
+            display_name: super::DEFAULT_WORKSPACE_DISPLAY_NAME.to_string(),
+            region: super::DEFAULT_REGION.to_string(),
+            default_model_providers: vec![],
+            default_chat_platforms: vec![],
+            onboarding_status: "bootstrap_pending".to_string(),
+        };
+        let suggested = super::suggest_setup_workspace_identity(&workspace, "Lenovo");
+        assert_eq!(suggested.display_name, "Lenovo workspace");
+        assert_eq!(suggested.tenant_id, "lenovo");
+        assert_eq!(suggested.region, super::DEFAULT_REGION);
+        assert!(suggested.project_id.ends_with("-desktop"));
+    }
+
+    #[test]
+    fn preserves_existing_workspace_identity_when_not_placeholder() {
+        let workspace = super::WorkspaceProfileRecord {
+            tenant_id: "team-alpha".to_string(),
+            project_id: "ops-hub".to_string(),
+            display_name: "Alpha Ops".to_string(),
+            region: "china".to_string(),
+            default_model_providers: vec![],
+            default_chat_platforms: vec![],
+            onboarding_status: "configured".to_string(),
+        };
+        let suggested = super::suggest_setup_workspace_identity(&workspace, "Lenovo");
+        assert_eq!(suggested.display_name, "Alpha Ops");
+        assert_eq!(suggested.tenant_id, "team-alpha");
+        assert_eq!(suggested.project_id, "ops-hub");
+        assert_eq!(suggested.region, "china");
+    }
+
+    #[test]
+    fn auto_launches_setup_when_profile_has_no_session() {
+        assert!(super::should_auto_launch_setup(&DawnCliProfile::default()));
+        let profile = DawnCliProfile {
+            session_token: Some("session-123".to_string()),
+            ..DawnCliProfile::default()
+        };
+        assert!(!super::should_auto_launch_setup(&profile));
     }
 }
