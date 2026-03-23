@@ -624,6 +624,7 @@ async fn node_session(
             "Failed to persist disconnected node state for {node_id}"
         );
     }
+    requeue_dispatched_commands_for_node(&state, &node_id).await;
     info!("Node session disconnected: {}", node_id);
 }
 
@@ -709,6 +710,37 @@ async fn enqueue_command_for_dispatch(state: &Arc<AppState>, command: &NodeComma
         return false;
     }
     dispatch_command_to_live_session(state, command).await
+}
+
+async fn requeue_dispatched_commands_for_node(state: &Arc<AppState>, node_id: &str) {
+    let commands = match state.list_node_commands(Some(node_id)).await {
+        Ok(commands) => commands,
+        Err(error) => {
+            error!(?error, "Failed to list node commands for reconnect recovery on {node_id}");
+            return;
+        }
+    };
+
+    for command in commands
+        .into_iter()
+        .filter(|command| command.status == NodeCommandStatus::Dispatched)
+    {
+        if let Err(error) = state
+            .update_node_command(
+                command.command_id,
+                NodeCommandStatus::Queued,
+                None,
+                Some("node session disconnected before command completion; queued for retry".into()),
+            )
+            .await
+        {
+            error!(
+                ?error,
+                "Failed to requeue in-flight command {} for {node_id}",
+                command.command_id
+            );
+        }
+    }
 }
 
 async fn dispatch_command_to_live_session(

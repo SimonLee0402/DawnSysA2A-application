@@ -23,6 +23,7 @@ use crate::{
     },
     connectors::{self, ChatDispatchRequest, OpenAIResponseRequest},
     identity,
+    skill_registry,
 };
 
 #[derive(Debug, Serialize)]
@@ -85,6 +86,33 @@ struct TelegramGetUpdatesResponse {
     ok: bool,
     #[serde(default)]
     result: Vec<TelegramUpdate>,
+}
+
+#[derive(Debug, Serialize)]
+struct TelegramBotCommand {
+    command: &'static str,
+    description: &'static str,
+}
+
+enum IngressCommandResult {
+    Reply(String),
+    Task {
+        instruction: String,
+        task_name: String,
+    },
+}
+
+enum IngressCommand {
+    Help,
+    New,
+    Skills { query: Option<String> },
+    Skill { selector: String },
+    Model,
+    Status,
+    Task(String),
+    Orchestrate(String),
+    Wasm(String),
+    Unknown(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -851,7 +879,28 @@ async fn ingest_message(
         }
     }
 
-    if should_attempt_default_model_reply(&record.text) {
+    let command_task = if let Some(command) = parse_ingress_command(&record.text) {
+        match execute_ingress_command(state.clone(), platform, &record, command).await? {
+            IngressCommandResult::Reply(reply) => {
+                let _ =
+                    dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                        .await;
+                record.reply_text = Some(reply);
+                record.status = ChatIngressStatus::Replied;
+                record.updated_at_unix_ms = unix_timestamp_ms();
+                state.upsert_chat_ingress_event(record.clone()).await?;
+                return Ok(record);
+            }
+            IngressCommandResult::Task {
+                instruction,
+                task_name,
+            } => Some((instruction, task_name)),
+        }
+    } else {
+        None
+    };
+
+    if command_task.is_none() && should_attempt_default_model_reply(&record.text) {
         match try_default_model_reply(state.clone(), platform, &record.text).await {
             Ok(Some(reply)) => {
                 let _ =
@@ -880,16 +929,20 @@ async fn ingest_message(
         }
     }
 
-    let task_name = format!(
-        "{} inbound {}",
-        platform,
-        record
-            .sender_display
-            .clone()
-            .or(record.sender_id.clone())
-            .unwrap_or_else(|| "message".to_string())
-    );
-    let instruction = normalize_ingress_instruction(&record.text);
+    let (instruction, task_name) = command_task.unwrap_or_else(|| {
+        (
+            normalize_ingress_instruction(&record.text),
+            format!(
+                "{} inbound {}",
+                platform,
+                record
+                    .sender_display
+                    .clone()
+                    .or(record.sender_id.clone())
+                    .unwrap_or_else(|| "message".to_string())
+            ),
+        )
+    });
 
     match a2a::submit_task(
         state.clone(),
@@ -1169,6 +1222,308 @@ fn normalize_ingress_instruction(text: &str) -> String {
         return value.trim().to_string();
     }
     trimmed.to_string()
+}
+
+fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('/') {
+        return None;
+    }
+    if trimmed == "/" {
+        return Some(IngressCommand::Help);
+    }
+    let body = trimmed.trim_start_matches('/').trim();
+    if body.is_empty() {
+        return Some(IngressCommand::Help);
+    }
+    let (command, remainder) = match body.split_once(char::is_whitespace) {
+        Some((command, remainder)) => (command, remainder.trim()),
+        None => (body, ""),
+    };
+    let remainder = remainder.trim();
+    match command.to_ascii_lowercase().as_str() {
+        "help" | "start" | "commands" => Some(IngressCommand::Help),
+        "new" => Some(IngressCommand::New),
+        "skills" => Some(IngressCommand::Skills {
+            query: parse_skills_query(remainder),
+        }),
+        "skill" | "use" => Some(IngressCommand::Skill {
+            selector: remainder.to_string(),
+        }),
+        "model" | "models" => Some(IngressCommand::Model),
+        "status" => Some(IngressCommand::Status),
+        "task" => Some(IngressCommand::Task(remainder.to_string())),
+        "orchestrate" => Some(IngressCommand::Orchestrate(remainder.to_string())),
+        "wasm" => Some(IngressCommand::Wasm(remainder.to_string())),
+        other => Some(IngressCommand::Unknown(other.to_string())),
+    }
+}
+
+async fn execute_ingress_command(
+    state: Arc<AppState>,
+    platform: &str,
+    record: &ChatIngressEventRecord,
+    command: IngressCommand,
+) -> anyhow::Result<IngressCommandResult> {
+    match command {
+        IngressCommand::Help => Ok(IngressCommandResult::Reply(help_command_text())),
+        IngressCommand::New => Ok(IngressCommandResult::Reply(
+            "新的对话已准备好。直接发问题即可，或输入 /skills 查看已安装技能。".to_string(),
+        )),
+        IngressCommand::Skills { query } => {
+            let reply = render_skills_command(&state, query.as_deref()).await?;
+            Ok(IngressCommandResult::Reply(reply))
+        }
+        IngressCommand::Skill { selector } => {
+            let parsed = parse_skill_selector(&selector)?;
+            let Some(skill) =
+                skill_registry::find_skill(&state, &parsed.skill_id, parsed.version.as_deref())
+                    .await?
+            else {
+                return Ok(IngressCommandResult::Reply(format!(
+                    "没有找到技能 `{}`。先输入 /skills 查看可用技能。",
+                    parsed.skill_id
+                )));
+            };
+            let selector = build_skill_selector_for_task(&skill, parsed.function_name.as_deref());
+            let mut task_name = format!("{platform} skill {}", skill.display_name);
+            if let Some(chat_id) = record.chat_id.as_deref() {
+                task_name.push_str(&format!(" ({chat_id})"));
+            }
+            Ok(IngressCommandResult::Task {
+                instruction: format!("wasm:{selector}"),
+                task_name,
+            })
+        }
+        IngressCommand::Model => {
+            let workspace = identity::ensure_workspace_profile(&state).await?;
+            let live = workspace
+                .default_model_providers
+                .iter()
+                .filter(|provider| is_model_provider_live_configured(provider))
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(IngressCommandResult::Reply(format!(
+                "当前默认模型: {}。\n已就绪模型: {}。",
+                if workspace.default_model_providers.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    workspace.default_model_providers.join(", ")
+                },
+                if live.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    live.join(", ")
+                }
+            )))
+        }
+        IngressCommand::Status => {
+            let workspace = identity::ensure_workspace_profile(&state).await?;
+            let nodes = state.list_nodes().await?;
+            let connected = nodes.iter().filter(|node| node.connected).count();
+            let trusted = nodes
+                .iter()
+                .filter(|node| node.connected && node.attestation_verified)
+                .count();
+            Ok(IngressCommandResult::Reply(format!(
+                "工作区: {} [{}]\n默认模型: {}\n默认聊天: {}\n在线节点: {}，可信节点: {}。",
+                workspace.display_name,
+                workspace.region,
+                if workspace.default_model_providers.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    workspace.default_model_providers.join(", ")
+                },
+                if workspace.default_chat_platforms.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    workspace.default_chat_platforms.join(", ")
+                },
+                connected,
+                trusted
+            )))
+        }
+        IngressCommand::Task(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Ok(IngressCommandResult::Reply(
+                    "用法: /task <要提交的任务内容>".to_string(),
+                ));
+            }
+            Ok(IngressCommandResult::Task {
+                instruction: text.to_string(),
+                task_name: format!("{platform} task request"),
+            })
+        }
+        IngressCommand::Orchestrate(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Ok(IngressCommandResult::Reply(
+                    "用法: /orchestrate <JSON 编排步骤>".to_string(),
+                ));
+            }
+            Ok(IngressCommandResult::Task {
+                instruction: format!("orchestrate:{text}"),
+                task_name: format!("{platform} orchestration request"),
+            })
+        }
+        IngressCommand::Wasm(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Ok(IngressCommandResult::Reply(
+                    "用法: /wasm <skill[@version][#function]>".to_string(),
+                ));
+            }
+            Ok(IngressCommandResult::Task {
+                instruction: format!("wasm:{text}"),
+                task_name: format!("{platform} wasm request"),
+            })
+        }
+        IngressCommand::Unknown(command) => Ok(IngressCommandResult::Reply(format!(
+            "未知命令 `/{command}`。\n{}",
+            help_command_text()
+        ))),
+    }
+}
+
+fn help_command_text() -> String {
+    [
+        "可用命令:",
+        "/help - 查看命令帮助",
+        "/commands - 查看命令帮助",
+        "/new - 开始新的对话",
+        "/skills [关键字] - 查看已安装技能",
+        "/skills search <关键字> - 搜索已安装技能",
+        "/skill <skill[@version][#function]> - 调用一个已安装技能",
+        "/model - 查看当前默认模型",
+        "/status - 查看工作区与节点状态",
+        "/task <内容> - 提交普通任务",
+        "/orchestrate <JSON> - 提交编排任务",
+        "/wasm <skill[@version][#function]> - 直接提交 Wasm 技能任务",
+    ]
+    .join("\n")
+}
+
+async fn render_skills_command(
+    state: &Arc<AppState>,
+    query: Option<&str>,
+) -> anyhow::Result<String> {
+    let distribution = skill_registry::current_distribution(state).await?;
+    let normalized_query = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let mut skills = distribution
+        .skills
+        .into_iter()
+        .filter(|skill| {
+            normalized_query.as_ref().is_none_or(|query| {
+                skill.skill_id.to_ascii_lowercase().contains(query)
+                    || skill.display_name.to_ascii_lowercase().contains(query)
+                    || skill
+                        .description
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(query)
+                    || skill
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability.to_ascii_lowercase().contains(query))
+            })
+        })
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then_with(|| left.skill_id.cmp(&right.skill_id))
+            .then_with(|| right.version.cmp(&left.version))
+    });
+    if skills.is_empty() {
+        return Ok(match normalized_query {
+            Some(query) => format!(
+                "没有找到和 `{query}` 匹配的已安装技能。输入 /skills 查看全部技能。"
+            ),
+            None => {
+                "当前没有已安装技能。先在 CLI 中运行 `dawn-node setup` 或 `dawn-node skills install`。"
+                    .to_string()
+            }
+        });
+    }
+    let mut lines = vec!["已安装技能:".to_string()];
+    for skill in skills.into_iter().take(8) {
+        lines.push(format!(
+            "- {}@{}{}: {}",
+            skill.skill_id,
+            skill.version,
+            if skill.active { " [active]" } else { "" },
+            skill
+                .description
+                .as_deref()
+                .unwrap_or(skill.display_name.as_str())
+        ));
+    }
+    lines.push("使用方式: /skill <skill_id>".to_string());
+    Ok(lines.join("\n"))
+}
+
+fn parse_skills_query(remainder: &str) -> Option<String> {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (command, query) = match trimmed.split_once(char::is_whitespace) {
+        Some((command, query)) => (command, query.trim()),
+        None => (trimmed, ""),
+    };
+    if matches!(command, "search" | "find") {
+        return (!query.is_empty()).then(|| query.to_string());
+    }
+    Some(trimmed.to_string())
+}
+
+struct ParsedSkillSelector {
+    skill_id: String,
+    version: Option<String>,
+    function_name: Option<String>,
+}
+
+fn parse_skill_selector(raw: &str) -> anyhow::Result<ParsedSkillSelector> {
+    let selector = raw.trim();
+    if selector.is_empty() {
+        anyhow::bail!("用法: /skill <skill[@version][#function]>");
+    }
+    let selector = selector
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("用法: /skill <skill[@version][#function]>"))?;
+    let (skill_selector, function_name) = match selector.split_once('#') {
+        Some((selector, function_name)) if !function_name.trim().is_empty() => {
+            (selector.trim(), Some(function_name.trim().to_string()))
+        }
+        Some((_selector, _)) => anyhow::bail!("技能函数名不能为空"),
+        None => (selector.trim(), None),
+    };
+    let (skill_id, version) = match skill_selector.split_once('@') {
+        Some((skill_id, version)) if !skill_id.trim().is_empty() && !version.trim().is_empty() => {
+            (skill_id.trim().to_string(), Some(version.trim().to_string()))
+        }
+        Some((_skill_id, _version)) => anyhow::bail!("技能版本选择器格式无效"),
+        None => (skill_selector.to_string(), None),
+    };
+    Ok(ParsedSkillSelector {
+        skill_id,
+        version,
+        function_name,
+    })
+}
+
+fn build_skill_selector_for_task(skill: &skill_registry::SkillRecord, function: Option<&str>) -> String {
+    match function.filter(|value| !value.trim().is_empty()) {
+        Some(function) => format!("{}@{}#{}", skill.skill_id, skill.version, function.trim()),
+        None => format!("{}@{}", skill.skill_id, skill.version),
+    }
 }
 
 fn should_attempt_default_model_reply(text: &str) -> bool {
@@ -1772,13 +2127,82 @@ fn public_base_url_is_local_only(raw: &str) -> bool {
         || value.contains("[::1]")
 }
 
-pub fn spawn_telegram_ingress_worker(state: Arc<AppState>) {
-    if !telegram_polling_enabled() {
-        return;
+fn telegram_bot_commands() -> Vec<TelegramBotCommand> {
+    vec![
+        TelegramBotCommand {
+            command: "help",
+            description: "Show the command list",
+        },
+        TelegramBotCommand {
+            command: "commands",
+            description: "Show the command list",
+        },
+        TelegramBotCommand {
+            command: "new",
+            description: "Start a fresh chat turn",
+        },
+        TelegramBotCommand {
+            command: "skills",
+            description: "List installed Dawn skills",
+        },
+        TelegramBotCommand {
+            command: "skill",
+            description: "Run an installed skill by id",
+        },
+        TelegramBotCommand {
+            command: "model",
+            description: "Show current default model",
+        },
+        TelegramBotCommand {
+            command: "status",
+            description: "Show workspace and node status",
+        },
+    ]
+}
+
+async fn register_telegram_bot_commands(bot_token: String) -> anyhow::Result<()> {
+    let client = Client::new();
+    let response = client
+        .post(format!(
+            "https://api.telegram.org/bot{bot_token}/setMyCommands"
+        ))
+        .json(&json!({
+            "commands": telegram_bot_commands()
+        }))
+        .send()
+        .await
+        .context("failed to call Telegram setMyCommands")?;
+    let payload: Value = response
+        .json()
+        .await
+        .context("failed to decode Telegram setMyCommands response")?;
+    if payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        info!("Registered Telegram bot commands for Dawn ingress");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Telegram setMyCommands failed: {}",
+            payload
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        )
     }
+}
+
+pub fn spawn_telegram_ingress_worker(state: Arc<AppState>) {
     let Ok(bot_token) = std::env::var("TELEGRAM_BOT_TOKEN") else {
         return;
     };
+    let command_token = bot_token.clone();
+    tokio::spawn(async move {
+        if let Err(error) = register_telegram_bot_commands(command_token).await {
+            warn!(?error, "failed to register Telegram bot commands");
+        }
+    });
+    if !telegram_polling_enabled() {
+        return;
+    }
     info!("Starting Telegram long-poll ingress worker");
     tokio::spawn(async move {
         let client = Client::new();
@@ -2674,6 +3098,32 @@ mod tests {
         handle.abort();
         fs::remove_file(db_path).ok();
         Ok(())
+    }
+
+    #[test]
+    fn parses_help_and_skills_commands() {
+        assert!(matches!(parse_ingress_command("/"), Some(IngressCommand::Help)));
+        assert!(matches!(
+            parse_ingress_command("/commands"),
+            Some(IngressCommand::Help)
+        ));
+        assert!(matches!(
+            parse_ingress_command("/skills search echo"),
+            Some(IngressCommand::Skills { query: Some(query) }) if query == "echo"
+        ));
+        assert!(matches!(
+            parse_ingress_command("/skills find travel"),
+            Some(IngressCommand::Skills { query: Some(query) }) if query == "travel"
+        ));
+    }
+
+    #[test]
+    fn normalizes_skills_search_query_prefixes() {
+        assert_eq!(parse_skills_query(""), None);
+        assert_eq!(parse_skills_query("search   "), None);
+        assert_eq!(parse_skills_query("search echo skill"), Some("echo skill".to_string()));
+        assert_eq!(parse_skills_query("find travel"), Some("travel".to_string()));
+        assert_eq!(parse_skills_query("echo"), Some("echo".to_string()));
     }
 
     #[test]

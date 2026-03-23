@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the WebAssembly secure sandbox engine
     let engine = sandbox::init_engine()?;
     let state = app_state::AppState::new(engine).await?;
+    chat_ingress::spawn_telegram_ingress_worker(state.clone());
 
     let app = build_app(state);
 

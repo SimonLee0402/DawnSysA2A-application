@@ -16,7 +16,9 @@ use crate::app_state::AppState;
 const CONTROL_UI_HTML: &str = include_str!("../../templates/frontend/control_ui.html");
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/", get(page)).route("/ws", get(workbench_ws))
+    Router::new()
+        .route("/", get(page))
+        .route("/ws", get(workbench_ws))
 }
 
 async fn page() -> Html<&'static str> {

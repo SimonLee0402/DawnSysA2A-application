@@ -1098,6 +1098,213 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             env_hints: vec!["DOUBAO_API_KEY or ARK_API_KEY"],
             env_requirement_groups: vec![vec!["DOUBAO_API_KEY"], vec!["ARK_API_KEY"]],
         }),
+        ("model", "anthropic") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "anthropic",
+            label: "Anthropic Claude",
+            region: "global",
+            integration_mode: "live",
+            endpoint: "/api/gateway/connectors/model/anthropic/respond",
+            note: "Claude API key path for Anthropic models.",
+            env_hints: vec!["ANTHROPIC_API_KEY"],
+            env_requirement_groups: vec![vec!["ANTHROPIC_API_KEY"]],
+        }),
+        ("model", "google") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "google",
+            label: "Google Gemini",
+            region: "global",
+            integration_mode: "live",
+            endpoint: "/api/gateway/connectors/model/google/respond",
+            note: "Gemini API key path for Google models.",
+            env_hints: vec!["GEMINI_API_KEY or GOOGLE_API_KEY"],
+            env_requirement_groups: vec![vec!["GEMINI_API_KEY"], vec!["GOOGLE_API_KEY"]],
+        }),
+        ("model", "bedrock") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "bedrock",
+            label: "AWS Bedrock",
+            region: "global",
+            integration_mode: "live_openai_compatible_bedrock",
+            endpoint: "/api/gateway/connectors/model/bedrock/respond",
+            note: "OpenAI-compatible Bedrock endpoint path.",
+            env_hints: vec![
+                "BEDROCK_API_KEY",
+                "BEDROCK_CHAT_COMPLETIONS_URL / BEDROCK_BASE_URL / BEDROCK_RUNTIME_ENDPOINT",
+            ],
+            env_requirement_groups: vec![
+                vec!["BEDROCK_API_KEY", "BEDROCK_CHAT_COMPLETIONS_URL"],
+                vec!["BEDROCK_API_KEY", "BEDROCK_BASE_URL"],
+                vec!["BEDROCK_API_KEY", "BEDROCK_RUNTIME_ENDPOINT"],
+            ],
+        }),
+        ("model", "cloudflare_ai_gateway") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "cloudflare_ai_gateway",
+            label: "Cloudflare AI Gateway",
+            region: "global",
+            integration_mode: "live_openai_compatible_gateway",
+            endpoint: "/api/gateway/connectors/model/cloudflare-ai-gateway/respond",
+            note: "Gateway-backed OpenAI-compatible Cloudflare route.",
+            env_hints: vec![
+                "CLOUDFLARE_AI_GATEWAY_API_KEY or OPENAI_API_KEY",
+                "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL / CLOUDFLARE_AI_GATEWAY_BASE_URL / CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID + CLOUDFLARE_AI_GATEWAY_ID",
+            ],
+            env_requirement_groups: vec![
+                vec![
+                    "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                    "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+                ],
+                vec![
+                    "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                    "CLOUDFLARE_AI_GATEWAY_BASE_URL",
+                ],
+                vec![
+                    "CLOUDFLARE_AI_GATEWAY_API_KEY",
+                    "CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID",
+                    "CLOUDFLARE_AI_GATEWAY_ID",
+                ],
+                vec![
+                    "OPENAI_API_KEY",
+                    "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+                ],
+                vec!["OPENAI_API_KEY", "CLOUDFLARE_AI_GATEWAY_BASE_URL"],
+                vec![
+                    "OPENAI_API_KEY",
+                    "CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID",
+                    "CLOUDFLARE_AI_GATEWAY_ID",
+                ],
+            ],
+        }),
+        ("model", "github_models") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "github_models",
+            label: "GitHub Models",
+            region: "global",
+            integration_mode: "live_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/github-models/respond",
+            note: "GitHub Models OpenAI-compatible inference path.",
+            env_hints: vec!["GITHUB_MODELS_API_KEY or GITHUB_TOKEN"],
+            env_requirement_groups: vec![vec!["GITHUB_MODELS_API_KEY"], vec!["GITHUB_TOKEN"]],
+        }),
+        ("model", "huggingface") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "huggingface",
+            label: "Hugging Face",
+            region: "global",
+            integration_mode: "live_openai_compatible_router",
+            endpoint: "/api/gateway/connectors/model/huggingface/respond",
+            note: "Hugging Face OpenAI-compatible router path.",
+            env_hints: vec!["HUGGINGFACE_API_KEY or HF_TOKEN"],
+            env_requirement_groups: vec![vec!["HUGGINGFACE_API_KEY"], vec!["HF_TOKEN"]],
+        }),
+        ("model", "openrouter") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "openrouter",
+            label: "OpenRouter",
+            region: "global",
+            integration_mode: "live_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/openrouter/respond",
+            note: "OpenRouter OpenAI-compatible model path.",
+            env_hints: vec!["OPENROUTER_API_KEY"],
+            env_requirement_groups: vec![vec!["OPENROUTER_API_KEY"]],
+        }),
+        ("model", "groq") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "groq",
+            label: "Groq",
+            region: "global",
+            integration_mode: "live_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/groq/respond",
+            note: "Groq OpenAI-compatible inference path.",
+            env_hints: vec!["GROQ_API_KEY"],
+            env_requirement_groups: vec![vec!["GROQ_API_KEY"]],
+        }),
+        ("model", "together") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "together",
+            label: "Together AI",
+            region: "global",
+            integration_mode: "live_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/together/respond",
+            note: "Together AI OpenAI-compatible path.",
+            env_hints: vec!["TOGETHER_API_KEY"],
+            env_requirement_groups: vec![vec!["TOGETHER_API_KEY"]],
+        }),
+        ("model", "vercel_ai_gateway") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "vercel_ai_gateway",
+            label: "Vercel AI Gateway",
+            region: "global",
+            integration_mode: "live_openai_compatible_gateway",
+            endpoint: "/api/gateway/connectors/model/vercel-ai-gateway/respond",
+            note: "Gateway-backed Vercel AI inference path.",
+            env_hints: vec![
+                "VERCEL_AI_GATEWAY_API_KEY or AI_GATEWAY_API_KEY",
+                "VERCEL_AI_GATEWAY_BASE_URL / VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+            ],
+            env_requirement_groups: vec![
+                vec!["VERCEL_AI_GATEWAY_API_KEY"],
+                vec!["AI_GATEWAY_API_KEY"],
+                vec!["VERCEL_AI_GATEWAY_BASE_URL"],
+                vec!["VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL"],
+            ],
+        }),
+        ("model", "vllm") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "vllm",
+            label: "vLLM",
+            region: "global",
+            integration_mode: "live_local_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/vllm/respond",
+            note: "Local vLLM OpenAI-compatible path.",
+            env_hints: vec!["VLLM_CHAT_COMPLETIONS_URL or VLLM_BASE_URL"],
+            env_requirement_groups: vec![vec!["VLLM_CHAT_COMPLETIONS_URL"], vec!["VLLM_BASE_URL"]],
+        }),
+        ("model", "mistral") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "mistral",
+            label: "Mistral",
+            region: "global",
+            integration_mode: "live_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/mistral/respond",
+            note: "Mistral OpenAI-compatible inference path.",
+            env_hints: vec!["MISTRAL_API_KEY"],
+            env_requirement_groups: vec![vec!["MISTRAL_API_KEY"]],
+        }),
+        ("model", "nvidia") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "nvidia",
+            label: "NVIDIA NIM",
+            region: "global",
+            integration_mode: "live_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/nvidia/respond",
+            note: "NVIDIA NIM OpenAI-compatible path.",
+            env_hints: vec!["NVIDIA_API_KEY or NVIDIA_NIM_API_KEY"],
+            env_requirement_groups: vec![vec!["NVIDIA_API_KEY"], vec!["NVIDIA_NIM_API_KEY"]],
+        }),
+        ("model", "litellm") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "litellm",
+            label: "LiteLLM",
+            region: "global",
+            integration_mode: "live_openai_compatible_gateway",
+            endpoint: "/api/gateway/connectors/model/litellm/respond",
+            note: "LiteLLM gateway path for OpenAI-compatible routing.",
+            env_hints: vec!["LITELLM_CHAT_COMPLETIONS_URL or LITELLM_BASE_URL"],
+            env_requirement_groups: vec![vec!["LITELLM_CHAT_COMPLETIONS_URL"], vec!["LITELLM_BASE_URL"]],
+        }),
+        ("model", "ollama") => Some(SetupTargetProfile {
+            surface: "model",
+            target: "ollama",
+            label: "Ollama",
+            region: "global",
+            integration_mode: "live_local_openai_compatible",
+            endpoint: "/api/gateway/connectors/model/ollama/respond",
+            note: "Local Ollama OpenAI-compatible path.",
+            env_hints: vec!["OLLAMA_CHAT_URL or OLLAMA_BASE_URL"],
+            env_requirement_groups: vec![vec!["OLLAMA_CHAT_URL"], vec!["OLLAMA_BASE_URL"]],
+        }),
         ("chat", "telegram") => Some(SetupTargetProfile {
             surface: "chat",
             target: "telegram",
@@ -1108,6 +1315,132 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             note: "Global outbound bot delivery.",
             env_hints: vec!["TELEGRAM_BOT_TOKEN"],
             env_requirement_groups: vec![vec!["TELEGRAM_BOT_TOKEN"]],
+        }),
+        ("chat", "slack") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "slack",
+            label: "Slack",
+            region: "global",
+            integration_mode: "live_webhook",
+            endpoint: "/api/gateway/connectors/chat/slack/send",
+            note: "Slack webhook outbound delivery.",
+            env_hints: vec!["SLACK_BOT_WEBHOOK_URL"],
+            env_requirement_groups: vec![vec!["SLACK_BOT_WEBHOOK_URL"]],
+        }),
+        ("chat", "discord") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "discord",
+            label: "Discord",
+            region: "global",
+            integration_mode: "live_webhook",
+            endpoint: "/api/gateway/connectors/chat/discord/send",
+            note: "Discord webhook outbound delivery.",
+            env_hints: vec!["DISCORD_BOT_WEBHOOK_URL"],
+            env_requirement_groups: vec![vec!["DISCORD_BOT_WEBHOOK_URL"]],
+        }),
+        ("chat", "mattermost") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "mattermost",
+            label: "Mattermost",
+            region: "global",
+            integration_mode: "live_webhook",
+            endpoint: "/api/gateway/connectors/chat/mattermost/send",
+            note: "Mattermost webhook outbound delivery.",
+            env_hints: vec!["MATTERMOST_BOT_WEBHOOK_URL"],
+            env_requirement_groups: vec![vec!["MATTERMOST_BOT_WEBHOOK_URL"]],
+        }),
+        ("chat", "msteams") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "msteams",
+            label: "Microsoft Teams",
+            region: "global",
+            integration_mode: "live_webhook",
+            endpoint: "/api/gateway/connectors/chat/msteams/send",
+            note: "Microsoft Teams webhook outbound delivery.",
+            env_hints: vec!["MSTEAMS_BOT_WEBHOOK_URL"],
+            env_requirement_groups: vec![vec!["MSTEAMS_BOT_WEBHOOK_URL"]],
+        }),
+        ("chat", "whatsapp") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "whatsapp",
+            label: "WhatsApp",
+            region: "global",
+            integration_mode: "live_cloud_api",
+            endpoint: "/api/gateway/connectors/chat/whatsapp/send",
+            note: "WhatsApp Cloud API outbound delivery.",
+            env_hints: vec!["WHATSAPP_ACCESS_TOKEN + WHATSAPP_PHONE_NUMBER_ID"],
+            env_requirement_groups: vec![vec!["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"]],
+        }),
+        ("chat", "line") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "line",
+            label: "LINE",
+            region: "global",
+            integration_mode: "live_messaging_api",
+            endpoint: "/api/gateway/connectors/chat/line/send",
+            note: "LINE Messaging API outbound delivery.",
+            env_hints: vec!["LINE_CHANNEL_ACCESS_TOKEN"],
+            env_requirement_groups: vec![vec!["LINE_CHANNEL_ACCESS_TOKEN"]],
+        }),
+        ("chat", "matrix") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "matrix",
+            label: "Matrix",
+            region: "global",
+            integration_mode: "live_matrix_client",
+            endpoint: "/api/gateway/connectors/chat/matrix/send",
+            note: "Matrix client outbound delivery.",
+            env_hints: vec!["MATRIX_ACCESS_TOKEN + MATRIX_HOMESERVER_URL"],
+            env_requirement_groups: vec![vec!["MATRIX_ACCESS_TOKEN", "MATRIX_HOMESERVER_URL"]],
+        }),
+        ("chat", "google_chat") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "google_chat",
+            label: "Google Chat",
+            region: "global",
+            integration_mode: "live_webhook",
+            endpoint: "/api/gateway/connectors/chat/google-chat/send",
+            note: "Google Chat webhook outbound delivery.",
+            env_hints: vec!["GOOGLE_CHAT_BOT_WEBHOOK_URL"],
+            env_requirement_groups: vec![vec!["GOOGLE_CHAT_BOT_WEBHOOK_URL"]],
+        }),
+        ("chat", "signal") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "signal",
+            label: "Signal",
+            region: "global",
+            integration_mode: "live_signal_rest",
+            endpoint: "/api/gateway/connectors/chat/signal/send",
+            note: "Signal REST outbound delivery and group actions.",
+            env_hints: vec![
+                "SIGNAL_ACCOUNT or SIGNAL_NUMBER or DAWN_SIGNAL_ACCOUNTS_JSON",
+                "SIGNAL_HTTP_URL / SIGNAL_CLI_REST_API_URL",
+            ],
+            env_requirement_groups: vec![
+                vec!["SIGNAL_ACCOUNT", "SIGNAL_HTTP_URL"],
+                vec!["SIGNAL_ACCOUNT", "SIGNAL_CLI_REST_API_URL"],
+                vec!["SIGNAL_NUMBER", "SIGNAL_HTTP_URL"],
+                vec!["SIGNAL_NUMBER", "SIGNAL_CLI_REST_API_URL"],
+                vec!["DAWN_SIGNAL_ACCOUNTS_JSON"],
+            ],
+        }),
+        ("chat", "bluebubbles") => Some(SetupTargetProfile {
+            surface: "chat",
+            target: "bluebubbles",
+            label: "BlueBubbles",
+            region: "global",
+            integration_mode: "live_bluebubbles_rest",
+            endpoint: "/api/gateway/connectors/chat/bluebubbles/send",
+            note: "BlueBubbles REST outbound delivery and iMessage management.",
+            env_hints: vec![
+                "BLUEBUBBLES_SERVER_URL or BLUEBUBBLES_SEND_MESSAGE_URL",
+                "BLUEBUBBLES_PASSWORD",
+            ],
+            env_requirement_groups: vec![
+                vec!["BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"],
+                vec!["BLUEBUBBLES_SEND_MESSAGE_URL", "BLUEBUBBLES_PASSWORD"],
+                vec!["DAWN_BLUEBUBBLES_ACCOUNTS_JSON"],
+            ],
         }),
         ("chat", "feishu") => Some(SetupTargetProfile {
             surface: "chat",
@@ -1239,6 +1572,28 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             env_hints: vec!["DAWN_QQ_BOT_CALLBACK_SECRET"],
             env_requirement_groups: vec![vec!["DAWN_QQ_BOT_CALLBACK_SECRET"]],
         }),
+        ("ingress", "signal") => Some(SetupTargetProfile {
+            surface: "ingress",
+            target: "signal",
+            label: "Signal Events",
+            region: "global",
+            integration_mode: "secret_path_callback",
+            endpoint: "/api/gateway/ingress/signal/events/{secret}",
+            note: "Inbound Signal text, attachment, reaction, typing, and receipt events.",
+            env_hints: vec!["DAWN_SIGNAL_CALLBACK_SECRET"],
+            env_requirement_groups: vec![vec!["DAWN_SIGNAL_CALLBACK_SECRET"]],
+        }),
+        ("ingress", "bluebubbles") => Some(SetupTargetProfile {
+            surface: "ingress",
+            target: "bluebubbles",
+            label: "BlueBubbles Events",
+            region: "global",
+            integration_mode: "secret_path_callback",
+            endpoint: "/api/gateway/ingress/bluebubbles/events/{secret}",
+            note: "Inbound BlueBubbles message, reaction, typing, and group events.",
+            env_hints: vec!["DAWN_BLUEBUBBLES_CALLBACK_SECRET"],
+            env_requirement_groups: vec![vec!["DAWN_BLUEBUBBLES_CALLBACK_SECRET"]],
+        }),
         _ => None,
     }
 }
@@ -1249,6 +1604,21 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
         configured_model_providers: [
             "openai_codex",
             "openai",
+            "anthropic",
+            "google",
+            "bedrock",
+            "cloudflare_ai_gateway",
+            "github_models",
+            "huggingface",
+            "openrouter",
+            "groq",
+            "together",
+            "vercel_ai_gateway",
+            "vllm",
+            "mistral",
+            "nvidia",
+            "litellm",
+            "ollama",
             "deepseek",
             "qwen",
             "zhipu",
@@ -1258,9 +1628,19 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
             .into_iter()
             .filter(|provider| is_model_provider_configured(provider))
             .map(ToString::to_string)
-            .collect(),
+        .collect(),
         configured_chat_platforms: [
             "telegram",
+            "slack",
+            "discord",
+            "mattermost",
+            "msteams",
+            "whatsapp",
+            "line",
+            "matrix",
+            "google_chat",
+            "signal",
+            "bluebubbles",
             "feishu",
             "dingtalk",
             "wecom_bot",
@@ -1273,6 +1653,8 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
         .collect(),
         configured_ingress_platforms: [
             "telegram",
+            "signal",
+            "bluebubbles",
             "feishu",
             "dingtalk",
             "wecom",
@@ -1285,6 +1667,43 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
         .collect(),
         present_env_keys: [
             "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "BEDROCK_API_KEY",
+            "BEDROCK_CHAT_COMPLETIONS_URL",
+            "BEDROCK_BASE_URL",
+            "BEDROCK_RUNTIME_ENDPOINT",
+            "CLOUDFLARE_AI_GATEWAY_API_KEY",
+            "CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+            "CLOUDFLARE_AI_GATEWAY_BASE_URL",
+            "CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID",
+            "CLOUDFLARE_AI_GATEWAY_ID",
+            "GITHUB_MODELS_API_KEY",
+            "GITHUB_TOKEN",
+            "GITHUB_MODELS_CHAT_COMPLETIONS_URL",
+            "HUGGINGFACE_API_KEY",
+            "HF_TOKEN",
+            "HUGGINGFACE_CHAT_COMPLETIONS_URL",
+            "OPENROUTER_API_KEY",
+            "GROQ_API_KEY",
+            "TOGETHER_API_KEY",
+            "VERCEL_AI_GATEWAY_API_KEY",
+            "AI_GATEWAY_API_KEY",
+            "VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL",
+            "VERCEL_AI_GATEWAY_BASE_URL",
+            "VLLM_API_KEY",
+            "VLLM_CHAT_COMPLETIONS_URL",
+            "VLLM_BASE_URL",
+            "MISTRAL_API_KEY",
+            "NVIDIA_API_KEY",
+            "NVIDIA_NIM_API_KEY",
+            "NVIDIA_CHAT_COMPLETIONS_URL",
+            "LITELLM_API_KEY",
+            "LITELLM_CHAT_COMPLETIONS_URL",
+            "LITELLM_BASE_URL",
+            "OLLAMA_CHAT_URL",
+            "OLLAMA_BASE_URL",
             "DEEPSEEK_API_KEY",
             "QWEN_API_KEY",
             "DASHSCOPE_API_KEY",
@@ -1293,6 +1712,30 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
             "DOUBAO_API_KEY",
             "ARK_API_KEY",
             "TELEGRAM_BOT_TOKEN",
+            "SLACK_BOT_WEBHOOK_URL",
+            "DISCORD_BOT_WEBHOOK_URL",
+            "MATTERMOST_BOT_WEBHOOK_URL",
+            "MSTEAMS_BOT_WEBHOOK_URL",
+            "WHATSAPP_ACCESS_TOKEN",
+            "WHATSAPP_PHONE_NUMBER_ID",
+            "LINE_CHANNEL_ACCESS_TOKEN",
+            "MATRIX_ACCESS_TOKEN",
+            "MATRIX_HOMESERVER_URL",
+            "GOOGLE_CHAT_BOT_WEBHOOK_URL",
+            "SIGNAL_ACCOUNT",
+            "SIGNAL_NUMBER",
+            "SIGNAL_HTTP_URL",
+            "SIGNAL_CLI_REST_API_URL",
+            "SIGNAL_SEND_API_URL",
+            "SIGNAL_REACTION_API_URL",
+            "SIGNAL_RECEIPT_API_URL",
+            "DAWN_SIGNAL_ACCOUNTS_JSON",
+            "BLUEBUBBLES_PASSWORD",
+            "BLUEBUBBLES_SERVER_URL",
+            "BLUEBUBBLES_SEND_MESSAGE_URL",
+            "BLUEBUBBLES_SEND_ATTACHMENT_URL",
+            "BLUEBUBBLES_SEND_REACTION_URL",
+            "DAWN_BLUEBUBBLES_ACCOUNTS_JSON",
             "FEISHU_BOT_WEBHOOK_URL",
             "DINGTALK_BOT_WEBHOOK_URL",
             "WECOM_BOT_WEBHOOK_URL",
@@ -1302,6 +1745,8 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
             "QQ_BOT_APP_ID",
             "QQ_BOT_CLIENT_SECRET",
             "DAWN_TELEGRAM_WEBHOOK_SECRET",
+            "DAWN_SIGNAL_CALLBACK_SECRET",
+            "DAWN_BLUEBUBBLES_CALLBACK_SECRET",
             "DAWN_DINGTALK_CALLBACK_TOKEN",
             "DAWN_WECOM_CALLBACK_TOKEN",
             "DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN",
@@ -1911,6 +2356,10 @@ fn env_var_present(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn resolve_first_present_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+}
+
 fn any_env_var_present(names: &[&str]) -> bool {
     names.iter().any(|name| env_var_present(name))
 }
@@ -1925,10 +2374,72 @@ fn has_qq_bot_credentials() -> bool {
     env_var_present("QQ_BOT_APP_ID") && env_var_present("QQ_BOT_CLIENT_SECRET")
 }
 
+fn has_signal_account_configuration() -> bool {
+    env_var_present("SIGNAL_ACCOUNT")
+        || env_var_present("SIGNAL_NUMBER")
+        || env_var_present("DAWN_SIGNAL_ACCOUNTS_JSON")
+}
+
+fn has_bluebubbles_account_configuration() -> bool {
+    env_var_present("BLUEBUBBLES_SERVER_URL")
+        || env_var_present("BLUEBUBBLES_SEND_MESSAGE_URL")
+        || env_var_present("DAWN_BLUEBUBBLES_ACCOUNTS_JSON")
+}
+
+fn has_bedrock_configuration() -> bool {
+    env_var_present("BEDROCK_API_KEY")
+        && (env_var_present("BEDROCK_CHAT_COMPLETIONS_URL")
+            || env_var_present("BEDROCK_BASE_URL")
+            || env_var_present("BEDROCK_RUNTIME_ENDPOINT"))
+}
+
+fn has_cloudflare_ai_gateway_configuration() -> bool {
+    resolve_first_present_env(&["CLOUDFLARE_AI_GATEWAY_API_KEY", "OPENAI_API_KEY"]).is_some()
+        && (env_var_present("CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL")
+            || env_var_present("CLOUDFLARE_AI_GATEWAY_BASE_URL")
+            || (env_var_present("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID")
+                && env_var_present("CLOUDFLARE_AI_GATEWAY_ID")))
+}
+
+fn has_vercel_ai_gateway_configuration() -> bool {
+    resolve_first_present_env(&["VERCEL_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"]).is_some()
+        || env_var_present("VERCEL_AI_GATEWAY_BASE_URL")
+        || env_var_present("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL")
+}
+
+fn has_vllm_configuration() -> bool {
+    env_var_present("VLLM_CHAT_COMPLETIONS_URL") || env_var_present("VLLM_BASE_URL")
+}
+
+fn has_litellm_configuration() -> bool {
+    env_var_present("LITELLM_CHAT_COMPLETIONS_URL") || env_var_present("LITELLM_BASE_URL")
+}
+
+fn has_ollama_configuration() -> bool {
+    env_var_present("OLLAMA_CHAT_URL") || env_var_present("OLLAMA_BASE_URL")
+}
+
 fn is_model_provider_configured(provider: &str) -> bool {
     match provider {
         "openai_codex" => openai_codex_login_ready(),
         "openai" => env_var_present("OPENAI_API_KEY"),
+        "anthropic" => env_var_present("ANTHROPIC_API_KEY"),
+        "google" => resolve_first_present_env(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]).is_some(),
+        "bedrock" => has_bedrock_configuration(),
+        "cloudflare_ai_gateway" => has_cloudflare_ai_gateway_configuration(),
+        "github_models" => {
+            resolve_first_present_env(&["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"]).is_some()
+        }
+        "huggingface" => resolve_first_present_env(&["HUGGINGFACE_API_KEY", "HF_TOKEN"]).is_some(),
+        "openrouter" => env_var_present("OPENROUTER_API_KEY"),
+        "groq" => env_var_present("GROQ_API_KEY"),
+        "together" => env_var_present("TOGETHER_API_KEY"),
+        "vercel_ai_gateway" => has_vercel_ai_gateway_configuration(),
+        "vllm" => has_vllm_configuration(),
+        "mistral" => env_var_present("MISTRAL_API_KEY"),
+        "nvidia" => resolve_first_present_env(&["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"]).is_some(),
+        "litellm" => has_litellm_configuration(),
+        "ollama" => has_ollama_configuration(),
         "deepseek" => env_var_present("DEEPSEEK_API_KEY"),
         "qwen" => any_env_var_present(&["QWEN_API_KEY", "DASHSCOPE_API_KEY"]),
         "zhipu" => env_var_present("ZHIPU_API_KEY"),
@@ -2051,6 +2562,18 @@ fn is_chat_platform_configured(platform: &str) -> bool {
         "wecom_bot" => env_var_present("WECOM_BOT_WEBHOOK_URL"),
         "wechat_official_account" => has_wechat_official_account_credentials(),
         "qq" => has_qq_bot_credentials(),
+        "slack" => env_var_present("SLACK_BOT_WEBHOOK_URL"),
+        "discord" => env_var_present("DISCORD_BOT_WEBHOOK_URL"),
+        "mattermost" => env_var_present("MATTERMOST_BOT_WEBHOOK_URL"),
+        "msteams" => env_var_present("MSTEAMS_BOT_WEBHOOK_URL"),
+        "whatsapp" => env_var_present("WHATSAPP_ACCESS_TOKEN")
+            && env_var_present("WHATSAPP_PHONE_NUMBER_ID"),
+        "line" => env_var_present("LINE_CHANNEL_ACCESS_TOKEN"),
+        "matrix" => env_var_present("MATRIX_ACCESS_TOKEN")
+            && env_var_present("MATRIX_HOMESERVER_URL"),
+        "google_chat" => env_var_present("GOOGLE_CHAT_BOT_WEBHOOK_URL"),
+        "signal" => has_signal_account_configuration(),
+        "bluebubbles" => has_bluebubbles_account_configuration(),
         _ => false,
     }
 }
@@ -2058,6 +2581,8 @@ fn is_chat_platform_configured(platform: &str) -> bool {
 fn ingress_target_for_chat_platform(platform: &str) -> Option<&'static str> {
     match platform {
         "telegram" => Some("telegram"),
+        "signal" => Some("signal"),
+        "bluebubbles" => Some("bluebubbles"),
         "feishu" => Some("feishu"),
         "dingtalk" => Some("dingtalk"),
         "wecom" | "wecom_bot" => Some("wecom"),
@@ -2075,6 +2600,8 @@ fn is_ingress_platform_configured(platform: &str) -> bool {
         "wecom" => env_var_present("DAWN_WECOM_CALLBACK_TOKEN"),
         "wechat_official_account" => env_var_present("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"),
         "qq" => env_var_present("DAWN_QQ_BOT_CALLBACK_SECRET"),
+        "signal" => env_var_present("DAWN_SIGNAL_CALLBACK_SECRET"),
+        "bluebubbles" => env_var_present("DAWN_BLUEBUBBLES_CALLBACK_SECRET"),
         _ => false,
     }
 }
@@ -2929,6 +3456,18 @@ mod tests {
         }
     }
 
+    fn test_workspace_with_targets(
+        onboarding_status: &str,
+        model_providers: Vec<String>,
+        chat_platforms: Vec<String>,
+    ) -> WorkspaceProfileRecord {
+        WorkspaceProfileRecord {
+            default_model_providers: model_providers,
+            default_chat_platforms: chat_platforms,
+            ..test_workspace(onboarding_status)
+        }
+    }
+
     fn trusted_node(node_id: &str) -> NodeRecord {
         NodeRecord {
             node_id: node_id.to_string(),
@@ -3043,6 +3582,63 @@ mod tests {
     }
 
     #[test]
+    fn readiness_marks_new_targets_ready_when_workspace_uses_them() {
+        let session = Uuid::new_v4();
+        let claim = super::NodeClaimRecord {
+            claim_id: Uuid::new_v4(),
+            node_id: "node-global-01".to_string(),
+            display_name: "Global Node".to_string(),
+            transport: "websocket".to_string(),
+            requested_capabilities: vec!["agent_ping".to_string()],
+            issued_by_session_id: Some(session),
+            issued_by_operator: "alice".to_string(),
+            status: super::NodeClaimStatus::Consumed,
+            expires_at_unix_ms: 99_999,
+            consumed_at_unix_ms: Some(1_000),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        };
+        let readiness = build_identity_readiness(
+            &test_workspace_with_targets(
+                "identity_ready",
+                vec!["anthropic".to_string(), "google".to_string()],
+                vec!["signal".to_string(), "bluebubbles".to_string()],
+            ),
+            1,
+            &[claim],
+            &[trusted_node("node-global-01")],
+            0,
+            0,
+            &IdentityEnvironmentReadiness {
+                public_base_url: Some("https://dawn.example.com".to_string()),
+                configured_model_providers: vec!["anthropic".to_string(), "google".to_string()],
+                configured_chat_platforms: vec!["signal".to_string(), "bluebubbles".to_string()],
+                configured_ingress_platforms: vec!["signal".to_string(), "bluebubbles".to_string()],
+                present_env_keys: vec![
+                    "ANTHROPIC_API_KEY".to_string(),
+                    "GEMINI_API_KEY".to_string(),
+                    "SIGNAL_ACCOUNT".to_string(),
+                    "SIGNAL_HTTP_URL".to_string(),
+                    "DAWN_SIGNAL_CALLBACK_SECRET".to_string(),
+                    "BLUEBUBBLES_SERVER_URL".to_string(),
+                    "BLUEBUBBLES_PASSWORD".to_string(),
+                    "DAWN_BLUEBUBBLES_CALLBACK_SECRET".to_string(),
+                    "DAWN_PUBLIC_BASE_URL".to_string(),
+                ],
+            },
+        );
+        assert_eq!(readiness.overall_status, "ready");
+        assert_eq!(readiness.completion_percent, 100);
+        assert!(readiness.next_step.is_none());
+        assert!(
+            readiness
+                .checklist
+                .iter()
+                .all(|item| item.status == "ready")
+        );
+    }
+
+    #[test]
     fn setup_verification_receipt_marks_missing_credentials() {
         let receipt = build_setup_verification_receipt(
             &test_workspace("identity_ready"),
@@ -3066,6 +3662,81 @@ mod tests {
                 .any(|value| value == "QWEN_API_KEY")
         );
         assert!(receipt.action.is_some());
+    }
+
+    #[test]
+    fn setup_verification_receipt_marks_new_model_targets_ready() {
+        let receipt = build_setup_verification_receipt(
+            &test_workspace_with_targets(
+                "identity_ready",
+                vec!["anthropic".to_string(), "google".to_string()],
+                vec![],
+            ),
+            "alice",
+            "model",
+            "anthropic",
+            &IdentityEnvironmentReadiness {
+                public_base_url: Some("https://dawn.example.com".to_string()),
+                configured_model_providers: vec!["anthropic".to_string(), "google".to_string()],
+                configured_chat_platforms: vec![],
+                configured_ingress_platforms: vec![],
+                present_env_keys: vec![
+                    "ANTHROPIC_API_KEY".to_string(),
+                    "GEMINI_API_KEY".to_string(),
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "ready");
+        assert!(receipt.missing_env_keys.is_empty());
+        assert!(receipt.action.is_none());
+    }
+
+    #[test]
+    fn setup_verification_receipt_marks_new_chat_and_ingress_targets_ready() {
+        let readiness = IdentityEnvironmentReadiness {
+            public_base_url: Some("https://dawn.example.com".to_string()),
+            configured_model_providers: vec![],
+            configured_chat_platforms: vec!["signal".to_string(), "bluebubbles".to_string()],
+            configured_ingress_platforms: vec!["signal".to_string(), "bluebubbles".to_string()],
+            present_env_keys: vec![
+                "SIGNAL_ACCOUNT".to_string(),
+                "SIGNAL_HTTP_URL".to_string(),
+                "DAWN_SIGNAL_CALLBACK_SECRET".to_string(),
+                "BLUEBUBBLES_SERVER_URL".to_string(),
+                "BLUEBUBBLES_PASSWORD".to_string(),
+                "DAWN_BLUEBUBBLES_CALLBACK_SECRET".to_string(),
+            ],
+        };
+        let chat_receipt = build_setup_verification_receipt(
+            &test_workspace_with_targets(
+                "identity_ready",
+                vec![],
+                vec!["signal".to_string(), "bluebubbles".to_string()],
+            ),
+            "alice",
+            "chat",
+            "signal",
+            &readiness,
+        )
+        .unwrap();
+        assert_eq!(chat_receipt.status, "ready");
+        assert!(chat_receipt.action.is_none());
+
+        let ingress_receipt = build_setup_verification_receipt(
+            &test_workspace_with_targets(
+                "identity_ready",
+                vec![],
+                vec!["signal".to_string(), "bluebubbles".to_string()],
+            ),
+            "alice",
+            "ingress",
+            "bluebubbles",
+            &readiness,
+        )
+        .unwrap();
+        assert_eq!(ingress_receipt.status, "ready");
+        assert!(ingress_receipt.action.is_none());
     }
 
     #[tokio::test]

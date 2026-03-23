@@ -1514,9 +1514,7 @@ impl AppState {
         .bind(identity_key)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| {
-            format!("failed to fetch chat identity for {platform}:{identity_key}")
-        })?;
+        .with_context(|| format!("failed to fetch chat identity for {platform}:{identity_key}"))?;
 
         row.map(TryInto::try_into).transpose()
     }

@@ -1574,6 +1574,7 @@ async fn onboard(args: OnboardArgs) -> anyhow::Result<()> {
 
 async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     let mut profile = load_profile_or_default();
+    let previous_operator_name = profile.operator_name.clone();
     let gateway_base_url = resolve_gateway_base_url(args.gateway.as_deref(), &profile);
     let client = GatewayClient::new(gateway_base_url.clone())?;
     let interactive = !args.yes;
@@ -1588,7 +1589,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             "This flow will log you in, choose an AI model, choose a chat app, and optionally install skills and claim a local node."
         );
         println!(
-            "Fast path: choose OpenAI, Anthropic Claude, or Google Gemini and paste an API key; choose Telegram Bot and paste a bot token."
+            "Fast path: choose OpenAI Codex and sign in with ChatGPT, or choose OpenAI / Anthropic Claude / Google Gemini and paste an API key; choose Telegram Bot and paste a bot token."
         );
         println!();
     }
@@ -1714,6 +1715,35 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             .region
             .clone()
             .unwrap_or(workspace_defaults.region.clone());
+        let operator_changed = previous_operator_name
+            .as_deref()
+            .map(|value| !value.eq_ignore_ascii_case(&response.session.operator_name))
+            .unwrap_or(false);
+        let identity_differs_from_suggested = workspace.display_name.trim()
+            != workspace_defaults.display_name.trim()
+            || workspace.tenant_id.trim() != workspace_defaults.tenant_id.trim()
+            || workspace.project_id.trim() != workspace_defaults.project_id.trim()
+            || workspace.region.trim() != workspace_defaults.region.trim();
+        let (display_name, tenant_id, project_id, region) = if interactive
+            && operator_changed
+            && identity_differs_from_suggested
+            && prompt_confirm(
+                &format!(
+                    "Update workspace identity to match operator `{}`",
+                    response.session.operator_name
+                ),
+                true,
+            )?
+        {
+            (
+                workspace_defaults.display_name.clone(),
+                workspace_defaults.tenant_id.clone(),
+                workspace_defaults.project_id.clone(),
+                workspace_defaults.region.clone(),
+            )
+        } else {
+            (display_name, tenant_id, project_id, region)
+        };
         println!(
             "Using workspace identity: {} [{}] tenant={} project={}",
             display_name, region, tenant_id, project_id
@@ -1854,6 +1884,19 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             "Connector credentials were updated locally. Restart the gateway to switch the live model/chat configuration to the new credentials."
         );
     }
+    if updated_workspace
+        .default_chat_platforms
+        .iter()
+        .any(|platform| platform == "telegram")
+    {
+        println!("Telegram bot commands: /help, /new, /skills, /skill, /model, /status");
+    }
+    print_setup_runtime_summary(
+        &connectors_status,
+        &profile.connector_env,
+        &selected_models,
+        &selected_channels,
+    );
     println!("Next: run `dawn-node gateway start` or `dawn-node run`.");
     Ok(())
 }
@@ -1885,6 +1928,47 @@ fn default_operator_name(profile: &DawnCliProfile) -> String {
                 .filter(|value| !value.trim().is_empty())
         })
         .unwrap_or_else(|| DEFAULT_OPERATOR_NAME.to_string())
+}
+
+fn print_setup_runtime_summary(
+    connectors_status: &Value,
+    staged_env: &BTreeMap<String, String>,
+    selected_models: &[String],
+    selected_channels: &[String],
+) {
+    if selected_models.is_empty() && selected_channels.is_empty() {
+        return;
+    }
+    println!("Runtime readiness:");
+    for target in selected_models {
+        println!(
+            "  model {:<20} {}",
+            connector_setup_label(true, target),
+            setup_runtime_status_label(connectors_status, staged_env, true, target)
+        );
+    }
+    for target in selected_channels {
+        println!(
+            "  chat  {:<20} {}",
+            connector_setup_label(false, target),
+            setup_runtime_status_label(connectors_status, staged_env, false, target)
+        );
+    }
+}
+
+fn setup_runtime_status_label(
+    connectors_status: &Value,
+    staged_env: &BTreeMap<String, String>,
+    is_models: bool,
+    target: &str,
+) -> &'static str {
+    if connector_is_live_configured(connectors_status, target) {
+        "live on gateway"
+    } else if connector_env_ready(is_models, target, staged_env) {
+        "staged locally (restart gateway to switch live config)"
+    } else {
+        "needs additional credentials"
+    }
 }
 
 fn suggest_setup_workspace_identity(
@@ -2643,6 +2727,9 @@ fn connector_env_ready(
     target: &str,
     staged_env: &BTreeMap<String, String>,
 ) -> bool {
+    if is_models && target == "openai_codex" {
+        return openai_codex_auth_ready();
+    }
     connector_requirement_groups(is_models, target)
         .iter()
         .any(|group| {
