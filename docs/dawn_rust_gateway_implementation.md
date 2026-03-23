@@ -69,8 +69,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
     - LINE Messaging API push message
     - Matrix Client-Server API room message send
     - Google Chat incoming webhook bot
-    - Signal send via `signal-cli-rest-api`
-    - BlueBubbles private API text message send
+    - Signal channel send via `signal-cli-rest-api`, including text, attachment, reaction, and receipt actions
+    - BlueBubbles private API channel send, including text, attachment, reaction, typing, and mark-read actions
     - Feishu webhook bot
     - DingTalk webhook bot
     - WeCom webhook bot
@@ -365,6 +365,7 @@ Identity And Onboarding:
 - the desktop CLI now exposes a top-level `dawn-node setup` flow that bootstraps an operator session, lets the user choose default model providers and chat platforms, stages connector secrets locally, installs selected skills, and optionally issues a first local node claim in one pass
 - guided setup now defaults to a simpler OpenClaw-style path: it auto-suggests workspace identity values, avoids prompting for tenant/project/region unless `--advanced` is used, and a first interactive `dawn-node` run will auto-launch setup when no local CLI session is present
 - the desktop CLI now also exposes `dawn-node channels pairings list|approve|reject`, so Signal and BlueBubbles inbound pairing decisions can be resolved from the local workstation without dropping into raw HTTP calls
+- `dawn-node channels send signal|bluebubbles` now supports richer native actions: Signal can stage attachments, reactions, and receipts, while BlueBubbles can stage attachments, reactions, typing, and mark-read actions from the same CLI surface instead of forcing raw JSON calls
 - the desktop CLI now also exposes `dawn-node ingress status`, which prints ingress callback readiness together with Signal/BlueBubbles DM policy, allowlist counts, and pending-pairing counts
 - `dawn-node ingress connect signal|bluebubbles` now accepts `--dm-policy open|allowlist|pairing|disabled` and repeated `--allow-from` values so inbound chat policy can be staged from the local workstation instead of editing environment variables by hand
 - `GET /api/gateway/identity/status` now also returns a durable readiness summary with `completionPercent`, `nextStep`, per-surface checklist items, and counts for sessions, nodes, default connectors, ingress, and end-user approval backlog
@@ -1448,7 +1449,7 @@ Removed legacy launchers:
 - Agent Card discovery and invocation now work for Dawn-compatible task endpoints, but the compatibility layer is still pragmatic rather than a fully heterogeneous A2A adapter matrix.
 - The node agent is real but still minimal; it is not yet a full production agent runtime.
 - Connectors are real HTTP integrations, but they are still isolated endpoints rather than part of a full orchestration graph.
-- Inbound chat ingress now covers Telegram, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, and Signal/BlueBubbles now include configurable `open`, `allowlist`, `pairing`, and `disabled` DM policies plus a persisted pairing ledger with operator approve/reject endpoints. Attachment-only messages and reaction events are now summarized into routable task text, and typing / receipt events are persisted without creating spurious tasks. It is still not a full channel-native workflow surface: there is not yet multi-account pairing state, native attachment upload/download handling, or in-channel approval buttons.
+- Inbound chat ingress now covers Telegram, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and normalized QQ events, and Signal/BlueBubbles now include configurable `open`, `allowlist`, `pairing`, and `disabled` DM policies plus a persisted pairing ledger with operator approve/reject endpoints. Attachment-only messages and reaction events are summarized into routable task text, typing / receipt events are persisted without creating spurious tasks, and outbound Signal/BlueBubbles connectors now expose native attachment, reaction, receipt/typing, and mark-read actions. It is still not a full channel-native workflow surface: there is not yet multi-account pairing state, channel-native attachment download, in-channel approval buttons, or richer account/session management.
 - Identity onboarding now exposes a concrete readiness/checklist view, persistent setup verification receipts, node-claim reissue, and claim audit history for operator session bootstrap, workspace setup, connector defaults, ingress, node claims, and end-user approval routing, but it is still not a full opinionated wizard with persisted operator tasks or connector-by-connector validation history beyond the latest receipt chain.
 - Marketplace discovery now includes a federated peer registry and merged remote catalogs, but it is still early-stage: there is not yet signed peer bootstrap, ranking, reviews, download telemetry, or cross-gateway reputation.
 - The persistence backend is SQLite today; multi-node production deployment will still want a Postgres-grade shared store later.

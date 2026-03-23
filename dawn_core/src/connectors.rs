@@ -1,11 +1,13 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use axum::{
     Json, Router,
     extract::State,
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::{Client, Url};
+use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::info;
@@ -101,8 +103,19 @@ pub struct ModelResponseResult {
 #[serde(rename_all = "camelCase")]
 pub struct ChatDispatchRequest {
     pub platform: String,
-    pub text: String,
+    pub text: Option<String>,
     pub chat_id: Option<String>,
+    pub attachment_name: Option<String>,
+    pub attachment_base64: Option<String>,
+    pub attachment_content_type: Option<String>,
+    pub reaction: Option<String>,
+    pub target_message_id: Option<String>,
+    pub target_author: Option<String>,
+    pub remove_reaction: Option<bool>,
+    pub receipt_type: Option<String>,
+    pub typing: Option<String>,
+    pub mark_read: Option<bool>,
+    pub part_index: Option<i64>,
     pub parse_mode: Option<String>,
     pub disable_notification: Option<bool>,
     pub target_type: Option<String>,
@@ -132,7 +145,18 @@ pub struct WeChatOfficialAccountSendRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ChatTargetTextRequest {
     pub chat_id: String,
-    pub text: String,
+    pub text: Option<String>,
+    pub attachment_name: Option<String>,
+    pub attachment_base64: Option<String>,
+    pub attachment_content_type: Option<String>,
+    pub reaction: Option<String>,
+    pub target_message_id: Option<String>,
+    pub target_author: Option<String>,
+    pub remove_reaction: Option<bool>,
+    pub receipt_type: Option<String>,
+    pub typing: Option<String>,
+    pub mark_read: Option<bool>,
+    pub part_index: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,59 +221,123 @@ pub async fn execute_chat_connector(
 ) -> anyhow::Result<ChatSendResult> {
     match request.platform.as_str() {
         "telegram" => {
+            let text = require_chat_text(request.text.as_deref(), "telegram")?;
             let chat_id = request
                 .chat_id
                 .ok_or_else(|| anyhow::anyhow!("telegram connector requires chatId"))?;
             send_telegram_connector(TelegramSendRequest {
                 chat_id,
-                text: request.text,
+                text,
                 parse_mode: request.parse_mode,
                 disable_notification: request.disable_notification,
             })
             .await
         }
-        "slack" => send_webhook_connector("slack", "SLACK_BOT_WEBHOOK_URL", request.text).await,
+        "slack" => {
+            send_webhook_connector(
+                "slack",
+                "SLACK_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "slack")?,
+            )
+            .await
+        }
         "discord" => {
-            send_webhook_connector("discord", "DISCORD_BOT_WEBHOOK_URL", request.text).await
+            send_webhook_connector(
+                "discord",
+                "DISCORD_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "discord")?,
+            )
+            .await
         }
         "mattermost" => {
-            send_webhook_connector("mattermost", "MATTERMOST_BOT_WEBHOOK_URL", request.text).await
+            send_webhook_connector(
+                "mattermost",
+                "MATTERMOST_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "mattermost")?,
+            )
+            .await
         }
         "msteams" => {
-            send_webhook_connector("msteams", "MSTEAMS_BOT_WEBHOOK_URL", request.text).await
+            send_webhook_connector(
+                "msteams",
+                "MSTEAMS_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "msteams")?,
+            )
+            .await
         }
         "whatsapp" => {
+            let text = require_chat_text(request.text.as_deref(), "whatsapp")?;
             let chat_id = request
                 .chat_id
                 .ok_or_else(|| anyhow::anyhow!("whatsapp connector requires chatId"))?;
             send_whatsapp_connector(ChatTargetTextRequest {
                 chat_id,
-                text: request.text,
+                text: Some(text),
+                attachment_name: None,
+                attachment_base64: None,
+                attachment_content_type: None,
+                reaction: None,
+                target_message_id: None,
+                target_author: None,
+                remove_reaction: None,
+                receipt_type: None,
+                typing: None,
+                mark_read: None,
+                part_index: None,
             })
             .await
         }
         "line" => {
+            let text = require_chat_text(request.text.as_deref(), "line")?;
             let chat_id = request
                 .chat_id
                 .ok_or_else(|| anyhow::anyhow!("line connector requires chatId"))?;
             send_line_connector(ChatTargetTextRequest {
                 chat_id,
-                text: request.text,
+                text: Some(text),
+                attachment_name: None,
+                attachment_base64: None,
+                attachment_content_type: None,
+                reaction: None,
+                target_message_id: None,
+                target_author: None,
+                remove_reaction: None,
+                receipt_type: None,
+                typing: None,
+                mark_read: None,
+                part_index: None,
             })
             .await
         }
         "matrix" => {
+            let text = require_chat_text(request.text.as_deref(), "matrix")?;
             let chat_id = request
                 .chat_id
                 .ok_or_else(|| anyhow::anyhow!("matrix connector requires chatId"))?;
             send_matrix_connector(ChatTargetTextRequest {
                 chat_id,
-                text: request.text,
+                text: Some(text),
+                attachment_name: None,
+                attachment_base64: None,
+                attachment_content_type: None,
+                reaction: None,
+                target_message_id: None,
+                target_author: None,
+                remove_reaction: None,
+                receipt_type: None,
+                typing: None,
+                mark_read: None,
+                part_index: None,
             })
             .await
         }
         "google_chat" => {
-            send_webhook_connector("google_chat", "GOOGLE_CHAT_BOT_WEBHOOK_URL", request.text).await
+            send_webhook_connector(
+                "google_chat",
+                "GOOGLE_CHAT_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "google_chat")?,
+            )
+            .await
         }
         "signal" => {
             let chat_id = request
@@ -258,6 +346,17 @@ pub async fn execute_chat_connector(
             send_signal_connector(ChatTargetTextRequest {
                 chat_id,
                 text: request.text,
+                attachment_name: request.attachment_name,
+                attachment_base64: request.attachment_base64,
+                attachment_content_type: request.attachment_content_type,
+                reaction: request.reaction,
+                target_message_id: request.target_message_id,
+                target_author: request.target_author,
+                remove_reaction: request.remove_reaction,
+                receipt_type: request.receipt_type,
+                typing: request.typing,
+                mark_read: request.mark_read,
+                part_index: request.part_index,
             })
             .await
         }
@@ -268,33 +367,63 @@ pub async fn execute_chat_connector(
             send_bluebubbles_connector(ChatTargetTextRequest {
                 chat_id,
                 text: request.text,
+                attachment_name: request.attachment_name,
+                attachment_base64: request.attachment_base64,
+                attachment_content_type: request.attachment_content_type,
+                reaction: request.reaction,
+                target_message_id: request.target_message_id,
+                target_author: request.target_author,
+                remove_reaction: request.remove_reaction,
+                receipt_type: request.receipt_type,
+                typing: request.typing,
+                mark_read: request.mark_read,
+                part_index: request.part_index,
             })
             .await
         }
-        "feishu" => send_webhook_connector("feishu", "FEISHU_BOT_WEBHOOK_URL", request.text).await,
+        "feishu" => {
+            send_webhook_connector(
+                "feishu",
+                "FEISHU_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "feishu")?,
+            )
+            .await
+        }
         "dingtalk" => {
-            send_webhook_connector("dingtalk", "DINGTALK_BOT_WEBHOOK_URL", request.text).await
+            send_webhook_connector(
+                "dingtalk",
+                "DINGTALK_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "dingtalk")?,
+            )
+            .await
         }
         "wecom_bot" | "wecom" => {
-            send_webhook_connector("wecom_bot", "WECOM_BOT_WEBHOOK_URL", request.text).await
+            send_webhook_connector(
+                "wecom_bot",
+                "WECOM_BOT_WEBHOOK_URL",
+                require_chat_text(request.text.as_deref(), "wecom_bot")?,
+            )
+            .await
         }
         "wechat_official_account" => {
+            let text = require_chat_text(request.text.as_deref(), "wechat_official_account")?;
             let open_id = request.chat_id.ok_or_else(|| {
                 anyhow::anyhow!("wechat_official_account connector requires chatId as openId")
             })?;
             send_wechat_official_account_connector(WeChatOfficialAccountSendRequest {
                 open_id,
-                text: request.text,
+                text,
             })
             .await
         }
         "qq" => {
+            let text = require_chat_text(request.text.as_deref(), "qq")?;
             let recipient_id = request
                 .chat_id
                 .ok_or_else(|| anyhow::anyhow!("qq connector requires chatId as recipient_id"))?;
             send_qq_connector(QQSendRequest {
                 recipient_id,
-                text: request.text,
+                text,
                 target_type: request.target_type,
                 event_id: request.event_id,
                 msg_id: request.msg_id,
@@ -1673,6 +1802,7 @@ async fn send_webhook_connector(
 }
 
 async fn send_whatsapp_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let text = require_chat_text(request.text.as_deref(), "whatsapp")?;
     let Some(access_token) = std::env::var("WHATSAPP_ACCESS_TOKEN").ok() else {
         return Ok(ChatSendResult {
             mode: "dry_run",
@@ -1680,7 +1810,7 @@ async fn send_whatsapp_connector(request: ChatTargetTextRequest) -> anyhow::Resu
             delivered: false,
             raw_response: Some(json!({
                 "chatId": request.chat_id,
-                "text": request.text,
+                "text": text,
                 "reason": "WHATSAPP_ACCESS_TOKEN is not configured"
             })),
         });
@@ -1692,7 +1822,7 @@ async fn send_whatsapp_connector(request: ChatTargetTextRequest) -> anyhow::Resu
             delivered: false,
             raw_response: Some(json!({
                 "chatId": request.chat_id,
-                "text": request.text,
+                "text": text,
                 "reason": "WHATSAPP_PHONE_NUMBER_ID is not configured"
             })),
         });
@@ -1703,7 +1833,7 @@ async fn send_whatsapp_connector(request: ChatTargetTextRequest) -> anyhow::Resu
             phone_number_id
         )
     });
-    let payload = build_whatsapp_text_payload(&request.chat_id, &request.text);
+    let payload = build_whatsapp_text_payload(&request.chat_id, &text);
 
     info!("Dispatching live WhatsApp Cloud message through gateway connector");
     let response = Client::new()
@@ -1738,6 +1868,7 @@ async fn send_whatsapp_connector(request: ChatTargetTextRequest) -> anyhow::Resu
 }
 
 async fn send_line_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let text = require_chat_text(request.text.as_deref(), "line")?;
     let Some(access_token) = std::env::var("LINE_CHANNEL_ACCESS_TOKEN").ok() else {
         return Ok(ChatSendResult {
             mode: "dry_run",
@@ -1745,14 +1876,14 @@ async fn send_line_connector(request: ChatTargetTextRequest) -> anyhow::Result<C
             delivered: false,
             raw_response: Some(json!({
                 "chatId": request.chat_id,
-                "text": request.text,
+                "text": text,
                 "reason": "LINE_CHANNEL_ACCESS_TOKEN is not configured"
             })),
         });
     };
     let endpoint = std::env::var("LINE_PUSH_API_URL")
         .unwrap_or_else(|_| "https://api.line.me/v2/bot/message/push".to_string());
-    let payload = build_line_push_payload(&request.chat_id, &request.text);
+    let payload = build_line_push_payload(&request.chat_id, &text);
 
     info!("Dispatching live LINE push message through gateway connector");
     let response = Client::new()
@@ -1783,6 +1914,7 @@ async fn send_line_connector(request: ChatTargetTextRequest) -> anyhow::Result<C
 }
 
 async fn send_matrix_connector(request: ChatTargetTextRequest) -> anyhow::Result<ChatSendResult> {
+    let text = require_chat_text(request.text.as_deref(), "matrix")?;
     let Some(access_token) = std::env::var("MATRIX_ACCESS_TOKEN").ok() else {
         return Ok(ChatSendResult {
             mode: "dry_run",
@@ -1790,7 +1922,7 @@ async fn send_matrix_connector(request: ChatTargetTextRequest) -> anyhow::Result
             delivered: false,
             raw_response: Some(json!({
                 "chatId": request.chat_id,
-                "text": request.text,
+                "text": text,
                 "reason": "MATRIX_ACCESS_TOKEN is not configured"
             })),
         });
@@ -1799,7 +1931,7 @@ async fn send_matrix_connector(request: ChatTargetTextRequest) -> anyhow::Result
         .unwrap_or_else(|_| "https://matrix-client.matrix.org".to_string());
     let txn_id = Uuid::new_v4().to_string();
     let endpoint = build_matrix_send_endpoint(&homeserver, &request.chat_id, &txn_id)?;
-    let payload = build_matrix_text_payload(&request.text);
+    let payload = build_matrix_text_payload(&text);
 
     info!("Dispatching live Matrix room message through gateway connector");
     let response = Client::new()
@@ -1838,34 +1970,28 @@ async fn send_signal_connector(request: ChatTargetTextRequest) -> anyhow::Result
             raw_response: Some(json!({
                 "chatId": request.chat_id,
                 "text": request.text,
+                "attachmentName": request.attachment_name,
+                "reaction": request.reaction,
+                "targetMessageId": request.target_message_id,
+                "receiptType": request.receipt_type,
                 "reason": "SIGNAL_ACCOUNT or SIGNAL_NUMBER is not configured"
             })),
         });
     };
-    let endpoint = resolve_signal_send_endpoint()?;
-    let payload = build_signal_send_payload(&account, &request.chat_id, &request.text);
 
-    info!("Dispatching live Signal message through gateway connector");
-    let response = Client::new().post(endpoint).json(&payload).send().await?;
-    let status = response.status();
-    let raw_response = match response.json::<Value>().await {
-        Ok(value) => value,
-        Err(_) => json!({
-            "status": status.as_u16(),
-            "payloadAccepted": status.is_success()
-        }),
-    };
-
-    if !status.is_success() {
-        anyhow::bail!("signal connector request failed with status {status}: {raw_response}");
+    if request.typing.is_some() || request.mark_read == Some(true) {
+        anyhow::bail!("signal connector does not support typing or mark-read actions");
     }
 
-    Ok(ChatSendResult {
-        mode: "live",
-        platform: "signal",
-        delivered: raw_response.get("timestamp").is_some() || status.is_success(),
-        raw_response: Some(raw_response),
-    })
+    if request.receipt_type.is_some() {
+        return send_signal_receipt_connector(&account, request).await;
+    }
+
+    if request.reaction.is_some() || request.remove_reaction == Some(true) {
+        return send_signal_reaction_connector(&account, request).await;
+    }
+
+    send_signal_message_connector(&account, request).await
 }
 
 async fn send_bluebubbles_connector(
@@ -1879,27 +2005,170 @@ async fn send_bluebubbles_connector(
             raw_response: Some(json!({
                 "chatId": request.chat_id,
                 "text": request.text,
+                "attachmentName": request.attachment_name,
+                "reaction": request.reaction,
+                "targetMessageId": request.target_message_id,
+                "typing": request.typing,
+                "markRead": request.mark_read,
                 "reason": "BLUEBUBBLES_PASSWORD is not configured"
             })),
         });
     };
-    let endpoint = resolve_bluebubbles_send_endpoint(&password)?;
-    let payload = build_bluebubbles_text_payload(
-        &request.chat_id,
-        &request.text,
-        &format!("dawn-{}", Uuid::new_v4()),
-    );
 
-    info!("Dispatching live BlueBubbles message through gateway connector");
+    if request.typing.is_some() {
+        return send_bluebubbles_typing_connector(&password, request).await;
+    }
+
+    if request.mark_read == Some(true) {
+        return send_bluebubbles_mark_read_connector(&password, request).await;
+    }
+
+    if request.reaction.is_some() {
+        return send_bluebubbles_reaction_connector(&password, request).await;
+    }
+
+    if request.receipt_type.is_some() || request.remove_reaction == Some(true) {
+        anyhow::bail!(
+            "bluebubbles connector does not support receipt_type or remove_reaction outside native reaction values"
+        );
+    }
+
+    if request.attachment_base64.is_some() {
+        return send_bluebubbles_attachment_connector(&password, request).await;
+    }
+
+    send_bluebubbles_text_connector(&password, request).await
+}
+
+struct DecodedAttachment {
+    name: String,
+    bytes: Vec<u8>,
+    content_type: Option<String>,
+}
+
+async fn send_signal_message_connector(
+    account: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let attachment = decode_attachment(&request)?;
+    let text = request.text.as_deref().filter(|value| !value.trim().is_empty());
+    if text.is_none() && attachment.is_none() {
+        anyhow::bail!("signal connector requires text or attachment content");
+    }
+
+    let endpoint = resolve_signal_send_endpoint()?;
+    let payload = build_signal_send_payload(account, &request.chat_id, text, attachment.as_ref());
+
+    info!("Dispatching live Signal message through gateway connector");
     let response = Client::new().post(endpoint).json(&payload).send().await?;
     let status = response.status();
-    let raw_response = match response.json::<Value>().await {
-        Ok(value) => value,
-        Err(_) => json!({
-            "status": status.as_u16(),
-            "payloadAccepted": status.is_success()
-        }),
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("signal connector request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "signal",
+        delivered: raw_response.get("timestamp").is_some() || status.is_success(),
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_signal_reaction_connector(
+    account: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let target_message_id = request
+        .target_message_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("signal reactions require targetMessageId"))?;
+    let endpoint = resolve_signal_reaction_endpoint(account)?;
+    let payload = build_signal_reaction_payload(
+        &request.chat_id,
+        target_message_id,
+        request.reaction.as_deref(),
+        request.target_author.as_deref(),
+    );
+    let remove = request.remove_reaction.unwrap_or(false);
+    let method = if remove {
+        reqwest::Method::DELETE
+    } else {
+        reqwest::Method::POST
     };
+
+    info!("Dispatching live Signal reaction through gateway connector");
+    let response = Client::new()
+        .request(method, endpoint)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("signal reaction request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "signal",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_signal_receipt_connector(
+    account: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let target_message_id = request
+        .target_message_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("signal receipts require targetMessageId"))?;
+    let receipt_type = request
+        .receipt_type
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("read");
+    let endpoint = resolve_signal_receipt_endpoint(account)?;
+    let payload = build_signal_receipt_payload(&request.chat_id, target_message_id, receipt_type);
+
+    info!("Dispatching live Signal receipt through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("signal receipt request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "signal",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_text_connector(
+    password: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let text = request
+        .text
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles connector requires text"))?;
+    let endpoint = resolve_bluebubbles_send_endpoint(password)?;
+    let payload =
+        build_bluebubbles_text_payload(&request.chat_id, text, &format!("dawn-{}", Uuid::new_v4()));
+
+    info!("Dispatching live BlueBubbles text message through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
 
     if !status.is_success() {
         anyhow::bail!("bluebubbles connector request failed with status {status}: {raw_response}");
@@ -1909,6 +2178,151 @@ async fn send_bluebubbles_connector(
         mode: "live",
         platform: "bluebubbles",
         delivered: status.is_success(),
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_attachment_connector(
+    password: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    if request
+        .text
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        anyhow::bail!("bluebubbles attachment send currently supports attachment-only messages");
+    }
+
+    let attachment = decode_attachment(&request)?
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles attachment send requires attachment content"))?;
+    let endpoint = resolve_bluebubbles_attachment_endpoint(password)?;
+    let mut form = Form::new()
+        .text("chatGuid", request.chat_id)
+        .text("name", attachment.name.clone())
+        .text("method", "private-api");
+    if let Some(target_message_id) = request.target_message_id.as_deref() {
+        form = form.text("selectedMessageGuid", target_message_id.to_string());
+    }
+    if let Some(part_index) = request.part_index {
+        form = form.text("partIndex", part_index.to_string());
+    }
+    let mut part = Part::bytes(attachment.bytes).file_name(attachment.name);
+    if let Some(content_type) = attachment.content_type.as_deref() {
+        part = part
+            .mime_str(content_type)
+            .map_err(|error| anyhow::anyhow!("invalid attachment content type: {error}"))?;
+    }
+    form = form.part("attachment", part);
+
+    info!("Dispatching live BlueBubbles attachment through gateway connector");
+    let response = Client::new().post(endpoint).multipart(form).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles attachment request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_reaction_connector(
+    password: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let target_message_id = request
+        .target_message_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles reactions require targetMessageId"))?;
+    let reaction = normalize_bluebubbles_reaction(
+        request
+            .reaction
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("bluebubbles reactions require reaction"))?,
+        request.remove_reaction.unwrap_or(false),
+    )?;
+    let endpoint = resolve_bluebubbles_reaction_endpoint(password)?;
+    let payload = build_bluebubbles_reaction_payload(
+        &request.chat_id,
+        target_message_id,
+        &reaction,
+        request.part_index,
+    );
+
+    info!("Dispatching live BlueBubbles reaction through gateway connector");
+    let response = Client::new().post(endpoint).json(&payload).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles reaction request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_typing_connector(
+    password: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let typing = request
+        .typing
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("bluebubbles typing action requires typing=start|stop"))?;
+    let action = match typing.trim().to_ascii_lowercase().as_str() {
+        "start" | "started" => ("start", reqwest::Method::POST),
+        "stop" | "stopped" => ("stop", reqwest::Method::DELETE),
+        other => anyhow::bail!("unsupported bluebubbles typing action: {other}"),
+    };
+    let endpoint = resolve_bluebubbles_chat_action_endpoint(password, &request.chat_id, "typing")?;
+
+    info!("Dispatching live BlueBubbles typing action through gateway connector");
+    let response = Client::new().request(action.1, endpoint).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles {} typing request failed with status {status}: {raw_response}", action.0);
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
+        raw_response: Some(raw_response),
+    })
+}
+
+async fn send_bluebubbles_mark_read_connector(
+    password: &str,
+    request: ChatTargetTextRequest,
+) -> anyhow::Result<ChatSendResult> {
+    let endpoint = resolve_bluebubbles_chat_action_endpoint(password, &request.chat_id, "read")?;
+
+    info!("Dispatching live BlueBubbles mark-read action through gateway connector");
+    let response = Client::new().post(endpoint).send().await?;
+    let status = response.status();
+    let raw_response = parse_connector_response(response).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("bluebubbles mark-read request failed with status {status}: {raw_response}");
+    }
+
+    Ok(ChatSendResult {
+        mode: "live",
+        platform: "bluebubbles",
+        delivered: true,
         raw_response: Some(raw_response),
     })
 }
@@ -2185,11 +2599,60 @@ fn build_matrix_text_payload(text: &str) -> Value {
     })
 }
 
-fn build_signal_send_payload(account: &str, recipient: &str, text: &str) -> Value {
-    json!({
-        "message": text,
+fn build_signal_send_payload(
+    account: &str,
+    recipient: &str,
+    text: Option<&str>,
+    attachment: Option<&DecodedAttachment>,
+) -> Value {
+    let mut payload = json!({
         "number": account,
         "recipients": [recipient]
+    });
+    if let Some(text) = text {
+        payload["message"] = json!(text);
+    }
+    if let Some(attachment) = attachment {
+        let content_type = attachment
+            .content_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
+        let encoded = BASE64_STANDARD.encode(&attachment.bytes);
+        payload["base64_attachments"] = json!([format!(
+            "data:{content_type};filename={};base64,{encoded}",
+            attachment.name
+        )]);
+    }
+    payload
+}
+
+fn build_signal_reaction_payload(
+    recipient: &str,
+    target_message_id: &str,
+    reaction: Option<&str>,
+    target_author: Option<&str>,
+) -> Value {
+    let timestamp = parse_numeric_or_string(target_message_id);
+    let mut payload = json!({
+        "recipient": recipient,
+        "timestamp": timestamp,
+        "target_author": target_author.unwrap_or(recipient),
+    });
+    if let Some(reaction) = reaction.filter(|value| !value.trim().is_empty()) {
+        payload["reaction"] = json!(reaction);
+    }
+    payload
+}
+
+fn build_signal_receipt_payload(
+    recipient: &str,
+    target_message_id: &str,
+    receipt_type: &str,
+) -> Value {
+    json!({
+        "recipient": recipient,
+        "timestamp": parse_numeric_or_string(target_message_id),
+        "receipt_type": receipt_type,
     })
 }
 
@@ -2220,6 +2683,23 @@ fn build_bluebubbles_text_payload(chat_guid: &str, text: &str, temp_guid: &str) 
     })
 }
 
+fn build_bluebubbles_reaction_payload(
+    chat_guid: &str,
+    selected_message_guid: &str,
+    reaction: &str,
+    part_index: Option<i64>,
+) -> Value {
+    let mut payload = json!({
+        "chatGuid": chat_guid,
+        "selectedMessageGuid": selected_message_guid,
+        "reaction": reaction,
+    });
+    if let Some(part_index) = part_index {
+        payload["partIndex"] = json!(part_index);
+    }
+    payload
+}
+
 fn resolve_signal_send_endpoint() -> anyhow::Result<Url> {
     let endpoint = resolve_first_present_env(&["SIGNAL_SEND_API_URL"]).unwrap_or_else(|| {
         let base = resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
@@ -2232,6 +2712,42 @@ fn resolve_signal_send_endpoint() -> anyhow::Result<Url> {
         }
     });
     Url::parse(&endpoint).map_err(Into::into)
+}
+
+fn resolve_signal_reaction_endpoint(account: &str) -> anyhow::Result<Url> {
+    resolve_signal_account_endpoint(
+        Some("SIGNAL_REACTION_API_URL"),
+        &["v1", "reactions", account],
+    )
+}
+
+fn resolve_signal_receipt_endpoint(account: &str) -> anyhow::Result<Url> {
+    resolve_signal_account_endpoint(
+        Some("SIGNAL_RECEIPT_API_URL"),
+        &["v1", "receipts", account],
+    )
+}
+
+fn resolve_signal_account_endpoint(
+    explicit_env: Option<&str>,
+    segments: &[&str],
+) -> anyhow::Result<Url> {
+    if let Some(explicit_env) = explicit_env {
+        if let Ok(explicit) = std::env::var(explicit_env) {
+            return Url::parse(&explicit).map_err(Into::into);
+        }
+    }
+    let base = resolve_first_present_env(&["SIGNAL_HTTP_URL", "SIGNAL_CLI_REST_API_URL"])
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let mut url = Url::parse(&base)?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid Signal REST API base url"))?;
+        path.pop_if_empty();
+        path.extend(segments);
+    }
+    Ok(url)
 }
 
 fn resolve_bluebubbles_send_endpoint(password: &str) -> anyhow::Result<Url> {
@@ -2259,6 +2775,163 @@ fn resolve_bluebubbles_send_endpoint(password: &str) -> anyhow::Result<Url> {
     }
 
     Ok(url)
+}
+
+fn resolve_bluebubbles_attachment_endpoint(password: &str) -> anyhow::Result<Url> {
+    resolve_bluebubbles_authed_endpoint(
+        password,
+        Some("BLUEBUBBLES_SEND_ATTACHMENT_URL"),
+        &["api", "v1", "message", "attachment"],
+    )
+}
+
+fn resolve_bluebubbles_reaction_endpoint(password: &str) -> anyhow::Result<Url> {
+    resolve_bluebubbles_authed_endpoint(
+        password,
+        Some("BLUEBUBBLES_SEND_REACTION_URL"),
+        &["api", "v1", "message", "react"],
+    )
+}
+
+fn resolve_bluebubbles_chat_action_endpoint(
+    password: &str,
+    chat_guid: &str,
+    action: &str,
+) -> anyhow::Result<Url> {
+    resolve_bluebubbles_authed_endpoint(
+        password,
+        None,
+        &["api", "v1", "chat", chat_guid, action],
+    )
+}
+
+fn resolve_bluebubbles_authed_endpoint(
+    password: &str,
+    explicit_env: Option<&str>,
+    segments: &[&str],
+) -> anyhow::Result<Url> {
+    let mut url = if let Some(explicit_env) = explicit_env {
+        if let Ok(explicit) = std::env::var(explicit_env) {
+            Url::parse(&explicit)?
+        } else {
+            bluebubbles_base_url()?
+        }
+    } else {
+        bluebubbles_base_url()?
+    };
+
+    if url.path() == "/" || explicit_env.is_none() || url.path().ends_with('/') {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid BLUEBUBBLES_SERVER_URL path"))?;
+        path.pop_if_empty();
+        path.extend(segments);
+    }
+
+    let has_auth = url
+        .query_pairs()
+        .any(|(key, _)| key == "guid" || key == "password");
+    if !has_auth {
+        url.query_pairs_mut().append_pair("guid", password);
+    }
+    Ok(url)
+}
+
+fn bluebubbles_base_url() -> anyhow::Result<Url> {
+    let base = std::env::var("BLUEBUBBLES_SERVER_URL")
+        .map_err(|_| anyhow::anyhow!("BLUEBUBBLES_SERVER_URL is not configured"))?;
+    Url::parse(&base).map_err(Into::into)
+}
+
+fn decode_attachment(request: &ChatTargetTextRequest) -> anyhow::Result<Option<DecodedAttachment>> {
+    let Some(encoded) = request
+        .attachment_base64
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|error| anyhow::anyhow!("invalid attachmentBase64 payload: {error}"))?;
+    let name = request
+        .attachment_name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "attachment.bin".to_string());
+    Ok(Some(DecodedAttachment {
+        name,
+        bytes,
+        content_type: request
+            .attachment_content_type
+            .clone()
+            .or_else(|| infer_content_type_from_name(request.attachment_name.as_deref())),
+    }))
+}
+
+fn infer_content_type_from_name(name: Option<&str>) -> Option<String> {
+    let extension = Path::new(name?).extension()?.to_str()?.to_ascii_lowercase();
+    let content_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "json" => "application/json",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        _ => return None,
+    };
+    Some(content_type.to_string())
+}
+
+fn parse_numeric_or_string(value: &str) -> Value {
+    value
+        .parse::<i64>()
+        .map(Value::from)
+        .unwrap_or_else(|_| Value::from(value.to_string()))
+}
+
+fn require_chat_text(text: Option<&str>, platform: &str) -> anyhow::Result<String> {
+    text.filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow::anyhow!("{platform} connector requires text"))
+}
+
+async fn parse_connector_response(response: reqwest::Response) -> anyhow::Result<Value> {
+    let status = response.status();
+    Ok(match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status": status.as_u16(),
+            "payloadAccepted": status.is_success()
+        }),
+    })
+}
+
+fn normalize_bluebubbles_reaction(reaction: &str, remove: bool) -> anyhow::Result<String> {
+    let normalized = match reaction.trim().to_ascii_lowercase().as_str() {
+        "❤️" | "❤" | "love" => "love",
+        "👍" | "like" => "like",
+        "👎" | "dislike" => "dislike",
+        "😂" | "😆" | "haha" | "laugh" => "laugh",
+        "‼️" | "!!" | "emphasize" => "emphasize",
+        "❓" | "?" | "question" => "question",
+        "-love" | "-like" | "-dislike" | "-laugh" | "-emphasize" | "-question" => {
+            return Ok(reaction.trim().to_ascii_lowercase())
+        }
+        other => anyhow::bail!("unsupported BlueBubbles reaction: {other}"),
+    };
+    if remove {
+        Ok(format!("-{normalized}"))
+    } else {
+        Ok(normalized.to_string())
+    }
 }
 
 fn build_qq_message_payload(text: &str, request: &QQSendRequest) -> Value {
@@ -2491,12 +3164,15 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        QQSendRequest, build_bluebubbles_text_payload, build_chat_completion_messages,
-        build_line_push_payload, build_matrix_send_endpoint, build_matrix_text_payload,
-        build_qq_message_payload, build_signal_send_payload, build_wechat_official_account_payload,
-        build_whatsapp_text_payload, extract_anthropic_text, extract_chat_completion_text,
-        extract_google_text, extract_ollama_text, extract_openai_text, normalize_qq_target_type,
-        resolve_cloudflare_ai_gateway_endpoint, resolve_openai_style_endpoint,
+        DecodedAttachment, QQSendRequest, build_bluebubbles_reaction_payload,
+        build_bluebubbles_text_payload, build_chat_completion_messages, build_line_push_payload,
+        build_matrix_send_endpoint, build_matrix_text_payload, build_qq_message_payload,
+        build_signal_reaction_payload, build_signal_receipt_payload, build_signal_send_payload,
+        build_wechat_official_account_payload, build_whatsapp_text_payload,
+        extract_anthropic_text, extract_chat_completion_text, extract_google_text,
+        extract_ollama_text, extract_openai_text, normalize_bluebubbles_reaction,
+        normalize_qq_target_type, resolve_cloudflare_ai_gateway_endpoint,
+        resolve_openai_style_endpoint,
     };
 
     #[test]
@@ -2685,7 +3361,12 @@ mod tests {
 
     #[test]
     fn builds_signal_send_payload() {
-        let payload = build_signal_send_payload("+15550001111", "+15550002222", "hello signal");
+        let payload = build_signal_send_payload(
+            "+15550001111",
+            "+15550002222",
+            Some("hello signal"),
+            None,
+        );
 
         assert_eq!(
             payload,
@@ -2693,6 +3374,63 @@ mod tests {
                 "message": "hello signal",
                 "number": "+15550001111",
                 "recipients": ["+15550002222"]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_signal_send_payload_with_attachment() {
+        let payload = build_signal_send_payload(
+            "+15550001111",
+            "+15550002222",
+            None,
+            Some(&DecodedAttachment {
+                name: "proof.txt".to_string(),
+                bytes: b"hello".to_vec(),
+                content_type: Some("text/plain".to_string()),
+            }),
+        );
+
+        assert_eq!(
+            payload,
+            json!({
+                "number": "+15550001111",
+                "recipients": ["+15550002222"],
+                "base64_attachments": ["data:text/plain;filename=proof.txt;base64,aGVsbG8="]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_signal_reaction_payload() {
+        let payload = build_signal_reaction_payload(
+            "+15550002222",
+            "1712345678901",
+            Some("❤️"),
+            Some("+15550003333"),
+        );
+
+        assert_eq!(
+            payload,
+            json!({
+                "recipient": "+15550002222",
+                "timestamp": 1712345678901i64,
+                "target_author": "+15550003333",
+                "reaction": "❤️"
+            })
+        );
+    }
+
+    #[test]
+    fn builds_signal_receipt_payload() {
+        let payload = build_signal_receipt_payload("+15550002222", "1712345678901", "viewed");
+
+        assert_eq!(
+            payload,
+            json!({
+                "recipient": "+15550002222",
+                "timestamp": 1712345678901i64,
+                "receipt_type": "viewed"
             })
         );
     }
@@ -2709,6 +3447,43 @@ mod tests {
                 "message": "hello blue",
                 "tempGuid": "temp-123"
             })
+        );
+    }
+
+    #[test]
+    fn builds_bluebubbles_reaction_payload() {
+        let payload = build_bluebubbles_reaction_payload(
+            "iMessage;+15550002222",
+            "message-guid-1",
+            "love",
+            Some(2),
+        );
+
+        assert_eq!(
+            payload,
+            json!({
+                "chatGuid": "iMessage;+15550002222",
+                "selectedMessageGuid": "message-guid-1",
+                "reaction": "love",
+                "partIndex": 2
+            })
+        );
+    }
+
+    #[test]
+    fn normalizes_bluebubbles_reaction_aliases() {
+        assert_eq!(
+            normalize_bluebubbles_reaction("❤️", false).expect("love reaction"),
+            "love"
+        );
+        assert_eq!(
+            normalize_bluebubbles_reaction("love", true).expect("remove love reaction"),
+            "-love"
+        );
+        assert_eq!(
+            normalize_bluebubbles_reaction("-question", false)
+                .expect("pre-normalized remove reaction"),
+            "-question"
         );
     }
 

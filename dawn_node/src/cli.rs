@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow, bail};
+use base64::Engine as _;
 use clap::{Args, Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::{Client, Method};
@@ -363,11 +364,33 @@ struct ModelTestArgs {
 #[derive(Args)]
 struct ChannelSendArgs {
     target: String,
-    text: String,
+    text: Option<String>,
     #[arg(long)]
     gateway: Option<String>,
     #[arg(long)]
     chat_id: Option<String>,
+    #[arg(long)]
+    attachment_file: Option<String>,
+    #[arg(long)]
+    attachment_name: Option<String>,
+    #[arg(long)]
+    attachment_content_type: Option<String>,
+    #[arg(long)]
+    reaction: Option<String>,
+    #[arg(long)]
+    target_message_id: Option<String>,
+    #[arg(long)]
+    target_author: Option<String>,
+    #[arg(long)]
+    remove_reaction: bool,
+    #[arg(long)]
+    receipt_type: Option<String>,
+    #[arg(long)]
+    typing: Option<String>,
+    #[arg(long)]
+    mark_read: bool,
+    #[arg(long)]
+    part_index: Option<i64>,
     #[arg(long)]
     parse_mode: Option<String>,
     #[arg(long)]
@@ -3238,36 +3261,156 @@ fn build_channel_send_request(
                 .chat_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("telegram send requires --chat-id"))?;
+            let text = require_channel_text(args, "telegram")?;
             json!({
                 "chatId": chat_id,
-                "text": args.text,
+                "text": text,
                 "parseMode": args.parse_mode,
                 "disableNotification": args.disable_notification,
             })
         }
         "slack" | "discord" | "mattermost" | "msteams" | "google_chat" | "feishu" | "dingtalk"
         | "wecom_bot" => {
+            let text = require_channel_text(args, target)?;
             json!({
-                "text": args.text,
+                "text": text,
             })
         }
-        "whatsapp" | "line" | "matrix" | "signal" | "bluebubbles" => {
+        "whatsapp" | "line" | "matrix" => {
             let chat_id = args
                 .chat_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("{target} send requires --chat-id"))?;
+            let text = require_channel_text(args, target)?;
             json!({
                 "chatId": chat_id,
-                "text": args.text,
+                "text": text,
             })
+        }
+        "signal" => {
+            let chat_id = args
+                .chat_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("signal send requires --chat-id"))?;
+            let (attachment_name, attachment_base64, attachment_content_type) =
+                encode_attachment_payload(args)?;
+            let has_text = args
+                .text
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            if !has_text
+                && attachment_base64.is_none()
+                && args.reaction.is_none()
+                && !args.remove_reaction
+                && args.receipt_type.is_none()
+            {
+                bail!(
+                    "signal send requires text, --attachment-file, --reaction, or --receipt-type"
+                );
+            }
+            if args.typing.is_some() || args.mark_read {
+                bail!("signal send does not support --typing or --mark-read");
+            }
+            let mut payload = json!({
+                "chatId": chat_id,
+            });
+            if let Some(text) = args.text.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["text"] = json!(text);
+            }
+            if let Some(attachment_name) = attachment_name {
+                payload["attachmentName"] = json!(attachment_name);
+            }
+            if let Some(attachment_base64) = attachment_base64 {
+                payload["attachmentBase64"] = json!(attachment_base64);
+            }
+            if let Some(attachment_content_type) = attachment_content_type {
+                payload["attachmentContentType"] = json!(attachment_content_type);
+            }
+            if let Some(reaction) = args.reaction.as_deref() {
+                payload["reaction"] = json!(reaction);
+            }
+            if let Some(target_message_id) = args.target_message_id.as_deref() {
+                payload["targetMessageId"] = json!(target_message_id);
+            }
+            if let Some(target_author) = args.target_author.as_deref() {
+                payload["targetAuthor"] = json!(target_author);
+            }
+            if args.remove_reaction {
+                payload["removeReaction"] = json!(true);
+            }
+            if let Some(receipt_type) = args.receipt_type.as_deref() {
+                payload["receiptType"] = json!(receipt_type);
+            }
+            payload
+        }
+        "bluebubbles" => {
+            let chat_id = args
+                .chat_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("bluebubbles send requires --chat-id"))?;
+            let (attachment_name, attachment_base64, attachment_content_type) =
+                encode_attachment_payload(args)?;
+            if attachment_base64.is_some()
+                && args
+                    .text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                bail!("bluebubbles attachment send currently does not support text captions");
+            }
+            if !args.mark_read
+                && args.typing.is_none()
+                && attachment_base64.is_none()
+                && args.reaction.is_none()
+                && args.text.as_deref().is_none_or(|value| value.trim().is_empty())
+            {
+                bail!(
+                    "bluebubbles send requires text, --attachment-file, --reaction, --typing, or --mark-read"
+                );
+            }
+            let mut payload = json!({
+                "chatId": chat_id,
+            });
+            if let Some(text) = args.text.as_deref().filter(|value| !value.trim().is_empty()) {
+                payload["text"] = json!(text);
+            }
+            if let Some(attachment_name) = attachment_name {
+                payload["attachmentName"] = json!(attachment_name);
+            }
+            if let Some(attachment_base64) = attachment_base64 {
+                payload["attachmentBase64"] = json!(attachment_base64);
+            }
+            if let Some(attachment_content_type) = attachment_content_type {
+                payload["attachmentContentType"] = json!(attachment_content_type);
+            }
+            if let Some(reaction) = args.reaction.as_deref() {
+                payload["reaction"] = json!(reaction);
+            }
+            if let Some(target_message_id) = args.target_message_id.as_deref() {
+                payload["targetMessageId"] = json!(target_message_id);
+            }
+            if args.remove_reaction {
+                payload["removeReaction"] = json!(true);
+            }
+            if let Some(typing) = args.typing.as_deref() {
+                payload["typing"] = json!(typing);
+            }
+            if args.mark_read {
+                payload["markRead"] = json!(true);
+            }
+            if let Some(part_index) = args.part_index {
+                payload["partIndex"] = json!(part_index);
+            }
+            payload
         }
         "wechat_official_account" => {
             let open_id = args.chat_id.as_deref().ok_or_else(|| {
                 anyhow!("wechat_official_account send requires --chat-id as openId")
             })?;
+            let text = require_channel_text(args, "wechat_official_account")?;
             json!({
                 "openId": open_id,
-                "text": args.text,
+                "text": text,
             })
         }
         "qq" => {
@@ -3275,9 +3418,10 @@ fn build_channel_send_request(
                 .chat_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("qq send requires --chat-id as recipientId"))?;
+            let text = require_channel_text(args, "qq")?;
             json!({
                 "recipientId": recipient_id,
-                "text": args.text,
+                "text": text,
                 "targetType": args.target_type,
                 "eventId": args.event_id,
                 "msgId": args.msg_id,
@@ -3289,6 +3433,67 @@ fn build_channel_send_request(
     };
 
     Ok((path.to_string(), body))
+}
+
+fn require_channel_text(args: &ChannelSendArgs, target: &str) -> anyhow::Result<String> {
+    args.text
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("{target} send requires text"))
+}
+
+fn encode_attachment_payload(
+    args: &ChannelSendArgs,
+) -> anyhow::Result<(Option<String>, Option<String>, Option<String>)> {
+    let Some(path) = args.attachment_file.as_deref() else {
+        return Ok((None, None, None));
+    };
+    let path = PathBuf::from(path);
+    let bytes =
+        fs::read(&path).with_context(|| format!("failed to read attachment {}", path.display()))?;
+    let name = args
+        .attachment_name
+        .clone()
+        .or_else(|| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(ToString::to_string)
+        })
+        .ok_or_else(|| anyhow!("unable to infer attachment name from {}", path.display()))?;
+    let content_type = args
+        .attachment_content_type
+        .clone()
+        .or_else(|| infer_attachment_content_type(&name));
+    Ok((
+        Some(name),
+        Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        content_type,
+    ))
+}
+
+fn infer_attachment_content_type(name: &str) -> Option<String> {
+    let extension = PathBuf::from(name)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    let content_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "json" => "application/json",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        _ => return None,
+    };
+    Some(content_type.to_string())
 }
 
 fn export_secrets(profile: DawnCliProfile, args: SecretsExportArgs) -> anyhow::Result<()> {
@@ -3720,9 +3925,20 @@ async fn chat(args: ChatArgs) -> anyhow::Result<()> {
         &client,
         &ChannelSendArgs {
             target: args.target.clone(),
-            text: reply_text.clone(),
+            text: Some(reply_text.clone()),
             gateway: None,
             chat_id: args.chat_id,
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            part_index: None,
             parse_mode: args.parse_mode,
             disable_notification: args.disable_notification,
             target_type: args.target_type,
@@ -5705,6 +5921,8 @@ impl GatewayClient {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs};
+
     use super::{
         ApprovalRequestSummary, PaymentRecordSummary, build_ap2_signature_payload,
         build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
@@ -6341,9 +6559,20 @@ mod tests {
     fn builds_send_requests_for_new_webhook_channels() {
         let args = super::ChannelSendArgs {
             target: "mattermost".to_string(),
-            text: "hello channel".to_string(),
+            text: Some("hello channel".to_string()),
             gateway: None,
             chat_id: None,
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            part_index: None,
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6370,9 +6599,20 @@ mod tests {
 
         let targeted_args = super::ChannelSendArgs {
             target: "whatsapp".to_string(),
-            text: "hello channel".to_string(),
+            text: Some("hello channel".to_string()),
             gateway: None,
             chat_id: Some("15551234567".to_string()),
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            part_index: None,
             parse_mode: None,
             disable_notification: false,
             target_type: None,
@@ -6420,6 +6660,170 @@ mod tests {
             body,
             json!({ "chatId": "15551234567", "text": "hello channel" })
         );
+    }
+
+    #[test]
+    fn builds_signal_attachment_and_reaction_requests() {
+        let attachment_path = env::temp_dir().join("dawn-cli-signal-test.txt");
+        fs::write(&attachment_path, b"hello signal attachment").expect("write attachment");
+
+        let args = super::ChannelSendArgs {
+            target: "signal".to_string(),
+            text: Some("hello channel".to_string()),
+            gateway: None,
+            chat_id: Some("+15551234567".to_string()),
+            attachment_file: Some(attachment_path.display().to_string()),
+            attachment_name: Some("proof.txt".to_string()),
+            attachment_content_type: Some("text/plain".to_string()),
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            part_index: None,
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+
+        let (path, body) =
+            build_channel_send_request("signal", &args).expect("signal attachment request");
+        assert_eq!(path, "/api/gateway/connectors/chat/signal/send");
+        assert_eq!(body["chatId"], json!("+15551234567"));
+        assert_eq!(body["text"], json!("hello channel"));
+        assert_eq!(body["attachmentName"], json!("proof.txt"));
+        assert_eq!(body["attachmentContentType"], json!("text/plain"));
+        assert!(body["attachmentBase64"].as_str().is_some());
+
+        let reaction_args = super::ChannelSendArgs {
+            target: "signal".to_string(),
+            text: None,
+            gateway: None,
+            chat_id: Some("+15551234567".to_string()),
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: Some("❤️".to_string()),
+            target_message_id: Some("1712345678901".to_string()),
+            target_author: Some("+15550001111".to_string()),
+            remove_reaction: true,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            part_index: None,
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+
+        let (_, reaction_body) =
+            build_channel_send_request("signal", &reaction_args).expect("signal reaction request");
+        assert_eq!(reaction_body["reaction"], json!("❤️"));
+        assert_eq!(reaction_body["targetMessageId"], json!("1712345678901"));
+        assert_eq!(reaction_body["targetAuthor"], json!("+15550001111"));
+        assert_eq!(reaction_body["removeReaction"], json!(true));
+
+        fs::remove_file(&attachment_path).ok();
+    }
+
+    #[test]
+    fn builds_bluebubbles_native_action_requests() {
+        let reaction_args = super::ChannelSendArgs {
+            target: "bluebubbles".to_string(),
+            text: None,
+            gateway: None,
+            chat_id: Some("iMessage;+15551234567".to_string()),
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: Some("love".to_string()),
+            target_message_id: Some("message-guid-1".to_string()),
+            target_author: None,
+            remove_reaction: true,
+            receipt_type: None,
+            typing: None,
+            mark_read: false,
+            part_index: Some(1),
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+        let (_, reaction_body) = build_channel_send_request("bluebubbles", &reaction_args)
+            .expect("bluebubbles reaction request");
+        assert_eq!(reaction_body["reaction"], json!("love"));
+        assert_eq!(reaction_body["targetMessageId"], json!("message-guid-1"));
+        assert_eq!(reaction_body["removeReaction"], json!(true));
+        assert_eq!(reaction_body["partIndex"], json!(1));
+
+        let typing_args = super::ChannelSendArgs {
+            target: "bluebubbles".to_string(),
+            text: None,
+            gateway: None,
+            chat_id: Some("iMessage;+15551234567".to_string()),
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: Some("start".to_string()),
+            mark_read: false,
+            part_index: None,
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+        let (_, typing_body) = build_channel_send_request("bluebubbles", &typing_args)
+            .expect("bluebubbles typing request");
+        assert_eq!(typing_body["typing"], json!("start"));
+
+        let mark_read_args = super::ChannelSendArgs {
+            target: "bluebubbles".to_string(),
+            text: None,
+            gateway: None,
+            chat_id: Some("iMessage;+15551234567".to_string()),
+            attachment_file: None,
+            attachment_name: None,
+            attachment_content_type: None,
+            reaction: None,
+            target_message_id: None,
+            target_author: None,
+            remove_reaction: false,
+            receipt_type: None,
+            typing: None,
+            mark_read: true,
+            part_index: None,
+            parse_mode: None,
+            disable_notification: false,
+            target_type: None,
+            event_id: None,
+            msg_id: None,
+            msg_seq: None,
+            is_wakeup: false,
+        };
+        let (_, mark_read_body) = build_channel_send_request("bluebubbles", &mark_read_args)
+            .expect("bluebubbles mark-read request");
+        assert_eq!(mark_read_body["markRead"], json!(true));
     }
 
     #[test]
