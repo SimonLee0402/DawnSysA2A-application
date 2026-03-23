@@ -63,6 +63,12 @@ struct PairingDecisionRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct IngressMessageSummary {
+    text: String,
+    route_to_task: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct TelegramUpdate {
     update_id: Option<i64>,
@@ -269,6 +275,7 @@ async fn telegram_webhook(
             "messageId": message.message_id,
             "chatId": message.chat.id
         }),
+        true,
     )
     .await
     .map_err(service_error)?;
@@ -289,9 +296,9 @@ async fn signal_events(
     verify_callback_secret("DAWN_SIGNAL_CALLBACK_SECRET", "signal", &secret)
         .map_err(bad_request)?;
 
-    let text = extract_signal_text(&payload).ok_or_else(|| {
+    let summary = summarize_signal_event(&payload).ok_or_else(|| {
         bad_request(anyhow::anyhow!(
-            "unsupported signal event; expected a text message payload"
+            "unsupported signal event; expected a text, attachment, reaction, receipt, or typing payload"
         ))
     })?;
     let chat_id = payload
@@ -320,8 +327,9 @@ async fn signal_events(
         chat_id,
         sender_id,
         sender_display,
-        text,
+        summary.text,
         payload,
+        summary.route_to_task,
     )
     .await
     .map_err(service_error)?;
@@ -342,9 +350,9 @@ async fn bluebubbles_events(
     verify_callback_secret("DAWN_BLUEBUBBLES_CALLBACK_SECRET", "bluebubbles", &secret)
         .map_err(bad_request)?;
 
-    let text = extract_bluebubbles_text(&payload).ok_or_else(|| {
+    let summary = summarize_bluebubbles_event(&payload).ok_or_else(|| {
         bad_request(anyhow::anyhow!(
-            "unsupported bluebubbles event; expected a text message payload"
+            "unsupported bluebubbles event; expected a text, attachment, reaction, receipt, or typing payload"
         ))
     })?;
     let chat_id = payload
@@ -392,8 +400,9 @@ async fn bluebubbles_events(
         chat_id,
         sender_id,
         sender_display,
-        text,
+        summary.text,
         payload,
+        summary.route_to_task,
     )
     .await
     .map_err(service_error)?;
@@ -451,6 +460,7 @@ async fn feishu_events(
         sender_display,
         text,
         payload,
+        true,
     )
     .await
     .map_err(service_error)?;
@@ -512,6 +522,7 @@ async fn dingtalk_events(
         sender_display,
         text,
         payload,
+        true,
     )
     .await
     .map_err(service_error)?;
@@ -576,6 +587,7 @@ async fn wecom_events(
         sender_display,
         text,
         payload,
+        true,
     )
     .await
     .map_err(service_error)?;
@@ -633,6 +645,7 @@ async fn wechat_official_account_events(
             "event": payload.event_type,
             "rawXml": body
         }),
+        true,
     )
     .await
     .map_err(plain_service_error)?;
@@ -691,6 +704,7 @@ async fn qq_events(
         sender_display,
         text,
         payload,
+        true,
     )
     .await
     .map_err(service_error)?;
@@ -712,6 +726,7 @@ async fn ingest_message(
     sender_display: Option<String>,
     text: String,
     raw_payload: Value,
+    route_to_task: bool,
 ) -> anyhow::Result<ChatIngressEventRecord> {
     let now = unix_timestamp_ms();
     let mut record = ChatIngressEventRecord {
@@ -738,6 +753,14 @@ async fn ingest_message(
     if record.text.is_empty() {
         record.status = ChatIngressStatus::Ignored;
         record.error = Some("text message was empty".to_string());
+        record.updated_at_unix_ms = unix_timestamp_ms();
+        state.upsert_chat_ingress_event(record.clone()).await?;
+        return Ok(record);
+    }
+
+    if !route_to_task {
+        record.status = ChatIngressStatus::Ignored;
+        record.error = Some("event recorded without task routing".to_string());
         record.updated_at_unix_ms = unix_timestamp_ms();
         state.upsert_chat_ingress_event(record.clone()).await?;
         return Ok(record);
@@ -1070,6 +1093,37 @@ fn extract_feishu_text(payload: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn summarize_signal_event(payload: &Value) -> Option<IngressMessageSummary> {
+    if let Some(text) = extract_signal_text(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: true,
+        });
+    }
+    if let Some(text) = extract_signal_attachment_summary(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: true,
+        });
+    }
+    if let Some(text) = extract_signal_reaction_summary(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: true,
+        });
+    }
+    if let Some(text) = extract_signal_receipt_summary(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: false,
+        });
+    }
+    extract_signal_typing_summary(payload).map(|text| IngressMessageSummary {
+        text,
+        route_to_task: false,
+    })
+}
+
 fn extract_signal_text(payload: &Value) -> Option<String> {
     payload
         .pointer("/envelope/dataMessage/message")
@@ -1086,6 +1140,119 @@ fn extract_signal_text(payload: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn extract_signal_attachment_summary(payload: &Value) -> Option<String> {
+    summarize_attachment_event(
+        "Signal attachment received",
+        payload,
+        &[
+            "/envelope/dataMessage/attachments",
+            "/dataMessage/attachments",
+            "/attachments",
+        ],
+    )
+}
+
+fn extract_signal_reaction_summary(payload: &Value) -> Option<String> {
+    let reaction = payload
+        .pointer("/envelope/dataMessage/reaction")
+        .or_else(|| payload.pointer("/dataMessage/reaction"))
+        .or_else(|| payload.pointer("/reaction"))?;
+    let emoji = reaction
+        .get("emoji")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("reaction");
+    let target_author = reaction
+        .get("targetAuthor")
+        .and_then(Value::as_str)
+        .or_else(|| reaction.get("author").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty());
+    let target_timestamp = reaction
+        .get("targetSentTimestamp")
+        .or_else(|| reaction.get("targetTimestamp"))
+        .and_then(value_as_i64);
+    let removed = reaction
+        .get("remove")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut summary = format!(
+        "Signal reaction {}: {}",
+        if removed { "removed" } else { "received" },
+        emoji
+    );
+    if let Some(author) = target_author {
+        summary.push_str(&format!(" for {author}"));
+    }
+    if let Some(timestamp) = target_timestamp {
+        summary.push_str(&format!(" @ {timestamp}"));
+    }
+    Some(summary)
+}
+
+fn extract_signal_receipt_summary(payload: &Value) -> Option<String> {
+    let receipt = payload
+        .pointer("/envelope/receiptMessage")
+        .or_else(|| payload.pointer("/receiptMessage"))?;
+    let receipt_type = receipt
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("receipt");
+    let count = receipt
+        .get("timestamps")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    Some(if count > 0 {
+        format!("Signal {receipt_type} receipt for {count} message(s)")
+    } else {
+        format!("Signal {receipt_type} receipt")
+    })
+}
+
+fn extract_signal_typing_summary(payload: &Value) -> Option<String> {
+    let typing = payload
+        .pointer("/envelope/typingMessage")
+        .or_else(|| payload.pointer("/typingMessage"))?;
+    let action = typing
+        .get("action")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("updated");
+    Some(format!("Signal typing indicator: {action}"))
+}
+
+fn summarize_bluebubbles_event(payload: &Value) -> Option<IngressMessageSummary> {
+    if let Some(text) = extract_bluebubbles_text(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: true,
+        });
+    }
+    if let Some(text) = extract_bluebubbles_attachment_summary(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: true,
+        });
+    }
+    if let Some(text) = extract_bluebubbles_reaction_summary(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: true,
+        });
+    }
+    if let Some(text) = extract_bluebubbles_receipt_summary(payload) {
+        return Some(IngressMessageSummary {
+            text,
+            route_to_task: false,
+        });
+    }
+    extract_bluebubbles_typing_summary(payload).map(|text| IngressMessageSummary {
+        text,
+        route_to_task: false,
+    })
+}
+
 fn extract_bluebubbles_text(payload: &Value) -> Option<String> {
     payload
         .pointer("/text")
@@ -1096,6 +1263,151 @@ fn extract_bluebubbles_text(payload: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn extract_bluebubbles_attachment_summary(payload: &Value) -> Option<String> {
+    summarize_attachment_event(
+        "BlueBubbles attachment received",
+        payload,
+        &[
+            "/attachments",
+            "/message/attachments",
+            "/data/attachments",
+            "/message/attachmentMetadata",
+        ],
+    )
+}
+
+fn extract_bluebubbles_reaction_summary(payload: &Value) -> Option<String> {
+    let associated = payload
+        .pointer("/associatedMessage")
+        .or_else(|| payload.pointer("/message/associatedMessage"))
+        .or_else(|| payload.pointer("/data/associatedMessage"))?;
+    let emoji = associated
+        .get("emoji")
+        .and_then(Value::as_str)
+        .or_else(|| associated.get("body").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("reaction");
+    let target_guid = associated
+        .get("guid")
+        .and_then(Value::as_str)
+        .or_else(|| associated.get("messageGuid").and_then(Value::as_str))
+        .or_else(|| associated.get("targetGuid").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty());
+    let removed = associated
+        .get("remove")
+        .and_then(Value::as_bool)
+        .or_else(|| associated.get("isRemoved").and_then(Value::as_bool))
+        .unwrap_or(false);
+    let mut summary = format!(
+        "BlueBubbles reaction {}: {}",
+        if removed { "removed" } else { "received" },
+        emoji
+    );
+    if let Some(guid) = target_guid {
+        summary.push_str(&format!(" for {guid}"));
+    }
+    Some(summary)
+}
+
+fn extract_bluebubbles_receipt_summary(payload: &Value) -> Option<String> {
+    let event = payload
+        .pointer("/event")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/type").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if event.contains("read") || payload.pointer("/message/dateRead").and_then(value_as_i64).is_some()
+    {
+        return Some("BlueBubbles read receipt".to_string());
+    }
+    if event.contains("delivered")
+        || payload
+            .pointer("/message/dateDelivered")
+            .and_then(value_as_i64)
+            .is_some()
+    {
+        return Some("BlueBubbles delivery receipt".to_string());
+    }
+    None
+}
+
+fn extract_bluebubbles_typing_summary(payload: &Value) -> Option<String> {
+    let event = payload
+        .pointer("/event")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/type").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if event.contains("typing") {
+        return Some(format!("BlueBubbles typing indicator: {event}"));
+    }
+    payload
+        .pointer("/typing/status")
+        .and_then(Value::as_str)
+        .map(|status| format!("BlueBubbles typing indicator: {status}"))
+}
+
+fn summarize_attachment_event(prefix: &str, payload: &Value, paths: &[&str]) -> Option<String> {
+    let mut labels = Vec::new();
+    for path in paths {
+        let Some(items) = payload.pointer(path).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if let Some(label) = attachment_label(item) {
+                labels.push(label);
+            }
+        }
+    }
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        None
+    } else {
+        Some(format!("{prefix}: {}", labels.join(", ")))
+    }
+}
+
+fn attachment_label(value: &Value) -> Option<String> {
+    let name = [
+        "/filename",
+        "/fileName",
+        "/name",
+        "/storedFilename",
+        "/transferName",
+        "/originalName",
+    ]
+    .iter()
+    .find_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .filter(|value| !value.is_empty());
+    let mime = ["/contentType", "/mimeType", "/mime_type", "/type"]
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let identifier = ["/id", "/guid", "/attachmentGuid"]
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (name, mime, identifier) {
+        (Some(name), Some(mime), _) => Some(format!("{name} ({mime})")),
+        (Some(name), None, _) => Some(name.to_string()),
+        (None, Some(mime), Some(identifier)) => Some(format!("{identifier} ({mime})")),
+        (None, Some(mime), None) => Some(mime.to_string()),
+        (None, None, Some(identifier)) => Some(identifier.to_string()),
+        _ => None,
+    }
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|raw| i64::try_from(raw).ok()))
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
 }
 
 fn extract_dingtalk_text(payload: &Value) -> Option<String> {
@@ -1604,6 +1916,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signal_attachment_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_SIGNAL_DM_POLICY", None)]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/signal/events/test-secret"
+            ))
+            .json(&json!({
+                "envelope": {
+                    "type": "receipt",
+                    "source": "+15550009999",
+                    "sourceName": "Signal Attachment User",
+                    "dataMessage": {
+                        "attachments": [
+                            {
+                                "filename": "receipt.png",
+                                "contentType": "image/png"
+                            }
+                        ]
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["status"], "task_created");
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        assert!(events[0].text.contains("Signal attachment received"));
+        let task_id = events[0]
+            .linked_task_id
+            .ok_or_else(|| anyhow::anyhow!("missing linked task id"))?;
+        let task = state
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        assert!(task.instruction.contains("receipt.png"));
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signal_typing_event_is_recorded_without_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_SIGNAL_DM_POLICY", None)]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/signal/events/test-secret"
+            ))
+            .json(&json!({
+                "envelope": {
+                    "type": "typing",
+                    "source": "+15550006666",
+                    "typingMessage": {
+                        "action": "started"
+                    }
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["status"], "ignored");
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].status, ChatIngressStatus::Ignored);
+        assert!(events[0].linked_task_id.is_none());
+        assert!(events[0].text.contains("typing indicator"));
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dingtalk_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
@@ -1679,6 +2074,51 @@ mod tests {
             .await?
             .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         assert_eq!(task.instruction, "Draft iMessage follow-up");
+
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bluebubbles_reaction_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_BLUEBUBBLES_DM_POLICY", None)]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/bluebubbles/events/test-secret"
+            ))
+            .json(&json!({
+                "event": "message.tapback",
+                "chatGuid": "iMessage;+15550002222",
+                "handle": {
+                    "address": "+15550002222",
+                    "displayName": "Blue Contact"
+                },
+                "associatedMessage": {
+                    "emoji": "❤️",
+                    "guid": "message-guid-123"
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["status"], "task_created");
+
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        assert!(events[0].text.contains("BlueBubbles reaction received"));
+        let task_id = events[0]
+            .linked_task_id
+            .ok_or_else(|| anyhow::anyhow!("missing linked task id"))?;
+        let task = state
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        assert!(task.instruction.contains("message-guid-123"));
 
         handle.abort();
         fs::remove_file(db_path).ok();
