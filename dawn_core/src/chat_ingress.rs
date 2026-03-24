@@ -18,10 +18,12 @@ use uuid::Uuid;
 use crate::{
     a2a::{self, Task},
     app_state::{
-        AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus, ChatIngressEventRecord,
-        ChatIngressStatus, unix_timestamp_ms,
+        AppState, ChatAutomationMode, ChatAutomationModeRecord, ChatChannelIdentityRecord,
+        ChatChannelIdentityStatus, ChatIngressEventRecord, ChatIngressStatus, NodeCommandStatus,
+        unix_timestamp_ms,
     },
     connectors::{self, ChatDispatchRequest, OpenAIResponseRequest},
+    control_plane,
     identity,
     skill_registry,
 };
@@ -108,11 +110,18 @@ enum IngressCommand {
     Skills { query: Option<String> },
     Skill { selector: String },
     Model,
+    ModeStatus,
+    ModeSet { mode: ChatAutomationMode },
     Status,
     Task(String),
     Orchestrate(String),
     Wasm(String),
     Unknown(String),
+}
+
+enum LocalActionIntent {
+    BrowserOpen { target: String },
+    DesktopNotification { message: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -919,8 +928,16 @@ async fn ingest_message(
         }
     }
 
+    let current_mode = current_chat_automation_mode(
+        state.clone(),
+        platform,
+        record.chat_id.as_deref(),
+        record.sender_id.as_deref(),
+    )
+    .await?;
+
     let command_task = if let Some(command) = parse_ingress_command(&record.text) {
-        match execute_ingress_command(state.clone(), platform, &record, command).await? {
+        match execute_ingress_command(state.clone(), platform, &record, command, current_mode).await? {
             IngressCommandResult::Reply(reply) => {
                 if let Err(error) =
                     dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
@@ -948,6 +965,30 @@ async fn ingest_message(
     } else {
         None
     };
+
+    if command_task.is_none() {
+        if let Some(reply) =
+            try_mode_aware_reply(state.clone(), platform, &record, current_mode).await?
+        {
+            if let Err(error) =
+                dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                    .await
+            {
+                warn!(?error, platform, "failed to deliver mode-aware ingress reply");
+                record.reply_text = Some(reply);
+                record.status = ChatIngressStatus::Failed;
+                record.error = Some(format!("failed to dispatch mode-aware reply: {error}"));
+                record.updated_at_unix_ms = unix_timestamp_ms();
+                state.upsert_chat_ingress_event(record.clone()).await?;
+                return Ok(record);
+            }
+            record.reply_text = Some(reply);
+            record.status = ChatIngressStatus::Replied;
+            record.updated_at_unix_ms = unix_timestamp_ms();
+            state.upsert_chat_ingress_event(record.clone()).await?;
+            return Ok(record);
+        }
+    }
 
     if command_task.is_none() && should_attempt_default_model_reply(&record.text) {
         match try_default_model_reply(state.clone(), platform, &record.text).await {
@@ -1156,6 +1197,9 @@ async fn dispatch_ingress_reply_if_possible(
     chat_id: Option<&str>,
     text: &str,
 ) -> anyhow::Result<()> {
+    if matches!(platform, "app" | "control_ui" | "local") {
+        return Ok(());
+    }
     let Some(chat_id) = chat_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
@@ -1308,7 +1352,13 @@ fn normalize_ingress_instruction(text: &str) -> String {
 
 fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
     let trimmed = text.trim();
-    if trimmed.is_empty() || !trimmed.starts_with('/') {
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('#') {
+        return parse_mode_command(trimmed);
+    }
+    if !trimmed.starts_with('/') {
         return None;
     }
     if trimmed == "/" {
@@ -1336,6 +1386,7 @@ fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
         "skill" | "use" => Some(IngressCommand::Skill {
             selector: remainder.to_string(),
         }),
+        "mode" => Some(IngressCommand::ModeStatus),
         "model" | "models" => Some(IngressCommand::Model),
         "status" => Some(IngressCommand::Status),
         "task" => Some(IngressCommand::Task(remainder.to_string())),
@@ -1345,11 +1396,44 @@ fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
     }
 }
 
+fn parse_mode_command(text: &str) -> Option<IngressCommand> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('#') {
+        return None;
+    }
+    let body = trimmed.trim_start_matches('#').trim();
+    if body.is_empty() {
+        return Some(IngressCommand::Help);
+    }
+    let (command, _remainder) = match body.split_once(char::is_whitespace) {
+        Some((command, remainder)) => (command, remainder.trim()),
+        None => (body, ""),
+    };
+    match command.to_ascii_lowercase().as_str() {
+        "help" | "commands" => Some(IngressCommand::Help),
+        "mode" | "status" => Some(IngressCommand::ModeStatus),
+        "chat" => Some(IngressCommand::ModeSet {
+            mode: ChatAutomationMode::Chat,
+        }),
+        "observe" => Some(IngressCommand::ModeSet {
+            mode: ChatAutomationMode::Observe,
+        }),
+        "assist" => Some(IngressCommand::ModeSet {
+            mode: ChatAutomationMode::Assist,
+        }),
+        "autopilot" | "auto" => Some(IngressCommand::ModeSet {
+            mode: ChatAutomationMode::Autopilot,
+        }),
+        other => Some(IngressCommand::Unknown(format!("#{other}"))),
+    }
+}
+
 async fn execute_ingress_command(
     state: Arc<AppState>,
     platform: &str,
     record: &ChatIngressEventRecord,
     command: IngressCommand,
+    current_mode: ChatAutomationMode,
 ) -> anyhow::Result<IngressCommandResult> {
     match command {
         IngressCommand::Help => Ok(IngressCommandResult::Reply(help_command_text())),
@@ -1403,6 +1487,38 @@ async fn execute_ingress_command(
                 }
             )))
         }
+        IngressCommand::ModeStatus => Ok(IngressCommandResult::Reply(format!(
+            "当前功能等级: {}。\n{}",
+            chat_mode_label(current_mode),
+            chat_mode_description(current_mode)
+        ))),
+        IngressCommand::ModeSet { mode } => {
+            let Some(chat_key) = chat_mode_key(record.chat_id.as_deref(), record.sender_id.as_deref()) else {
+                return Ok(IngressCommandResult::Reply(
+                    "当前会话没有可持久化的 chat 标识，暂时无法切换功能等级。".to_string(),
+                ));
+            };
+            let now = unix_timestamp_ms();
+            state
+                .upsert_chat_automation_mode(ChatAutomationModeRecord {
+                    platform: platform.to_string(),
+                    chat_key,
+                    chat_id: record.chat_id.clone(),
+                    sender_id: record.sender_id.clone(),
+                    mode,
+                    updated_by: record.sender_display.clone().or(record.sender_id.clone()),
+                    reason: Some("changed from chat ingress".to_string()),
+                    last_ingress_id: Some(record.ingress_id),
+                    created_at_unix_ms: now,
+                    updated_at_unix_ms: now,
+                })
+                .await?;
+            Ok(IngressCommandResult::Reply(format!(
+                "已切换到 {}。\n{}",
+                chat_mode_label(mode),
+                chat_mode_description(mode)
+            )))
+        }
         IngressCommand::Status => {
             let workspace = identity::ensure_workspace_profile(&state).await?;
             let nodes = state.list_nodes().await?;
@@ -1412,9 +1528,10 @@ async fn execute_ingress_command(
                 .filter(|node| node.connected && node.attestation_verified)
                 .count();
             Ok(IngressCommandResult::Reply(format!(
-                "工作区: {} [{}]\n默认模型: {}\n默认聊天: {}\n在线节点: {}，可信节点: {}。",
+                "工作区: {} [{}]\n当前功能等级: {}\n默认模型: {}\n默认聊天: {}\n在线节点: {}，可信节点: {}。",
                 workspace.display_name,
                 workspace.region,
+                chat_mode_label(current_mode),
                 if workspace.default_model_providers.is_empty() {
                     "<none>".to_string()
                 } else {
@@ -1466,7 +1583,7 @@ async fn execute_ingress_command(
             })
         }
         IngressCommand::Unknown(command) => Ok(IngressCommandResult::Reply(format!(
-            "未知命令 `/{command}`。\n{}",
+            "未知命令 `{command}`。\n{}",
             help_command_text()
         ))),
     }
@@ -1475,6 +1592,11 @@ async fn execute_ingress_command(
 fn help_command_text() -> String {
     [
         "可用命令:",
+        "#chat - 纯聊天模式，不读取电脑状态",
+        "#observe - 只读观察模式，可分析当前电脑状态",
+        "#assist - 辅助模式，会预览可执行动作但不直接执行",
+        "#autopilot - 自动驾驶模式，支持在审批链内下发受控动作",
+        "#mode - 查看当前功能等级",
         "/help - 查看命令帮助",
         "/commands - 查看命令帮助",
         "/new - 开始新的对话",
@@ -1488,6 +1610,388 @@ fn help_command_text() -> String {
         "/wasm <skill[@version][#function]> - 直接提交 Wasm 技能任务",
     ]
     .join("\n")
+}
+
+fn chat_mode_label(mode: ChatAutomationMode) -> &'static str {
+    match mode {
+        ChatAutomationMode::Chat => "#chat",
+        ChatAutomationMode::Observe => "#observe",
+        ChatAutomationMode::Assist => "#assist",
+        ChatAutomationMode::Autopilot => "#autopilot",
+    }
+}
+
+fn chat_mode_description(mode: ChatAutomationMode) -> &'static str {
+    match mode {
+        ChatAutomationMode::Chat => {
+            "仅使用默认模型回复，不主动读取电脑状态，也不执行本机动作。"
+        }
+        ChatAutomationMode::Observe => {
+            "允许只读观察当前电脑状态，会在需要时采样进程快照并让模型总结。"
+        }
+        ChatAutomationMode::Assist => {
+            "会先给出本机动作预览和安全提示；危险动作不会直接执行。"
+        }
+        ChatAutomationMode::Autopilot => {
+            "允许在审批链内自动下发受控电脑动作；浏览器和桌面动作仍然需要审批。"
+        }
+    }
+}
+
+fn chat_mode_key(chat_id: Option<&str>, sender_id: Option<&str>) -> Option<String> {
+    chat_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            sender_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+async fn current_chat_automation_mode(
+    state: Arc<AppState>,
+    platform: &str,
+    chat_id: Option<&str>,
+    sender_id: Option<&str>,
+) -> anyhow::Result<ChatAutomationMode> {
+    let Some(chat_key) = chat_mode_key(chat_id, sender_id) else {
+        return Ok(ChatAutomationMode::Chat);
+    };
+    Ok(state
+        .get_chat_automation_mode(platform, &chat_key)
+        .await?
+        .map(|record| record.mode)
+        .unwrap_or(ChatAutomationMode::Chat))
+}
+
+async fn try_mode_aware_reply(
+    state: Arc<AppState>,
+    platform: &str,
+    record: &ChatIngressEventRecord,
+    mode: ChatAutomationMode,
+) -> anyhow::Result<Option<String>> {
+    let text = record.text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let action = parse_local_action_intent(text);
+    match mode {
+        ChatAutomationMode::Chat => Ok(None),
+        ChatAutomationMode::Observe => {
+            if should_attempt_observation(text) {
+                return Ok(Some(
+                    execute_observation_mode_reply(state, platform, record, text).await?,
+                ));
+            }
+            Ok(None)
+        }
+        ChatAutomationMode::Assist => {
+            if should_attempt_observation(text) {
+                return Ok(Some(
+                    execute_observation_mode_reply(state, platform, record, text).await?,
+                ));
+            }
+            Ok(action.map(render_assist_action_preview))
+        }
+        ChatAutomationMode::Autopilot => {
+            if should_attempt_observation(text) {
+                return Ok(Some(
+                    execute_observation_mode_reply(state, platform, record, text).await?,
+                ));
+            }
+            if let Some(action) = action {
+                return Ok(Some(
+                    execute_autopilot_action(state, platform, record, action).await?,
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn should_attempt_observation(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    let keywords = [
+        "电脑",
+        "计算机",
+        "当前在干什么",
+        "现在在干什么",
+        "进程",
+        "cpu",
+        "内存",
+        "活动窗口",
+        "what is my computer doing",
+        "what is the computer doing",
+        "current process",
+        "processes",
+        "memory",
+        "cpu usage",
+        "system status",
+    ];
+    keywords.iter().any(|keyword| normalized.contains(keyword))
+}
+
+fn parse_local_action_intent(text: &str) -> Option<LocalActionIntent> {
+    let trimmed = text.trim();
+    for prefix in ["打开 ", "open "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let target = rest.trim();
+            if !target.is_empty() {
+                return Some(LocalActionIntent::BrowserOpen {
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+    for prefix in ["通知 ", "提醒 ", "notify "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let message = rest.trim();
+            if !message.is_empty() {
+                return Some(LocalActionIntent::DesktopNotification {
+                    message: message.to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn render_assist_action_preview(action: LocalActionIntent) -> String {
+    match action {
+        LocalActionIntent::BrowserOpen { target } => format!(
+            "辅助模式已识别出浏览器动作预览：将打开 `{}`。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试，或显式使用 /task /orchestrate。",
+            normalize_browser_target(&target)
+        ),
+        LocalActionIntent::DesktopNotification { message } => format!(
+            "辅助模式已识别出桌面通知预览：将发送通知 `{}`。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试，或显式使用 /task /orchestrate。",
+            message
+        ),
+    }
+}
+
+async fn execute_autopilot_action(
+    state: Arc<AppState>,
+    _platform: &str,
+    _record: &ChatIngressEventRecord,
+    action: LocalActionIntent,
+) -> anyhow::Result<String> {
+    match action {
+        LocalActionIntent::BrowserOpen { target } => {
+            let node = select_node_for_capability(&state, "browser_open").await?;
+            let (command, delivery) = control_plane::dispatch_gateway_command(
+                &state,
+                &node.node_id,
+                "browser_open",
+                json!({
+                    "url": normalize_browser_target(&target),
+                    "approvalRequired": true
+                }),
+            )
+            .await?;
+            Ok(match delivery {
+                "awaiting_approval" => format!(
+                    "已创建浏览器打开请求，等待审批。\nnode={} commandId={} target={}",
+                    node.node_id, command.command_id, normalize_browser_target(&target)
+                ),
+                other => format!(
+                    "已下发浏览器打开请求。\nnode={} commandId={} delivery={} target={}",
+                    node.node_id, command.command_id, other, normalize_browser_target(&target)
+                ),
+            })
+        }
+        LocalActionIntent::DesktopNotification { message } => {
+            let node = select_node_for_capability(&state, "desktop_notification").await?;
+            let (command, delivery) = control_plane::dispatch_gateway_command(
+                &state,
+                &node.node_id,
+                "desktop_notification",
+                json!({
+                    "message": message,
+                    "approvalRequired": true
+                }),
+            )
+            .await?;
+            Ok(match delivery {
+                "awaiting_approval" => format!(
+                    "已创建桌面通知请求，等待审批。\nnode={} commandId={}",
+                    node.node_id, command.command_id
+                ),
+                other => format!(
+                    "已下发桌面通知请求。\nnode={} commandId={} delivery={}",
+                    node.node_id, command.command_id, other
+                ),
+            })
+        }
+    }
+}
+
+async fn execute_observation_mode_reply(
+    state: Arc<AppState>,
+    platform: &str,
+    record: &ChatIngressEventRecord,
+    question: &str,
+) -> anyhow::Result<String> {
+    let node = select_node_for_capability(&state, "process_snapshot").await?;
+    let system_info = dispatch_and_wait_node_command(&state, &node.node_id, "system_info", json!({})).await.ok();
+    let process_snapshot = dispatch_and_wait_node_command(
+        &state,
+        &node.node_id,
+        "process_snapshot",
+        json!({ "limit": 12 }),
+    )
+    .await?;
+    let observation = json!({
+        "node": {
+            "nodeId": node.node_id,
+            "displayName": node.display_name,
+        },
+        "systemInfo": system_info.as_ref().map(extract_command_result_payload),
+        "processSnapshot": extract_command_result_payload(&process_snapshot),
+        "chatPlatform": platform,
+        "chatId": record.chat_id,
+    });
+    if let Some(provider) = pick_live_default_model_provider(&state).await? {
+        let response = connectors::execute_model_connector(
+            &provider,
+            OpenAIResponseRequest {
+                input: format!(
+                    "用户问题：{question}\n\n以下是该电脑的只读观测数据(JSON)：\n{}\n\n请用中文回答：现在这台电脑大概率正在做什么，哪些进程最值得注意；不要假装看到了屏幕内容，只根据这些观测数据回答。",
+                    serde_json::to_string_pretty(&observation)?
+                ),
+                model: None,
+                instructions: Some(
+                    "You are Dawn. Respect the read-only security boundary: summarize the computer state from the provided telemetry, state uncertainty explicitly, and do not claim you saw content not present in the telemetry. Keep the reply concise but useful."
+                        .to_string(),
+                ),
+            },
+        )
+        .await?;
+        if !response.output_text.trim().is_empty() {
+            return Ok(format!(
+                "{}\n\n功能等级：{}（只读观察）",
+                response.output_text.trim(),
+                chat_mode_label(ChatAutomationMode::Observe)
+            ));
+        }
+    }
+    Ok(format!(
+        "{}\n\n功能等级：{}（只读观察）",
+        render_observation_fallback(&observation),
+        chat_mode_label(ChatAutomationMode::Observe)
+    ))
+}
+
+async fn select_node_for_capability(
+    state: &Arc<AppState>,
+    capability: &str,
+) -> anyhow::Result<crate::app_state::NodeRecord> {
+    let nodes = state.list_nodes().await?;
+    nodes.into_iter()
+        .find(|node| {
+            node.connected
+                && node.attestation_verified
+                && node.capabilities.iter().any(|value| value == capability)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "当前没有可信在线节点支持 `{capability}`。先运行 `dawn-node start` 和 `dawn-node node trust-self`。"
+            )
+        })
+}
+
+async fn dispatch_and_wait_node_command(
+    state: &Arc<AppState>,
+    node_id: &str,
+    command_type: &str,
+    payload: Value,
+) -> anyhow::Result<Value> {
+    let (command, delivery) =
+        control_plane::dispatch_gateway_command(state, node_id, command_type, payload).await?;
+    if delivery == "awaiting_approval" {
+        anyhow::bail!("命令 `{command_type}` 进入了审批队列，当前观察模式不能自动继续");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let command_record = state
+            .get_node_command(command.command_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("node command disappeared: {}", command.command_id))?;
+        match command_record.status {
+            NodeCommandStatus::Succeeded => {
+                return Ok(command_record
+                    .result
+                    .unwrap_or_else(|| json!({ "status": "succeeded" })));
+            }
+            NodeCommandStatus::Failed => {
+                anyhow::bail!(
+                    "命令 `{command_type}` 执行失败：{}",
+                    command_record
+                        .error
+                        .unwrap_or_else(|| "unknown node error".to_string())
+                );
+            }
+            NodeCommandStatus::PendingApproval
+            | NodeCommandStatus::Queued
+            | NodeCommandStatus::Dispatched => {
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!("等待 `{command_type}` 执行超时");
+                }
+                sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+}
+
+fn extract_command_result_payload(value: &Value) -> Value {
+    value.get("result").cloned().unwrap_or_else(|| value.clone())
+}
+
+fn render_observation_fallback(observation: &Value) -> String {
+    let processes = observation
+        .pointer("/processSnapshot/processes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if processes.is_empty() {
+        return "我已经进入只读观察模式，但这次没有采到可用的进程快照。".to_string();
+    }
+    let top = processes
+        .into_iter()
+        .take(5)
+        .filter_map(|item| {
+            let name = item
+                .get("name")
+                .or_else(|| item.get("imageName"))
+                .and_then(Value::as_str)?;
+            let pid = item.get("pid").and_then(Value::as_i64).unwrap_or_default();
+            Some(format!("{name}(pid={pid})"))
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "我已经采样了当前电脑的只读状态。当前最显眼的进程有：{}。如果你需要更细的动作执行，请先切到 #assist 或 #autopilot。",
+        top.join("、")
+    )
+}
+
+async fn pick_live_default_model_provider(state: &Arc<AppState>) -> anyhow::Result<Option<String>> {
+    let workspace = identity::ensure_workspace_profile(state).await?;
+    Ok(workspace
+        .default_model_providers
+        .iter()
+        .find(|value| is_model_provider_live_configured(value))
+        .cloned())
+}
+
+fn normalize_browser_target(target: &str) -> String {
+    let trimmed = target.trim();
+    if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    }
 }
 
 async fn render_skills_command(
@@ -1614,7 +2118,7 @@ fn build_skill_selector_for_task(skill: &skill_registry::SkillRecord, function: 
 
 fn should_attempt_default_model_reply(text: &str) -> bool {
     let trimmed = text.trim();
-    !trimmed.is_empty() && !trimmed.starts_with('/')
+    !trimmed.is_empty() && !trimmed.starts_with('/') && !trimmed.starts_with('#')
 }
 
 async fn try_default_model_reply(
@@ -1622,13 +2126,7 @@ async fn try_default_model_reply(
     platform: &str,
     text: &str,
 ) -> anyhow::Result<Option<String>> {
-    let workspace = identity::ensure_workspace_profile(&state).await?;
-    let Some(provider) = workspace
-        .default_model_providers
-        .iter()
-        .find(|value| is_model_provider_live_configured(value))
-        .cloned()
-    else {
+    let Some(provider) = pick_live_default_model_provider(&state).await? else {
         return Ok(None);
     };
 

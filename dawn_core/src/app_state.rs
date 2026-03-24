@@ -390,6 +390,51 @@ pub struct ChatChannelIdentityRecord {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ChatAutomationMode {
+    Chat,
+    Observe,
+    Assist,
+    Autopilot,
+}
+
+impl ChatAutomationMode {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Observe => "observe",
+            Self::Assist => "assist",
+            Self::Autopilot => "autopilot",
+        }
+    }
+
+    fn from_db(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "chat" => Ok(Self::Chat),
+            "observe" => Ok(Self::Observe),
+            "assist" => Ok(Self::Assist),
+            "autopilot" => Ok(Self::Autopilot),
+            _ => Err(anyhow!("unknown chat automation mode '{raw}'")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAutomationModeRecord {
+    pub platform: String,
+    pub chat_key: String,
+    pub chat_id: Option<String>,
+    pub sender_id: Option<String>,
+    pub mode: ChatAutomationMode,
+    pub updated_by: Option<String>,
+    pub reason: Option<String>,
+    pub last_ingress_id: Option<Uuid>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum NodeSessionStatus {
     Registered,
     Connected,
@@ -1484,6 +1529,51 @@ impl AppState {
             ),
         );
         Ok(identity)
+    }
+
+    pub async fn upsert_chat_automation_mode(
+        &self,
+        record: ChatAutomationModeRecord,
+    ) -> anyhow::Result<ChatAutomationModeRecord> {
+        save_chat_automation_mode(&self.pool, &record).await?;
+        self.emit_console_event(
+            "chat_mode",
+            Some(format!("{}:{}", record.platform, record.chat_key)),
+            Some(record.mode.as_db().to_string()),
+            format!("{} chat mode -> {}", record.platform, record.mode.as_db()),
+        );
+        Ok(record)
+    }
+
+    pub async fn get_chat_automation_mode(
+        &self,
+        platform: &str,
+        chat_key: &str,
+    ) -> anyhow::Result<Option<ChatAutomationModeRecord>> {
+        let row = sqlx::query_as::<_, ChatAutomationModeRow>(
+            r#"
+            SELECT
+                platform,
+                chat_key,
+                chat_id,
+                sender_id,
+                mode,
+                updated_by,
+                reason,
+                last_ingress_id,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM chat_automation_modes
+            WHERE platform = ?1 AND chat_key = ?2
+            "#,
+        )
+        .bind(platform)
+        .bind(chat_key)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch chat automation mode for {platform}:{chat_key}"))?;
+
+        row.map(TryInto::try_into).transpose()
     }
 
     pub async fn get_chat_channel_identity(
@@ -2699,6 +2789,39 @@ impl TryFrom<ChatChannelIdentityRow> for ChatChannelIdentityRecord {
 }
 
 #[derive(FromRow)]
+struct ChatAutomationModeRow {
+    platform: String,
+    chat_key: String,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    mode: String,
+    updated_by: Option<String>,
+    reason: Option<String>,
+    last_ingress_id: Option<String>,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<ChatAutomationModeRow> for ChatAutomationModeRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: ChatAutomationModeRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            platform: row.platform,
+            chat_key: row.chat_key,
+            chat_id: row.chat_id,
+            sender_id: row.sender_id,
+            mode: ChatAutomationMode::from_db(&row.mode)?,
+            updated_by: row.updated_by,
+            reason: row.reason,
+            last_ingress_id: parse_uuid_opt(row.last_ingress_id, "last_ingress_id")?,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct NodeRow {
     node_id: String,
     display_name: String,
@@ -3235,6 +3358,25 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_status
         ON chat_ingress_events(status, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_automation_modes (
+            platform TEXT NOT NULL,
+            chat_key TEXT NOT NULL,
+            chat_id TEXT,
+            sender_id TEXT,
+            mode TEXT NOT NULL,
+            updated_by TEXT,
+            reason TEXT,
+            last_ingress_id TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL,
+            PRIMARY KEY(platform, chat_key)
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_automation_modes_platform
+        ON chat_automation_modes(platform, updated_at_unix_ms DESC)
         "#,
         r#"
         CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_linked_task_id
@@ -4124,6 +4266,52 @@ async fn save_chat_channel_identity(
     .execute(pool)
     .await
     .context("failed to save chat channel identity")?;
+
+    Ok(())
+}
+
+async fn save_chat_automation_mode(
+    pool: &SqlitePool,
+    record: &ChatAutomationModeRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chat_automation_modes (
+            platform,
+            chat_key,
+            chat_id,
+            sender_id,
+            mode,
+            updated_by,
+            reason,
+            last_ingress_id,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ON CONFLICT(platform, chat_key) DO UPDATE SET
+            chat_id = excluded.chat_id,
+            sender_id = excluded.sender_id,
+            mode = excluded.mode,
+            updated_by = excluded.updated_by,
+            reason = excluded.reason,
+            last_ingress_id = excluded.last_ingress_id,
+            created_at_unix_ms = chat_automation_modes.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(&record.platform)
+    .bind(&record.chat_key)
+    .bind(&record.chat_id)
+    .bind(&record.sender_id)
+    .bind(record.mode.as_db())
+    .bind(&record.updated_by)
+    .bind(&record.reason)
+    .bind(record.last_ingress_id.map(|value| value.to_string()))
+    .bind(u128_to_i64(record.created_at_unix_ms)?)
+    .bind(u128_to_i64(record.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save chat automation mode")?;
 
     Ok(())
 }

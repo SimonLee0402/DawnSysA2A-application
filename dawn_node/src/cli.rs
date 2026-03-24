@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
+    process::Stdio,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -24,7 +25,7 @@ pub enum CliOutcome {
 }
 
 enum StartupAction {
-    RunNode,
+    Start,
     Setup,
     Status,
     Exit,
@@ -50,6 +51,7 @@ struct DawnCli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Start(StartArgs),
     Run,
     Login(LoginArgs),
     Onboard(OnboardArgs),
@@ -73,6 +75,16 @@ enum Commands {
     Node(NodeArgs),
     #[command(name = "node-command")]
     NodeCommands(NodeCommandOps),
+}
+
+#[derive(Args, Clone, Default)]
+struct StartArgs {
+    #[arg(long)]
+    skip_gateway: bool,
+    #[arg(long)]
+    app: bool,
+    #[arg(long)]
+    release: bool,
 }
 
 #[derive(Args)]
@@ -1297,8 +1309,8 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
             }
 
             match prompt_startup_action(&profile)? {
-                StartupAction::RunNode => {
-                    ensure_node_runtime_preflight(&mut profile).await?;
+                StartupAction::Start => {
+                    start_stack(&mut profile, &StartArgs::default()).await?;
                     println!("Starting local node runtime...");
                     return Ok(CliOutcome::RunNode);
                 }
@@ -1338,6 +1350,11 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
     };
 
     match command {
+        Commands::Start(args) => {
+            let mut profile = load_profile_or_default();
+            start_stack(&mut profile, &args).await?;
+            Ok(CliOutcome::RunNode)
+        }
         Commands::Run => {
             let mut profile = load_profile_or_default();
             ensure_node_runtime_preflight(&mut profile).await?;
@@ -1915,7 +1932,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         &selected_models,
         &selected_channels,
     );
-    println!("Next: run `dawn-node gateway start` or `dawn-node run`.");
+    println!("Next: run `dawn-node start` for the simple path, or `dawn-node gateway start` / `dawn-node run` for manual control.");
     Ok(())
 }
 
@@ -2040,19 +2057,129 @@ fn prompt_startup_action(profile: &DawnCliProfile) -> anyhow::Result<StartupActi
             .clone()
             .unwrap_or_else(default_gateway_base_url)
     );
-    println!("1. Start local node runtime");
+    println!("1. Start Dawn (gateway + local node runtime)");
     println!("2. Guided setup / change AI model and chat app");
     println!("3. Show local status");
     println!("4. Exit");
     loop {
         let input = prompt_line("Choose an action [1]: ")?;
         match input.trim().to_ascii_lowercase().as_str() {
-            "" | "1" | "run" => return Ok(StartupAction::RunNode),
+            "" | "1" | "start" | "run" => return Ok(StartupAction::Start),
             "2" | "setup" | "login" => return Ok(StartupAction::Setup),
             "3" | "status" => return Ok(StartupAction::Status),
             "4" | "exit" | "quit" => return Ok(StartupAction::Exit),
             _ => println!("Enter 1, 2, 3, or 4."),
         }
+    }
+}
+
+async fn start_stack(profile: &mut DawnCliProfile, args: &StartArgs) -> anyhow::Result<()> {
+    if !args.skip_gateway {
+        ensure_gateway_running(profile, args.release).await?;
+    }
+    ensure_node_runtime_preflight(profile).await?;
+    if args.app {
+        let app_url = format!(
+            "{}/app",
+            profile
+                .gateway_base_url
+                .clone()
+                .unwrap_or_else(default_gateway_base_url)
+                .trim_end_matches('/')
+        );
+        open_default_browser(&app_url)?;
+        println!("Opened {app_url}");
+    }
+    Ok(())
+}
+
+async fn ensure_gateway_running(profile: &DawnCliProfile, release: bool) -> anyhow::Result<()> {
+    let gateway_base_url = resolve_gateway_base_url(profile.gateway_base_url.as_deref(), profile);
+    if gateway_health_ok(&gateway_base_url).await {
+        println!("Gateway already running at {gateway_base_url}");
+        return Ok(());
+    }
+
+    let exe = env::current_exe().context("failed to resolve current dawn-node executable")?;
+    let mut command = StdCommand::new(exe);
+    command.arg("gateway").arg("start");
+    if release {
+        command.arg("--release");
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    for (key, value) in &profile.connector_env {
+        command.env(key, value);
+    }
+    if let Some(gateway) = profile.gateway_base_url.as_deref() {
+        command.env("DAWN_PUBLIC_BASE_URL", gateway);
+    }
+    let child = command
+        .spawn()
+        .context("failed to spawn background Dawn gateway launcher")?;
+    println!(
+        "Starting Dawn gateway in the background (launcher pid={})...",
+        child.id()
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        if gateway_health_ok(&gateway_base_url).await {
+            println!("Gateway is ready at {gateway_base_url}");
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "gateway did not become ready at {} within the expected startup window",
+                gateway_base_url
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+}
+
+async fn gateway_health_ok(base_url: &str) -> bool {
+    let health_url = format!("{}/health", base_url.trim_end_matches('/'));
+    match reqwest::get(&health_url).await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+fn open_default_browser(url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = StdCommand::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()
+            .context("failed to invoke Windows browser launcher")?;
+        if !status.success() {
+            bail!("browser launcher exited with status {status}");
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let status = StdCommand::new("open")
+            .arg(url)
+            .status()
+            .context("failed to invoke macOS browser launcher")?;
+        if !status.success() {
+            bail!("browser launcher exited with status {status}");
+        }
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let status = StdCommand::new("xdg-open")
+            .arg(url)
+            .status()
+            .context("failed to invoke browser launcher")?;
+        if !status.success() {
+            bail!("browser launcher exited with status {status}");
+        }
+        Ok(())
     }
 }
 
