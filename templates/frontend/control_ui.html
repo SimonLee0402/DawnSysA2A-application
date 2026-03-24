@@ -213,6 +213,8 @@
     }
     .connector-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .connector-pill { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .connector-copy { display: grid; gap: 4px; }
+    .connector-meta { color: var(--muted); font-size: 12px; line-height: 1.4; }
     .connector-led {
       width: 12px;
       height: 12px;
@@ -559,13 +561,19 @@
       sessionToken: "",
       operatorName: "",
       workspace: null,
+      identityStatus: null,
+      connectorStatus: null,
+      ingressStatus: null,
       cards: [],
       approvals: [],
       pairings: [],
       tasks: [],
       nodes: [],
       refreshTimer: null,
-      stream: null
+      stream: null,
+      streamTransport: "none",
+      rpcPending: new Map(),
+      nextRpcId: 0
     };
 
     const taskTemplates = {
@@ -610,6 +618,13 @@
       return value.join(", ");
     }
 
+    function canonicalConnectorKey(value) {
+      return String(value ?? "")
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+        .replace(/[\s-]+/g, "_")
+        .toLowerCase();
+    }
+
     function setNotice(id, tone, message) {
       const node = $(id);
       if (!node) return;
@@ -647,6 +662,41 @@
         }
       }
       throw lastError || new Error("request failed");
+    }
+
+    function nextRpcId() {
+      state.nextRpcId += 1;
+      return `rpc-${state.nextRpcId}`;
+    }
+
+    function streamSupportsRpc() {
+      return state.streamTransport === "websocket"
+        && state.stream instanceof WebSocket
+        && state.stream.readyState === WebSocket.OPEN;
+    }
+
+    function failPendingRpc(reason) {
+      for (const [id, pending] of state.rpcPending.entries()) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error(reason || `workbench websocket closed before ${id} completed`));
+      }
+      state.rpcPending.clear();
+    }
+
+    function callWorkbenchRpc(method, params) {
+      if (!streamSupportsRpc()) {
+        return Promise.reject(new Error("workbench websocket unavailable"));
+      }
+      const id = nextRpcId();
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          if (!state.rpcPending.has(id)) return;
+          state.rpcPending.delete(id);
+          reject(new Error(`workbench websocket timeout for ${method}`));
+        }, 15000);
+        state.rpcPending.set(id, { resolve, reject, timeout });
+        state.stream.send(JSON.stringify({ id, method, params }));
+      });
     }
 
     function renderSessionState() {
@@ -691,6 +741,7 @@
     }
 
     function renderIdentity(identityStatus) {
+      state.identityStatus = identityStatus || null;
       const readiness = identityStatus?.readiness || {};
       const metrics = readiness.metrics || {};
       $("hero-readiness").textContent = `${readiness.completionPercent ?? 0}%`;
@@ -698,7 +749,9 @@
       $("workspace-badges").innerHTML = [
         `<span class="badge ${readiness.overallStatus === "ready" ? "success" : "warn"}">${escapeHtml(readiness.overallStatus || "unknown")}</span>`,
         `<span class="badge neutral">${escapeHtml(identityStatus?.workspace?.displayName || "default workspace")}</span>`,
-        `<span class="badge neutral">${escapeHtml(identityStatus?.workspace?.region || "region unknown")}</span>`
+        `<span class="badge neutral">${escapeHtml(identityStatus?.workspace?.region || "region unknown")}</span>`,
+        `<span class="badge ${Number(metrics.defaultModelProvidersReady || 0) > 0 ? "success" : "neutral"}">models ${Number(metrics.defaultModelProvidersReady || 0)}/${Number(metrics.totalDefaultModelProviders || 0)}</span>`,
+        `<span class="badge ${Number(metrics.defaultChatPlatformsReady || 0) > 0 ? "success" : "neutral"}">chat ${Number(metrics.defaultChatPlatformsReady || 0)}/${Number(metrics.totalDefaultChatPlatforms || 0)}</span>`
       ].join("");
       applyWorkspaceToForm(identityStatus?.workspace || null);
       $("hero-approvals").textContent = `${metrics.pendingPaymentApprovals ?? 0}`;
@@ -706,18 +759,77 @@
     }
 
     function renderConnectorStatus(report) {
-      const configured = report?.configured || {};
-      const entries = Object.entries(configured);
+      state.connectorStatus = report || null;
+      const configured = Object.entries(report?.configured || {}).reduce((acc, [key, ready]) => {
+        const canonical = canonicalConnectorKey(key);
+        acc[canonical] = Boolean(acc[canonical] || ready);
+        return acc;
+      }, {});
+      const workspace = state.workspace || {};
+      const defaultModels = new Set(workspace.defaultModelProviders || []);
+      const defaultChats = new Set(workspace.defaultChatPlatforms || []);
+      const supportedModels = Array.isArray(report?.supportedModelProviders) ? report.supportedModelProviders : [];
+      const supportedChats = Array.isArray(report?.supportedChatPlatforms) ? report.supportedChatPlatforms : [];
+      const catalog = new Map();
+      supportedModels.forEach((item) => {
+        catalog.set(item.provider, {
+          key: item.provider,
+          label: item.provider.replaceAll("_", " "),
+          kind: "model",
+          integrationMode: item.integrationMode || "unknown"
+        });
+      });
+      supportedChats.forEach((item) => {
+        catalog.set(item.platform, {
+          key: item.platform,
+          label: item.platform.replaceAll("_", " "),
+          kind: "chat",
+          integrationMode: item.integrationMode || "unknown"
+        });
+      });
+      Object.keys(configured).forEach((key) => {
+        if (!catalog.has(key)) {
+          catalog.set(key, {
+            key,
+            label: key.replaceAll("_", " "),
+            kind: "connector",
+            integrationMode: "live"
+          });
+        }
+      });
+      const entries = Array.from(catalog.values())
+        .map((entry) => {
+          const ready = !!configured[entry.key];
+          const isDefault = defaultModels.has(entry.key) || defaultChats.has(entry.key);
+          return {
+            ...entry,
+            ready,
+            isDefault,
+            stateLabel: ready ? "live" : isDefault ? "default-only" : "available"
+          };
+        })
+        .sort((left, right) =>
+          Number(right.isDefault) - Number(left.isDefault)
+          || Number(right.ready) - Number(left.ready)
+          || left.kind.localeCompare(right.kind)
+          || left.label.localeCompare(right.label)
+        );
       $("connector-grid").innerHTML = entries.length
-        ? entries.map(([name, ready]) => `
+        ? entries.map((entry) => `
             <div class="connector-pill">
-              <span>${escapeHtml(name.replaceAll("_", " "))}</span>
-              <div class="connector-led ${ready ? "ready" : "warn"}"></div>
+              <div class="connector-copy">
+                <span>${escapeHtml(entry.label)}</span>
+                <div class="connector-meta">${escapeHtml(entry.kind)} · ${escapeHtml(entry.integrationMode)} · ${escapeHtml(entry.stateLabel)}</div>
+              </div>
+              <div class="connector-led ${entry.ready ? "ready" : entry.isDefault ? "warn" : ""}"></div>
             </div>
           `).join("")
         : `<div class="empty">没有拿到 connector 状态。</div>`;
-      const readyCount = entries.filter(([, ready]) => !!ready).length;
-      $("connector-footer").textContent = `${readyCount}/${entries.length} connectors configured · models = ${formatList(report?.supportedModelProviders?.map((item) => item.provider))}`;
+      const readyCount = entries.filter((entry) => entry.ready).length;
+      const defaultCount = entries.filter((entry) => entry.isDefault).length;
+      const defaultReadyCount = entries.filter((entry) => entry.isDefault && entry.ready).length;
+      const defaultOnlyCount = entries.filter((entry) => entry.isDefault && !entry.ready).length;
+      $("connector-footer").textContent = `gateway live ${readyCount}/${entries.length} · defaults live ${defaultReadyCount}/${defaultCount} · default-only ${defaultOnlyCount} · models = ${formatList(supportedModels.map((item) => item.provider))}`;
     }
 
     function renderNodes(nodes) {
@@ -939,6 +1051,7 @@
       const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations] = responses.map((item) =>
         item.status === "fulfilled" ? item.value : null
       );
+      state.ingressStatus = ingressStatus || null;
 
       if (!identityStatus) {
         setNotice("workspace-notice", "error", "工作区状态读取失败。");
@@ -980,10 +1093,50 @@
       scheduleRealtimeRefresh();
     }
 
+    function handleWorkbenchSocketPayload(payload) {
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+      if (payload.kind === "rpc_result" || payload.kind === "rpc_error") {
+        const pending = payload.id ? state.rpcPending.get(payload.id) : null;
+        if (pending) {
+          clearTimeout(pending.timeout);
+          state.rpcPending.delete(payload.id);
+          if (payload.kind === "rpc_result") {
+            pending.resolve(payload.result);
+          } else {
+            pending.reject(new Error(payload.error || `${payload.method || "rpc"} failed`));
+          }
+        }
+        renderStreamSummary(
+          payload.kind === "rpc_result"
+            ? `${payload.method} completed`
+            : `${payload.method} failed`,
+          `${state.streamTransport} · ${payload.kind}`
+        );
+        return;
+      }
+      if (payload.kind === "ready") {
+        state.streamTransport = payload.transport || "websocket";
+        renderStreamSummary(
+          payload.detail || "gateway workbench websocket connected",
+          `${state.streamTransport} · ${(payload.methods || []).join(", ")}`
+        );
+        return;
+      }
+      if (payload.kind === "refresh_requested") {
+        renderStreamSummary(payload.detail || "refresh requested", `${state.streamTransport} · refresh`);
+        scheduleRealtimeRefresh();
+        return;
+      }
+      handleRealtimePayload(payload);
+    }
+
     function connectConsoleStreamFallback() {
       if (state.stream) {
         state.stream.close();
       }
+      state.streamTransport = "sse";
       $("stream-pill").textContent = "fallback";
       const source = new EventSource("/console/events");
       state.stream = source;
@@ -1006,17 +1159,19 @@
       if (state.stream) {
         state.stream.close();
       }
+      state.streamTransport = "connecting";
       $("stream-pill").textContent = "connecting";
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const socket = new WebSocket(`${protocol}//${window.location.host}/app/ws`);
       state.stream = socket;
       socket.addEventListener("open", () => {
+        state.streamTransport = "websocket";
         $("stream-pill").textContent = "live";
-        socket.send("refresh");
+        socket.send(JSON.stringify({ method: "dashboard.refresh" }));
       });
       socket.addEventListener("message", (event) => {
         try {
-          handleRealtimePayload(JSON.parse(event.data));
+          handleWorkbenchSocketPayload(JSON.parse(event.data));
         } catch (_) {
           $("stream-pill").textContent = "live";
         }
@@ -1025,7 +1180,9 @@
         $("stream-pill").textContent = "fallback";
       });
       socket.addEventListener("close", () => {
+        failPendingRpc("workbench websocket unavailable");
         if (state.stream === socket) {
+          state.streamTransport = "fallback";
           connectConsoleStreamFallback();
         }
       });
@@ -1083,14 +1240,17 @@
     async function handleTaskSubmit(event) {
       event.preventDefault();
       try {
-        const response = await fetchJson("/api/a2a/task", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: $("task-name").value.trim(),
-            instruction: $("task-instruction").value.trim()
-          })
-        });
+        const payload = {
+          name: $("task-name").value.trim(),
+          instruction: $("task-instruction").value.trim()
+        };
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("task.create", payload)
+          : await fetchJson("/api/a2a/task", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
         setNotice("task-notice", "success", `任务已提交：${response.task?.taskId || "unknown"} · ${response.sandboxStatus || "queued"}`);
         await refreshDashboard();
       } catch (error) {
@@ -1106,15 +1266,23 @@
         return;
       }
       try {
-        const response = await fetchJson(`/api/gateway/agent-cards/${encodeURIComponent(cardId)}/invoke`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: $("delegate-name").value.trim() || "delegate-from-workbench",
-            instruction: $("delegate-instruction").value.trim(),
-            awaitCompletion: $("delegate-await").value === "true"
-          })
-        });
+        const payload = {
+          cardId,
+          name: $("delegate-name").value.trim() || "delegate-from-workbench",
+          instruction: $("delegate-instruction").value.trim(),
+          awaitCompletion: $("delegate-await").value === "true"
+        };
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("delegate.invoke", payload)
+          : await fetchJson(`/api/gateway/agent-cards/${encodeURIComponent(cardId)}/invoke`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: payload.name,
+                instruction: payload.instruction,
+                awaitCompletion: payload.awaitCompletion
+              })
+            });
         setNotice("delegate-notice", "success", `委托已发出：${response.invocation?.invocationId || "unknown"} · ${response.invocation?.status || "dispatched"}`);
         await refreshDashboard();
       } catch (error) {
@@ -1129,18 +1297,21 @@
         return;
       }
       try {
-        const response = await fetchJson("/app/command", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionToken: state.sessionToken,
-            platform: $("command-platform").value,
-            chatId: $("command-chat-id").value.trim() || null,
-            senderId: $("command-sender-id").value.trim() || null,
-            senderDisplay: $("command-sender-display").value.trim() || null,
-            text: $("command-text").value.trim()
-          })
-        });
+        const payload = {
+          sessionToken: state.sessionToken,
+          platform: $("command-platform").value,
+          chatId: $("command-chat-id").value.trim() || null,
+          senderId: $("command-sender-id").value.trim() || null,
+          senderDisplay: $("command-sender-display").value.trim() || null,
+          text: $("command-text").value.trim()
+        };
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("command.run", payload)
+          : await fetchJson("/app/command", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
         const record = response.record || {};
         const reply = record.replyText || "<no reply>";
         setNotice("command-notice", "success", `状态：${record.status || "unknown"}${record.linkedTaskId ? ` · task ${record.linkedTaskId}` : ""}\n回复：${reply}`);

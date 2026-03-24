@@ -1197,13 +1197,13 @@ async fn dispatch_ingress_reply_if_possible(
         msg_seq: None,
         is_wakeup: None,
     };
-    match connectors::execute_chat_connector(request).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
+    connectors::execute_chat_connector(request)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
             warn!(?error, platform, "failed to dispatch ingress reply");
-            Ok(())
-        }
-    }
+            error
+        })
 }
 
 fn build_chat_identity_key(

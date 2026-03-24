@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{
@@ -10,10 +11,15 @@ use axum::{
     routing::{get, post},
 };
 use axum::http::StatusCode;
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 
-use crate::{app_state::AppState, chat_ingress, identity};
+use crate::{
+    a2a::{self, Task},
+    agent_cards::{self, InvokeAgentCardRequest},
+    app_state::AppState,
+    chat_ingress, identity,
+};
 
 const CONTROL_UI_HTML: &str = include_str!("../../templates/frontend/control_ui.html");
 
@@ -47,63 +53,38 @@ struct WorkbenchCommandRequest {
     route_to_task: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchTaskRequest {
+    name: String,
+    instruction: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchDelegateRequest {
+    card_id: String,
+    name: Option<String>,
+    instruction: String,
+    await_completion: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchRpcRequest {
+    id: Option<String>,
+    method: String,
+    params: Option<Value>,
+}
+
 async fn submit_command(
     State(state): State<Arc<AppState>>,
     Json(request): Json<WorkbenchCommandRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let session = identity::resolve_session_by_token(&state, &request.session_token)
+    submit_command_inner(state, request)
         .await
-        .map_err(auth_error)?;
-    let platform = request.platform.trim().to_ascii_lowercase();
-    let text = request.text.trim().to_string();
-    if platform.is_empty() {
-        return Err(bad_request("platform is required"));
-    }
-    if text.is_empty() {
-        return Err(bad_request("text is required"));
-    }
-    let record = chat_ingress::simulate_ingress_message(
-        state,
-        &platform,
-        "control_ui.command".to_string(),
-        request.chat_id,
-        request.sender_id,
-        request
-            .sender_display
-            .or_else(|| Some(session.operator_name.clone())),
-        text.clone(),
-        json!({
-            "source": "control_ui",
-            "platform": platform,
-            "text": text,
-            "actor": session.operator_name,
-        }),
-        request.route_to_task.unwrap_or(true),
-    )
-    .await
-    .map_err(service_error)?;
-    Ok(Json(json!({
-        "record": record,
-        "actor": session.operator_name,
-    })))
-}
-
-fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "error": message,
-        })),
-    )
-}
-
-fn auth_error(error: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({
-            "error": error.to_string(),
-        })),
-    )
+        .map(Json)
+        .map_err(service_error)
 }
 
 fn service_error(error: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
@@ -121,7 +102,14 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
             json!({
                 "kind": "ready",
                 "transport": "websocket",
-                "detail": "gateway workbench websocket connected"
+                "detail": "gateway workbench websocket connected",
+                "methods": [
+                    "dashboard.refresh",
+                    "command.run",
+                    "task.create",
+                    "delegate.invoke",
+                    "ping"
+                ]
             })
             .to_string()
             .into(),
@@ -139,13 +127,44 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                         let _ = socket.send(Message::Pong(payload)).await;
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if text.trim().eq_ignore_ascii_case("refresh") {
-                            let _ = socket.send(Message::Text(
-                                json!({
-                                    "kind": "refresh_requested",
-                                    "detail": "client requested dashboard refresh"
-                                }).to_string().into()
-                            )).await;
+                        let trimmed = text.trim();
+                        if trimmed.eq_ignore_ascii_case("refresh") {
+                            let payload = json!({
+                                "kind": "refresh_requested",
+                                "detail": "client requested dashboard refresh"
+                            });
+                            let _ = socket.send(Message::Text(payload.to_string().into())).await;
+                            continue;
+                        }
+                        match serde_json::from_str::<WorkbenchRpcRequest>(trimmed) {
+                            Ok(request) => {
+                                let id = request.id.clone();
+                                let method = request.method.clone();
+                                let payload = match handle_workbench_rpc(state.clone(), request).await {
+                                    Ok(result) => json!({
+                                        "kind": "rpc_result",
+                                        "id": id,
+                                        "method": method,
+                                        "result": result,
+                                    }),
+                                    Err(error) => json!({
+                                        "kind": "rpc_error",
+                                        "id": id,
+                                        "method": method,
+                                        "error": error.to_string(),
+                                    }),
+                                };
+                                let _ = socket.send(Message::Text(payload.to_string().into())).await;
+                            }
+                            Err(error) => {
+                                let _ = socket.send(Message::Text(
+                                    json!({
+                                        "kind": "rpc_error",
+                                        "method": "unknown",
+                                        "error": format!("invalid websocket payload: {error}"),
+                                    }).to_string().into()
+                                )).await;
+                            }
                         }
                     }
                     Some(Ok(_)) => {}
@@ -170,6 +189,136 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
             }
         }
     }
+}
+
+async fn handle_workbench_rpc(
+    state: Arc<AppState>,
+    request: WorkbenchRpcRequest,
+) -> anyhow::Result<Value> {
+    match request.method.as_str() {
+        "dashboard.refresh" => Ok(json!({
+            "detail": "client requested dashboard refresh"
+        })),
+        "ping" => Ok(json!({
+            "ok": true,
+            "transport": "websocket"
+        })),
+        "command.run" => {
+            let params: WorkbenchCommandRequest = parse_rpc_params(request.params)?;
+            submit_command_inner(state, params).await
+        }
+        "task.create" => {
+            let params: WorkbenchTaskRequest = parse_rpc_params(request.params)?;
+            create_task_inner(state, params).await
+        }
+        "delegate.invoke" => {
+            let params: WorkbenchDelegateRequest = parse_rpc_params(request.params)?;
+            invoke_delegate_inner(state, params).await
+        }
+        other => anyhow::bail!("unsupported workbench websocket method: {other}"),
+    }
+}
+
+fn parse_rpc_params<T: DeserializeOwned>(params: Option<Value>) -> anyhow::Result<T> {
+    serde_json::from_value(params.unwrap_or_else(|| json!({})))
+        .context("invalid websocket method params")
+}
+
+async fn submit_command_inner(
+    state: Arc<AppState>,
+    request: WorkbenchCommandRequest,
+) -> anyhow::Result<Value> {
+    let session = identity::resolve_session_by_token(&state, &request.session_token).await?;
+    let platform = request.platform.trim().to_ascii_lowercase();
+    let text = request.text.trim().to_string();
+    if platform.is_empty() {
+        anyhow::bail!("platform is required");
+    }
+    if text.is_empty() {
+        anyhow::bail!("text is required");
+    }
+    let record = chat_ingress::simulate_ingress_message(
+        state,
+        &platform,
+        "control_ui.command".to_string(),
+        request.chat_id,
+        request.sender_id,
+        request
+            .sender_display
+            .or_else(|| Some(session.operator_name.clone())),
+        text.clone(),
+        json!({
+            "source": "control_ui",
+            "platform": platform,
+            "text": text,
+            "actor": session.operator_name,
+        }),
+        request.route_to_task.unwrap_or(true),
+    )
+    .await?;
+    Ok(json!({
+        "record": record,
+        "actor": session.operator_name,
+    }))
+}
+
+async fn create_task_inner(
+    state: Arc<AppState>,
+    request: WorkbenchTaskRequest,
+) -> anyhow::Result<Value> {
+    let name = request.name.trim();
+    let instruction = request.instruction.trim();
+    if name.is_empty() {
+        anyhow::bail!("task name is required");
+    }
+    if instruction.is_empty() {
+        anyhow::bail!("instruction is required");
+    }
+    let response = a2a::submit_task(
+        state,
+        Task {
+            name: name.to_string(),
+            task_id: None,
+            parent_task_id: None,
+            instruction: instruction.to_string(),
+        },
+    )
+    .await?;
+    Ok(json!(response))
+}
+
+async fn invoke_delegate_inner(
+    state: Arc<AppState>,
+    request: WorkbenchDelegateRequest,
+) -> anyhow::Result<Value> {
+    let card_id = request.card_id.trim();
+    let instruction = request.instruction.trim();
+    if card_id.is_empty() {
+        anyhow::bail!("cardId is required");
+    }
+    if instruction.is_empty() {
+        anyhow::bail!("instruction is required");
+    }
+    let response = agent_cards::invoke_remote_agent_card(
+        &state,
+        card_id,
+        InvokeAgentCardRequest {
+            name: request
+                .name
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "delegate-from-workbench".to_string()),
+            instruction: instruction.to_string(),
+            parent_task_id: None,
+            await_completion: request.await_completion,
+            timeout_seconds: None,
+            poll_interval_ms: Some(1000),
+            settlement: None,
+        },
+        None,
+    )
+    .await?;
+    Ok(json!(response))
 }
 
 #[cfg(test)]
