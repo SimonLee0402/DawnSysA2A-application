@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::SystemTime,
 };
 
 use anyhow::{Context, anyhow};
@@ -22,6 +23,35 @@ use wasmtime::Module;
 use crate::app_state::{AppState, SkillPublisherTrustRootRecord, unix_timestamp_ms};
 
 pub const SKILL_PUBLISHER_ISSUER_DID_PREFIX: &str = "did:dawn:skill-publisher:";
+pub const NATIVE_BUILTIN_SOURCE_KIND: &str = "native_builtin";
+
+struct NativeBuiltinSkillSpec {
+    skill_id: &'static str,
+    version: &'static str,
+    display_name: &'static str,
+    description: &'static str,
+    capabilities: &'static [&'static str],
+    artifact_relative_path: &'static str,
+}
+
+const NATIVE_BUILTIN_SKILLS: &[NativeBuiltinSkillSpec] = &[
+    NativeBuiltinSkillSpec {
+        skill_id: "agent-card-discoverer",
+        version: "native",
+        display_name: "Agent Card Discoverer",
+        description: "Dawn native skill for discovering, validating, and operationalizing A2A Agent Cards through the local marketplace, federated catalogs, and operator workflows.",
+        capabilities: &["a2a", "agent_cards", "marketplace_search", "native_workflow"],
+        artifact_relative_path: "../workflow/native_skills/agent-card-discoverer/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "bayesian-skill-set",
+        version: "native",
+        display_name: "Bayesian Skill Set",
+        description: "Dawn native skill for uncertainty-aware planning, evidence fusion, and safe next-step selection across #chat/#observe/#assist/#autopilot workflows.",
+        capabilities: &["bayesian_planning", "decision_support", "safety_modes", "native_workflow"],
+        artifact_relative_path: "../workflow/native_skills/bayesian-skill-set/SKILL.md",
+    },
+];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -254,7 +284,10 @@ pub async fn find_skill(
         .with_context(|| format!("failed to fetch active skill {skill_id}"))?
     };
 
-    row.map(skill_from_row).transpose()
+    if let Some(skill) = row.map(skill_from_row).transpose()? {
+        return Ok(Some(skill));
+    }
+    native_builtin_skill(skill_id, version)
 }
 
 pub async fn current_distribution(
@@ -396,6 +429,13 @@ pub async fn export_skill_package(
     let skill = find_skill(state, skill_id, Some(version))
         .await?
         .ok_or_else(|| anyhow!("skill version not found: {skill_id}@{version}"))?;
+    if skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND {
+        return Ok(SkillPackageResponse {
+            skill,
+            envelope: None,
+            wasm_base64: String::new(),
+        });
+    }
     let wasm_bytes = fs::read(&skill.artifact_path)
         .await
         .with_context(|| format!("failed to read skill artifact {}", skill.artifact_path))?;
@@ -444,6 +484,12 @@ pub async fn install_skill_package_from_url(
         .await
         .with_context(|| format!("failed to decode skill package {}", request.package_url))?;
 
+    if package.skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND {
+        return Ok(SkillActivationResponse {
+            skill: package.skill,
+            activated: true,
+        });
+    }
     if let Some(envelope) = package.envelope {
         register_signed_skill_inner(
             state,
@@ -695,9 +741,12 @@ async fn activate_skill_version_inner(
     skill_id: &str,
     version: &str,
 ) -> anyhow::Result<SkillRecord> {
-    let Some(_skill) = find_skill(state, skill_id, Some(version)).await? else {
+    let Some(skill) = find_skill(state, skill_id, Some(version)).await? else {
         anyhow::bail!("skill version not found: {skill_id}@{version}");
     };
+    if skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND {
+        return Ok(skill);
+    }
 
     sqlx::query(
         r#"
@@ -831,7 +880,26 @@ async fn list_skill_records(state: &AppState) -> anyhow::Result<Vec<SkillRecord>
     .await
     .context("failed to list wasm skills")?;
 
-    rows.into_iter().map(skill_from_row).collect()
+    let mut skills = rows
+        .into_iter()
+        .map(skill_from_row)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for native in native_builtin_skills()? {
+        if !skills
+            .iter()
+            .any(|skill| skill.skill_id == native.skill_id && skill.version == native.version)
+        {
+            skills.push(native);
+        }
+    }
+    skills.sort_by(|left, right| {
+        left.skill_id
+            .cmp(&right.skill_id)
+            .then_with(|| right.active.cmp(&left.active))
+            .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
+            .then_with(|| right.version.cmp(&left.version))
+    });
+    Ok(skills)
 }
 
 async fn list_skill_versions(state: &AppState, skill_id: &str) -> anyhow::Result<Vec<SkillRecord>> {
@@ -864,7 +932,42 @@ async fn list_skill_versions(state: &AppState, skill_id: &str) -> anyhow::Result
     .await
     .with_context(|| format!("failed to list versions for skill {skill_id}"))?;
 
-    rows.into_iter().map(skill_from_row).collect()
+    let mut skills = rows
+        .into_iter()
+        .map(skill_from_row)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if let Some(native) = native_builtin_skill(skill_id, None)? {
+        if !skills
+            .iter()
+            .any(|skill| skill.skill_id == native.skill_id && skill.version == native.version)
+        {
+            skills.push(native);
+        }
+    }
+    skills.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
+            .then_with(|| right.version.cmp(&left.version))
+    });
+    Ok(skills)
+}
+
+pub fn is_native_builtin_skill(skill: &SkillRecord) -> bool {
+    skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND
+}
+
+pub fn native_builtin_skill_usage(skill_id: &str) -> Option<String> {
+    match skill_id {
+        "agent-card-discoverer" => Some(
+            "这是 Dawn 的原生技能 `Agent Card Discoverer`，默认可用，不需要安装。\n\n本机使用方式：\n- CLI: `dawn.cmd agents search <关键词> --federated`\n- /app: 打开 Agent Cards 面板或 Command Studio\n- 聊天: 使用 `/skills` 查看技能，再使用 `/status`、`/task`、`/delegate` 组合运营 Agent Card 流程\n\n它的职责是帮助你发现、筛选和验证 A2A Agent Card，而不是执行 Wasm。".to_string(),
+        ),
+        "bayesian-skill-set" => Some(
+            "这是 Dawn 的原生技能 `Bayesian Skill Set`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天/WorkBench: `#chat` / `#observe` / `#assist` / `#autopilot`\n- /app Command Studio: 用它来切档、观察和规划下一步\n- CLI: 结合 `dawn.cmd doctor --deep`、`dawn.cmd status` 和现有对话链做不确定性收敛\n\n它的职责是做不确定场景下的分级决策和下一步规划，而不是执行 Wasm。".to_string(),
+        ),
+        _ => None,
+    }
 }
 
 fn skill_from_row(row: SkillRow) -> anyhow::Result<SkillRecord> {
@@ -890,6 +993,65 @@ fn skill_from_row(row: SkillRow) -> anyhow::Result<SkillRecord> {
         created_at_unix_ms: i64_to_u128(row.created_at_unix_ms, "created_at_unix_ms")?,
         updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms, "updated_at_unix_ms")?,
     })
+}
+
+fn native_builtin_skills() -> anyhow::Result<Vec<SkillRecord>> {
+    NATIVE_BUILTIN_SKILLS
+        .iter()
+        .map(native_builtin_skill_record)
+        .collect()
+}
+
+fn native_builtin_skill(
+    skill_id: &str,
+    version: Option<&str>,
+) -> anyhow::Result<Option<SkillRecord>> {
+    let Some(spec) = NATIVE_BUILTIN_SKILLS
+        .iter()
+        .find(|spec| spec.skill_id == skill_id && version.is_none_or(|value| value == spec.version))
+    else {
+        return Ok(None);
+    };
+    native_builtin_skill_record(spec).map(Some)
+}
+
+fn native_builtin_skill_record(spec: &NativeBuiltinSkillSpec) -> anyhow::Result<SkillRecord> {
+    let artifact_path = native_builtin_skill_path(spec);
+    let artifact_bytes = std::fs::read(&artifact_path)
+        .with_context(|| format!("failed to read native builtin skill file {}", artifact_path.display()))?;
+    let metadata = std::fs::metadata(&artifact_path)
+        .with_context(|| format!("failed to stat native builtin skill file {}", artifact_path.display()))?;
+    let updated_at_unix_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or(1_770_000_000_000);
+    Ok(SkillRecord {
+        skill_id: spec.skill_id.to_string(),
+        version: spec.version.to_string(),
+        display_name: spec.display_name.to_string(),
+        description: Some(spec.description.to_string()),
+        entry_function: "native_entry".to_string(),
+        capabilities: spec.capabilities.iter().map(|value| value.to_string()).collect(),
+        artifact_path: artifact_path.display().to_string(),
+        artifact_sha256: hex::encode(Sha256::digest(&artifact_bytes)),
+        source_kind: NATIVE_BUILTIN_SOURCE_KIND.to_string(),
+        issuer_did: None,
+        signature_hex: None,
+        document_hash: None,
+        issued_at_unix_ms: None,
+        active: true,
+        created_at_unix_ms: updated_at_unix_ms,
+        updated_at_unix_ms,
+    })
+}
+
+fn native_builtin_skill_path(spec: &NativeBuiltinSkillSpec) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(spec.artifact_relative_path)
+        .components()
+        .collect()
 }
 
 fn i64_to_u128(value: i64, label: &str) -> anyhow::Result<u128> {
@@ -1040,8 +1202,10 @@ mod tests {
     use wasmtime::Engine;
 
     use super::{
-        RegisterSignedSkillRequest, SKILL_PUBLISHER_ISSUER_DID_PREFIX, SignedSkillDocument,
-        SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest, register_signed_skill_inner,
+        NATIVE_BUILTIN_SOURCE_KIND, RegisterSignedSkillRequest,
+        SKILL_PUBLISHER_ISSUER_DID_PREFIX, SignedSkillDocument, SignedSkillEnvelope,
+        SkillPublisherTrustRootUpsertRequest, current_distribution,
+        native_builtin_skill_usage, register_signed_skill_inner,
         skill_publisher_issuer_did_from_public_key_hex, upsert_skill_publisher_trust_root_inner,
         validate_skill_segment,
     };
@@ -1143,5 +1307,29 @@ mod tests {
 
         drop(state);
         fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn distribution_includes_native_builtin_skills() {
+        let (state, db_path) = test_state().await.unwrap();
+        let distribution = current_distribution(&state).await.unwrap();
+        assert!(distribution
+            .skills
+            .iter()
+            .any(|skill| skill.skill_id == "agent-card-discoverer"
+                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
+        assert!(distribution
+            .skills
+            .iter()
+            .any(|skill| skill.skill_id == "bayesian-skill-set"
+                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
+        drop(state);
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn native_builtin_skill_usage_is_available() {
+        assert!(native_builtin_skill_usage("agent-card-discoverer").is_some());
+        assert!(native_builtin_skill_usage("bayesian-skill-set").is_some());
     }
 }

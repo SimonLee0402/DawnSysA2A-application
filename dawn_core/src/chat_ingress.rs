@@ -1455,6 +1455,16 @@ async fn execute_ingress_command(
                     parsed.skill_id
                 )));
             };
+            if skill_registry::is_native_builtin_skill(&skill) {
+                let reply = skill_registry::native_builtin_skill_usage(&skill.skill_id)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "技能 `{}` 是 Dawn 的原生内置技能，当前本机已经可用。",
+                            skill.display_name
+                        )
+                    });
+                return Ok(IngressCommandResult::Reply(reply));
+            }
             let selector = build_skill_selector_for_task(&skill, parsed.function_name.as_deref());
             let mut task_name = format!("{platform} skill {}", skill.display_name);
             if let Some(chat_id) = record.chat_id.as_deref() {
@@ -2043,11 +2053,17 @@ async fn render_skills_command(
     }
     let mut lines = vec!["已安装技能:".to_string()];
     for skill in skills.into_iter().take(8) {
+        let source_suffix = match skill.source_kind.as_str() {
+            "native_builtin" => " [native]",
+            "signed_publisher" => " [signed]",
+            _ => "",
+        };
         lines.push(format!(
-            "- {}@{}{}: {}",
+            "- {}@{}{}{}: {}",
             skill.skill_id,
             skill.version,
             if skill.active { " [active]" } else { "" },
+            source_suffix,
             skill
                 .description
                 .as_deref()

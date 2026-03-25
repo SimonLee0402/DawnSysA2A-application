@@ -1122,6 +1122,7 @@ struct MarketplaceSkillEntry {
     display_name: String,
     description: Option<String>,
     capabilities: Vec<String>,
+    source_kind: String,
     signed: bool,
     active: bool,
     package_url: String,
@@ -4590,9 +4591,10 @@ async fn search_skills(args: SkillSearchArgs) -> anyhow::Result<()> {
         let catalog = fetch_local_catalog(&client, args.query.as_deref(), args.all).await?;
         for skill in catalog.skills {
             println!(
-                "{}@{} signed={} active={} capabilities={}",
+                "{}@{} sourceKind={} signed={} active={} capabilities={}",
                 skill.skill_id,
                 skill.version,
+                skill.source_kind,
                 skill.signed,
                 skill.active,
                 skill.capabilities.join(", ")
@@ -4629,6 +4631,9 @@ async fn install_skill(args: SkillInstallArgs) -> anyhow::Result<()> {
         response.skill.source_kind,
         response.skill.active
     );
+    if response.skill.source_kind == "native_builtin" {
+        println!("  This is a Dawn native builtin skill and is already available on the local system.");
+    }
     Ok(())
 }
 

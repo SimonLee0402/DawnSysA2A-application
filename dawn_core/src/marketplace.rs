@@ -28,6 +28,7 @@ pub struct MarketplaceSkillEntry {
     pub display_name: String,
     pub description: Option<String>,
     pub capabilities: Vec<String>,
+    pub source_kind: String,
     pub signed: bool,
     pub active: bool,
     pub issuer_did: Option<String>,
@@ -533,7 +534,9 @@ async fn build_catalog(
             .skills
             .into_iter()
             .filter(|skill| {
-                !signed_only || (skill.signature_hex.is_some() && skill.issuer_did.is_some())
+                !signed_only
+                    || skill.source_kind == skill_registry::NATIVE_BUILTIN_SOURCE_KIND
+                    || (skill.signature_hex.is_some() && skill.issuer_did.is_some())
             })
             .filter(|skill| q.as_ref().is_none_or(|needle| matches_skill(skill, needle)))
             .map(|skill| skill_to_marketplace_entry(skill, public_base_url.as_deref()))
@@ -748,6 +751,7 @@ fn skill_to_marketplace_entry(
         display_name: skill.display_name.clone(),
         description: skill.description.clone(),
         capabilities: skill.capabilities.clone(),
+        source_kind: skill.source_kind.clone(),
         signed: skill.signature_hex.is_some() && skill.issuer_did.is_some(),
         active: skill.active,
         issuer_did: skill.issuer_did.clone(),
@@ -994,9 +998,9 @@ mod tests {
         app_state::{AppState, MarketplacePeerRecord, unix_timestamp_ms},
         sandbox,
         skill_registry::{
-            RegisterSignedSkillRequest, SignedSkillDocument, SignedSkillEnvelope,
-            SkillPublisherTrustRootUpsertRequest, register_signed_skill_inner,
-            upsert_skill_publisher_trust_root_inner,
+            NATIVE_BUILTIN_SOURCE_KIND, RegisterSignedSkillRequest, SignedSkillDocument,
+            SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest,
+            register_signed_skill_inner, upsert_skill_publisher_trust_root_inner,
         },
     };
     use ed25519_dalek::{Signer, SigningKey};
@@ -1110,8 +1114,18 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(catalog.skills.len(), 1);
-        assert_eq!(catalog.skills[0].skill_id, "market-skill");
+        assert_eq!(catalog.skills.len(), 3);
+        assert!(catalog.skills.iter().any(|skill| skill.skill_id == "market-skill"));
+        assert!(catalog
+            .skills
+            .iter()
+            .any(|skill| skill.skill_id == "agent-card-discoverer"
+                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
+        assert!(catalog
+            .skills
+            .iter()
+            .any(|skill| skill.skill_id == "bayesian-skill-set"
+                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
         assert_eq!(catalog.agent_cards.len(), 1);
         assert_eq!(catalog.agent_cards[0].card_id, "market-agent");
 
@@ -1136,6 +1150,7 @@ mod tests {
                             display_name: "Remote Skill".to_string(),
                             description: Some("Signed remote skill".to_string()),
                             capabilities: vec!["search".to_string()],
+                            source_kind: "signed_publisher".to_string(),
                             signed: true,
                             active: true,
                             issuer_did: Some("did:dawn:skill-publisher:remote".to_string()),
