@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use axum::http::StatusCode;
@@ -18,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     a2a::{self, Task},
     agent_cards::{self, InvokeAgentCardRequest},
-    app_state::AppState,
+    app_state::{AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus},
     chat_ingress, identity, skill_registry,
 };
 
@@ -125,6 +128,10 @@ struct WorkbenchConfigGetRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchChannelStatusRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchConfigApplyRequest {
     session_token: String,
     tenant_id: String,
@@ -176,6 +183,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "skill.run",
                     "skill.inspect",
                     "config.get",
+                    "channel.status",
                     "config.apply",
                     "logs.tail",
                     "session.list",
@@ -294,6 +302,10 @@ async fn handle_workbench_rpc(
         "config.get" => {
             let _params: WorkbenchConfigGetRequest = parse_rpc_params(request.params)?;
             get_config_inner(state).await
+        }
+        "channel.status" => {
+            let _params: WorkbenchChannelStatusRequest = parse_rpc_params(request.params)?;
+            channel_status_inner(state).await
         }
         "config.apply" => {
             let params: WorkbenchConfigApplyRequest = parse_rpc_params(request.params)?;
@@ -446,6 +458,104 @@ async fn get_config_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
     Ok(json!({
         "workspace": workspace
     }))
+}
+
+async fn channel_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
+    let workspace = identity::ensure_workspace_profile(&state).await?;
+    let identities = state.list_chat_channel_identities(None, None).await?;
+    let mut identities_by_platform: BTreeMap<String, Vec<ChatChannelIdentityRecord>> =
+        BTreeMap::new();
+    for identity in identities {
+        identities_by_platform
+            .entry(identity.platform.clone())
+            .or_default()
+            .push(identity);
+    }
+    for platform in &workspace.default_chat_platforms {
+        identities_by_platform.entry(platform.clone()).or_default();
+    }
+
+    let channels = identities_by_platform
+        .into_iter()
+        .map(|(platform, identities)| summarize_channel_status(&workspace.default_chat_platforms, &platform, identities))
+        .collect::<Vec<_>>();
+
+    let paired_channels = channels
+        .iter()
+        .filter(|channel| channel["pairedCount"].as_u64().unwrap_or(0) > 0)
+        .count();
+    let pending_pairings = channels
+        .iter()
+        .map(|channel| channel["pendingCount"].as_u64().unwrap_or(0) as usize)
+        .sum::<usize>();
+    let default_channels = channels.iter().filter(|channel| channel["isDefault"] == json!(true)).count();
+
+    Ok(json!({
+        "workspace": {
+            "displayName": workspace.display_name,
+            "defaultChatPlatforms": workspace.default_chat_platforms,
+        },
+        "channels": channels,
+        "summary": {
+            "channelCount": channels.len(),
+            "defaultChannelCount": default_channels,
+            "pairedChannelCount": paired_channels,
+            "pendingPairingCount": pending_pairings,
+        }
+    }))
+}
+
+fn summarize_channel_status(
+    default_platforms: &[String],
+    platform: &str,
+    identities: Vec<ChatChannelIdentityRecord>,
+) -> Value {
+    let is_default = default_platforms.iter().any(|item| item == platform);
+    let total_identities = identities.len();
+    let mut paired_count = 0usize;
+    let mut pending_count = 0usize;
+    let mut rejected_count = 0usize;
+    let mut blocked_count = 0usize;
+    let mut dm_policies = BTreeSet::new();
+    let mut latest_updated_at_unix_ms = 0u128;
+
+    for identity in &identities {
+        latest_updated_at_unix_ms = latest_updated_at_unix_ms.max(identity.updated_at_unix_ms);
+        dm_policies.insert(identity.dm_policy.clone());
+        match identity.status {
+            ChatChannelIdentityStatus::Pending => pending_count += 1,
+            ChatChannelIdentityStatus::Paired => paired_count += 1,
+            ChatChannelIdentityStatus::Rejected => rejected_count += 1,
+            ChatChannelIdentityStatus::Blocked => blocked_count += 1,
+        }
+    }
+
+    let state_label = if paired_count > 0 {
+        "paired"
+    } else if pending_count > 0 {
+        "pending"
+    } else if blocked_count > 0 && total_identities == blocked_count {
+        "blocked"
+    } else if rejected_count > 0 && total_identities == rejected_count {
+        "rejected"
+    } else if is_default {
+        "default_only"
+    } else {
+        "idle"
+    };
+
+    json!({
+        "platform": platform,
+        "isDefault": is_default,
+        "stateLabel": state_label,
+        "totalIdentities": total_identities,
+        "pairedCount": paired_count,
+        "pendingCount": pending_count,
+        "rejectedCount": rejected_count,
+        "blockedCount": blocked_count,
+        "dmPolicies": dm_policies.into_iter().collect::<Vec<_>>(),
+        "latestUpdatedAtUnixMs": if latest_updated_at_unix_ms == 0 { None::<u128> } else { Some(latest_updated_at_unix_ms) },
+    })
 }
 
 async fn tail_logs_inner(
@@ -602,11 +712,13 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("skill.run"));
         assert!(CONTROL_UI_HTML.contains("skill.inspect"));
         assert!(CONTROL_UI_HTML.contains("config.get"));
+        assert!(CONTROL_UI_HTML.contains("channel.status"));
         assert!(CONTROL_UI_HTML.contains("config.apply"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));
         assert!(CONTROL_UI_HTML.contains("session.inspect"));
         assert!(CONTROL_UI_HTML.contains("session.revoke"));
         assert!(CONTROL_UI_HTML.contains("task.inspect"));
+        assert!(CONTROL_UI_HTML.contains("id=\"channel-footer\""));
     }
 }

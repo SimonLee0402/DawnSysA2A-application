@@ -491,6 +491,7 @@
           </div>
           <div class="connector-grid" id="connector-grid"></div>
           <div class="footer-note" id="connector-footer">等待 connector 状态。</div>
+          <div class="footer-note" id="channel-footer">等待聊天通道状态。</div>
         </section>
 
         <section class="panel">
@@ -602,6 +603,7 @@
       workspace: null,
       identityStatus: null,
       connectorStatus: null,
+      channelStatus: null,
       ingressStatus: null,
       cards: [],
       skills: [],
@@ -803,6 +805,9 @@
 
     function renderConnectorStatus(report) {
       state.connectorStatus = report || null;
+      const channelMap = new Map(
+        (Array.isArray(state.channelStatus?.channels) ? state.channelStatus.channels : []).map((channel) => [canonicalConnectorKey(channel.platform), channel])
+      );
       const configured = Object.entries(report?.configured || {}).reduce((acc, [key, ready]) => {
         const canonical = canonicalConnectorKey(key);
         acc[canonical] = Boolean(acc[canonical] || ready);
@@ -844,10 +849,12 @@
         .map((entry) => {
           const ready = !!configured[entry.key];
           const isDefault = defaultModels.has(entry.key) || defaultChats.has(entry.key);
+          const channel = entry.kind === "chat" ? channelMap.get(entry.key) : null;
           return {
             ...entry,
             ready,
             isDefault,
+            channel,
             stateLabel: ready ? "live" : isDefault ? "default-only" : "available"
           };
         })
@@ -862,7 +869,7 @@
             <div class="connector-pill">
               <div class="connector-copy">
                 <span>${escapeHtml(entry.label)}</span>
-                <div class="connector-meta">${escapeHtml(entry.kind)} · ${escapeHtml(entry.integrationMode)} · ${escapeHtml(entry.stateLabel)}</div>
+                <div class="connector-meta">${escapeHtml(entry.kind)} · ${escapeHtml(entry.integrationMode)} · ${escapeHtml(entry.stateLabel)}${entry.channel ? ` · paired ${Number(entry.channel.pairedCount || 0)} · pending ${Number(entry.channel.pendingCount || 0)}` : ""}</div>
               </div>
               <div class="connector-led ${entry.ready ? "ready" : entry.isDefault ? "warn" : ""}"></div>
             </div>
@@ -873,6 +880,30 @@
       const defaultReadyCount = entries.filter((entry) => entry.isDefault && entry.ready).length;
       const defaultOnlyCount = entries.filter((entry) => entry.isDefault && !entry.ready).length;
       $("connector-footer").textContent = `gateway live ${readyCount}/${entries.length} · defaults live ${defaultReadyCount}/${defaultCount} · default-only ${defaultOnlyCount} · models = ${formatList(supportedModels.map((item) => item.provider))}`;
+    }
+
+    function renderChannelStatus(report) {
+      state.channelStatus = report || null;
+      const channels = Array.isArray(report?.channels) ? report.channels : [];
+      if (!channels.length) {
+        $("channel-footer").textContent = "聊天通道状态暂不可用。";
+        return;
+      }
+      const summary = report?.summary || {};
+      const highlighted = channels
+        .filter((channel) => Number(channel.pairedCount || 0) > 0 || Number(channel.pendingCount || 0) > 0)
+        .slice(0, 3)
+        .map((channel) => `${channel.platform}:${channel.stateLabel}`)
+        .join(", ");
+      const defaultOnly = channels
+        .filter((channel) =>
+          channel.isDefault
+          && Number(channel.pairedCount || 0) === 0
+          && Number(channel.pendingCount || 0) === 0
+        )
+        .map((channel) => channel.platform)
+        .join(", ");
+      $("channel-footer").textContent = `paired channels ${Number(summary.pairedChannelCount || 0)}/${Number(summary.channelCount || channels.length)} · pending pairings ${Number(summary.pendingPairingCount || 0)} · defaults ${Number(summary.defaultChannelCount || 0)}${highlighted ? ` · ${highlighted}` : defaultOnly ? ` · default-only ${defaultOnly}` : ""}`;
     }
 
     function renderNodes(nodes) {
@@ -1210,6 +1241,9 @@
       const configPromise = streamSupportsRpc()
         ? callWorkbenchRpc("config.get", {})
         : fetchJson("/api/gateway/identity/workspace");
+      const channelStatusPromise = streamSupportsRpc()
+        ? callWorkbenchRpc("channel.status", {})
+        : Promise.resolve(null);
       const responses = await Promise.allSettled([
         fetchJson("/api/gateway/identity/status"),
         fetchJson("/api/gateway/connectors/status"),
@@ -1224,10 +1258,11 @@
         fetchJson("/api/gateway/agent-cards/invocations"),
         sessionsPromise,
         logsPromise,
-        configPromise
+        configPromise,
+        channelStatusPromise
       ]);
 
-      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, sessions, workbenchLogs, configSnapshot] = responses.map((item) =>
+      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, sessions, workbenchLogs, configSnapshot, channelStatus] = responses.map((item) =>
         item.status === "fulfilled" ? item.value : null
       );
       state.ingressStatus = ingressStatus || null;
@@ -1237,6 +1272,7 @@
       } else {
         renderIdentity(identityStatus);
       }
+      renderChannelStatus(channelStatus || null);
       renderConnectorStatus(connectorStatus || {});
       renderTasks(tasks || []);
       renderApprovals(approvals || []);
