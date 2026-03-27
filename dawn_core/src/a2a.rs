@@ -87,6 +87,8 @@ pub struct A2aTaskResult {
     pub last_event_type: Option<String>,
     pub latest_message: Option<A2aMessage>,
     pub artifact_names: Vec<String>,
+    pub message_labels: Vec<String>,
+    pub artifact_mime_types: Vec<String>,
     pub message_count: usize,
     pub artifact_count: usize,
     pub update_count: usize,
@@ -1337,6 +1339,14 @@ fn build_task_result(
             .iter()
             .map(|artifact| artifact.name.clone())
             .collect(),
+        message_labels: messages
+            .iter()
+            .filter_map(|message| message.label.clone())
+            .collect(),
+        artifact_mime_types: artifacts
+            .iter()
+            .map(|artifact| artifact.mime_type.clone())
+            .collect(),
         message_count: messages.len(),
         artifact_count: artifacts.len(),
         update_count: updates.len(),
@@ -1690,6 +1700,8 @@ mod tests {
         assert_eq!(result.updated_at_unix_ms, 2);
         assert_eq!(result.last_event_type.as_deref(), Some("task_completed"));
         assert_eq!(result.artifact_names, vec!["task-summary".to_string()]);
+        assert_eq!(result.message_labels, vec!["instruction".to_string(), "task_completed".to_string()]);
+        assert_eq!(result.artifact_mime_types, vec!["application/json".to_string()]);
         assert!(result.latest_message.is_some());
         assert_eq!(result.message_count, 2);
         assert_eq!(result.artifact_count, 1);
