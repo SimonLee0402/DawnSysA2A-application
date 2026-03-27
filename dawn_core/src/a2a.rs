@@ -40,6 +40,7 @@ pub struct TaskResponse {
     pub task: StoredTask,
     pub sandbox_status: String,
     pub state: A2aTaskState,
+    pub result: A2aTaskResult,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
 }
@@ -50,6 +51,7 @@ pub struct TaskDetailResponse {
     pub task: StoredTask,
     pub events: Vec<TaskEventRecord>,
     pub state: A2aTaskState,
+    pub result: A2aTaskResult,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
 }
@@ -62,6 +64,14 @@ pub struct A2aTaskState {
     pub terminal: bool,
     pub awaiting_binding: bool,
     pub awaiting_payment: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskResult {
+    pub summary: String,
+    pub latest_message: Option<A2aMessage>,
+    pub artifact_names: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -183,10 +193,12 @@ async fn get_task(
     let state_envelope = build_task_state(&task);
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
+    let result = build_task_result(&task, &messages, &artifacts);
     Ok(Json(TaskDetailResponse {
         task,
         events,
         state: state_envelope,
+        result,
         messages,
         artifacts,
     }))
@@ -377,11 +389,13 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let state_envelope = build_task_state(&task);
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
+    let result = build_task_result(&task, &messages, &artifacts);
 
     Ok(TaskResponse {
         task,
         sandbox_status,
         state: state_envelope,
+        result,
         messages,
         artifacts,
     })
@@ -949,6 +963,31 @@ fn build_task_artifacts(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2
     }]
 }
 
+fn build_task_result(
+    task: &StoredTask,
+    messages: &[A2aMessage],
+    artifacts: &[A2aArtifact],
+) -> A2aTaskResult {
+    let latest_message = messages.last().cloned();
+    let summary = latest_message
+        .as_ref()
+        .and_then(|message| {
+            message.parts.iter().find_map(|part| match part {
+                A2aPart::Text { text } => Some(text.clone()),
+                A2aPart::Data { .. } => None,
+            })
+        })
+        .unwrap_or_else(|| task.last_update_reason.clone());
+    A2aTaskResult {
+        summary,
+        latest_message,
+        artifact_names: artifacts
+            .iter()
+            .map(|artifact| artifact.name.clone())
+            .collect(),
+    }
+}
+
 fn default_value_payload() -> Value {
     json!({})
 }
@@ -1020,7 +1059,7 @@ mod tests {
     use super::{
         A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
         TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
-        build_task_state, extract_text_from_value, parse_orchestration_plan,
+        build_task_result, build_task_state, extract_text_from_value, parse_orchestration_plan,
         parse_wasm_instruction, resolve_json_templates, resolve_template_string,
     };
     use uuid::Uuid;
@@ -1255,6 +1294,35 @@ mod tests {
         assert!(!state.terminal);
         assert!(!state.awaiting_binding);
         assert!(state.awaiting_payment);
+    }
+
+    #[test]
+    fn builds_task_result_from_latest_message_and_artifacts() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "demo".to_string(),
+            instruction: "Summarize the system status".to_string(),
+            status: TaskStatus::Completed,
+            linked_payment_id: None,
+            last_update_reason: "completed".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        };
+        let events = vec![TaskEventRecord {
+            event_type: "task_completed".to_string(),
+            detail: "All done".to_string(),
+            task_id: task.task_id,
+            created_at_unix_ms: 2,
+        }];
+
+        let messages = build_task_messages(&task, &events);
+        let artifacts = build_task_artifacts(&task, &events);
+        let result = build_task_result(&task, &messages, &artifacts);
+
+        assert_eq!(result.summary, "All done");
+        assert_eq!(result.artifact_names, vec!["task-summary".to_string()]);
+        assert!(result.latest_message.is_some());
     }
 }
 

@@ -583,6 +583,7 @@
               <h3 style="margin-bottom: 12px;">Skill Feedback</h3>
               <div class="list" id="skill-feedback-list"></div>
               <div class="footer-note" id="skill-feedback-note">最近一次技能执行结果会显示在这里。</div>
+              <div class="notice" id="skill-inspect-notice" style="margin-top: 12px;">点击原生技能的“查看说明”会在这里显示详情。</div>
             </div>
           </div>
         </section>
@@ -1024,6 +1025,7 @@
               <div class="footer-note">${escapeHtml(skill.description || "No description.")}</div>
               <div class="inline-actions" style="margin-top: 10px;">
                 <button class="chip-button" type="button" data-native-skill-run="${escapeHtml(skill.skillId)}">运行技能</button>
+                <button class="chip-button" type="button" data-native-skill-inspect="${escapeHtml(skill.skillId)}">查看说明</button>
                 <button class="chip-button" type="button" data-command-template="/skill ${escapeHtml(skill.skillId)}">填入命令</button>
               </div>
             </article>
@@ -1523,6 +1525,27 @@
       }
     }
 
+    async function handleNativeSkillInspect(skillId) {
+      try {
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("skill.inspect", { skillId })
+          : null;
+        if (!response || !response.skill) {
+          setNotice("skill-inspect-notice", "error", "技能详情读取失败。");
+          return;
+        }
+        const skill = response.skill;
+        const usage = response.nativeUsage || "暂无原生说明。";
+        setNotice(
+          "skill-inspect-notice",
+          response.nativeBuiltin ? "success" : "",
+          `${skill.displayName || skill.skillId} · ${skill.version || "unknown"}\n入口函数：${skill.entryFunction || "n/a"}\n说明：${usage}`
+        );
+      } catch (error) {
+        setNotice("skill-inspect-notice", "error", `技能详情读取失败：${error.message}`);
+      }
+    }
+
     async function handleApprovalAction(action, approvalId) {
       const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
       const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
@@ -1589,9 +1612,15 @@
         handlePairingAction(target.dataset.pairingAction, target.dataset.pairingPlatform, target.dataset.pairingId);
       });
       $("native-skill-list").addEventListener("click", (event) => {
-        const target = event.target.closest("[data-native-skill-run]");
-        if (!target) return;
-        handleNativeSkillRun(target.dataset.nativeSkillRun, target.dataset.nativeSkillFunction || null);
+        const runTarget = event.target.closest("[data-native-skill-run]");
+        if (runTarget) {
+          handleNativeSkillRun(runTarget.dataset.nativeSkillRun, runTarget.dataset.nativeSkillFunction || null);
+          return;
+        }
+        const inspectTarget = event.target.closest("[data-native-skill-inspect]");
+        if (inspectTarget) {
+          handleNativeSkillInspect(inspectTarget.dataset.nativeSkillInspect);
+        }
       });
     }
 

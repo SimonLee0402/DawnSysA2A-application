@@ -1769,8 +1769,7 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
                     response.session.operator_name
                 ),
                 true,
-            )?
-        {
+            )? {
             (
                 workspace_defaults.display_name.clone(),
                 workspace_defaults.tenant_id.clone(),
@@ -1824,17 +1823,14 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
     let connectors_reconfigured = staged_env != original_staged_env;
     profile.connector_env = staged_env;
     let mut allow_unsigned_skills = args.allow_unsigned_skills;
-    if interactive
-        && !allow_unsigned_skills
-        && selected_skills.iter().any(|skill| !skill.signed)
-    {
+    if interactive && !allow_unsigned_skills && selected_skills.iter().any(|skill| !skill.signed) {
         println!("One or more selected skills are unsigned.");
-        allow_unsigned_skills = prompt_confirm(
-            "Allow installing unsigned skills for this setup run",
-            false,
-        )?;
+        allow_unsigned_skills =
+            prompt_confirm("Allow installing unsigned skills for this setup run", false)?;
         if !allow_unsigned_skills {
-            println!("Skipping unsigned skills. Re-run setup or use `--allow-unsigned-skills` if you trust that source.");
+            println!(
+                "Skipping unsigned skills. Re-run setup or use `--allow-unsigned-skills` if you trust that source."
+            );
         }
     }
     let mut installed_skills = Vec::new();
@@ -1933,7 +1929,9 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         &selected_models,
         &selected_channels,
     );
-    println!("Next: run `dawn-node start` for the simple path, or `dawn-node gateway start` / `dawn-node run` for manual control.");
+    println!(
+        "Next: run `dawn-node start` for the simple path, or `dawn-node gateway start` / `dawn-node run` for manual control."
+    );
     Ok(())
 }
 
@@ -2365,7 +2363,11 @@ async fn prompt_setup_skills(client: &GatewayClient) -> anyhow::Result<Vec<Setup
                     skill.entry.version,
                     skill.source_display_name,
                     skill.source_peer_id,
-                    if skill.entry.signed { "signed" } else { "unsigned" },
+                    if skill.entry.signed {
+                        "signed"
+                    } else {
+                        "unsigned"
+                    },
                     skill.entry.display_name
                 ),
             }),
@@ -3428,9 +3430,10 @@ async fn handle_models(args: ModelArgs) -> anyhow::Result<()> {
             println!("{}", workspace.default_model_providers.join(", "));
             Ok(())
         }
-        ModelCommand::AuthLogin { provider } => {
-            handle_model_auth(&normalize_connector_target(true, &provider), ModelAuthAction::Login)
-        }
+        ModelCommand::AuthLogin { provider } => handle_model_auth(
+            &normalize_connector_target(true, &provider),
+            ModelAuthAction::Login,
+        ),
         ModelCommand::AuthStatus { provider } => handle_model_auth(
             &normalize_connector_target(true, provider.as_deref().unwrap_or("openai_codex")),
             ModelAuthAction::Status,
@@ -3644,9 +3647,10 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                     string_at_path(&response, &["supportedPlatforms"])
                         .unwrap_or_else(|| "[]".to_string())
                 );
-                let telegram_secret = value_at_path(&response, &["telegramWebhookSecretConfigured"])
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let telegram_secret =
+                    value_at_path(&response, &["telegramWebhookSecretConfigured"])
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
                 let telegram_polling = value_at_path(&response, &["telegramPollingEnabled"])
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
@@ -3960,23 +3964,20 @@ fn openai_codex_auth_ready() -> bool {
     }
     run_codex_login_status()
         .map(|output| {
-            output.contains("Logged in using")
-                || output.to_ascii_lowercase().contains("logged in")
+            output.contains("Logged in using") || output.to_ascii_lowercase().contains("logged in")
         })
         .unwrap_or(false)
 }
 
 fn codex_auth_file_present() -> bool {
-    let base = env::var("CODEX_HOME")
-        .map(PathBuf::from)
-        .ok()
-        .or_else(|| {
-            env::var_os("USERPROFILE")
-                .or_else(|| env::var_os("HOME"))
-                .map(PathBuf::from)
-                .map(|home| home.join(".codex"))
-        });
-    base.map(|dir| dir.join("auth.json").exists()).unwrap_or(false)
+    let base = env::var("CODEX_HOME").map(PathBuf::from).ok().or_else(|| {
+        env::var_os("USERPROFILE")
+            .or_else(|| env::var_os("HOME"))
+            .map(PathBuf::from)
+            .map(|home| home.join(".codex"))
+    });
+    base.map(|dir| dir.join("auth.json").exists())
+        .unwrap_or(false)
 }
 
 fn ensure_openai_codex_auth_ready(interactive: bool) -> anyhow::Result<()> {
@@ -4043,8 +4044,7 @@ fn resolve_codex_cli_path() -> PathBuf {
                     2
                 }
             });
-            if let Some(first) = candidates.into_iter().find(|path| path.exists())
-            {
+            if let Some(first) = candidates.into_iter().find(|path| path.exists()) {
                 return first;
             }
         }
@@ -4632,7 +4632,9 @@ async fn install_skill(args: SkillInstallArgs) -> anyhow::Result<()> {
         response.skill.active
     );
     if response.skill.source_kind == "native_builtin" {
-        println!("  This is a Dawn native builtin skill and is already available on the local system.");
+        println!(
+            "  This is a Dawn native builtin skill and is already available on the local system."
+        );
     }
     Ok(())
 }
@@ -5998,7 +6000,11 @@ async fn ensure_node_runtime_preflight(profile: &mut DawnCliProfile) -> anyhow::
         .await
         {
             Ok(claim) => claim,
-            Err(error) if error.to_string().contains("invalid or unknown session token") => {
+            Err(error)
+                if error
+                    .to_string()
+                    .contains("invalid or unknown session token") =>
+            {
                 session_token = refresh_stored_cli_session(profile, &client).await?;
                 issue_node_claim(
                     &client,
@@ -6035,7 +6041,10 @@ async fn refresh_stored_cli_session(
     profile: &mut DawnCliProfile,
     client: &GatewayClient,
 ) -> anyhow::Result<String> {
-    let bootstrap_mode = profile.bootstrap_mode.as_deref().unwrap_or("development_default");
+    let bootstrap_mode = profile
+        .bootstrap_mode
+        .as_deref()
+        .unwrap_or("development_default");
     if bootstrap_mode != "development_default" {
         bail!(
             "stored CLI session expired and bootstrap mode `{bootstrap_mode}` does not support automatic refresh; run `dawn-node login` again"
@@ -6056,7 +6065,10 @@ async fn refresh_stored_cli_session(
 }
 
 async fn gateway_node_exists(client: &GatewayClient, node_id: &str) -> anyhow::Result<bool> {
-    let url = format!("{}/api/gateway/control-plane/nodes/{node_id}", client.base_url);
+    let url = format!(
+        "{}/api/gateway/control-plane/nodes/{node_id}",
+        client.base_url
+    );
     let response = client
         .http
         .get(&url)
@@ -6081,7 +6093,8 @@ async fn latest_node_claim_for(
     client: &GatewayClient,
     node_id: &str,
 ) -> anyhow::Result<Option<NodeClaimSummaryRecord>> {
-    let claims: Vec<NodeClaimSummaryRecord> = client.get_json("/api/gateway/identity/node-claims").await?;
+    let claims: Vec<NodeClaimSummaryRecord> =
+        client.get_json("/api/gateway/identity/node-claims").await?;
     Ok(claims
         .into_iter()
         .filter(|record| record.node_id == node_id)
@@ -6362,9 +6375,7 @@ fn normalize_connector_target(is_models: bool, target: &str) -> String {
     let normalized = target.trim().to_ascii_lowercase();
     if is_models {
         match normalized.as_str() {
-            "openai-codex" | "openai_codex" | "codex" | "chatgpt" => {
-                "openai_codex".to_string()
-            }
+            "openai-codex" | "openai_codex" | "codex" | "chatgpt" => "openai_codex".to_string(),
             "claude" => "anthropic".to_string(),
             "gemini" => "google".to_string(),
             "aws-bedrock" | "aws_bedrock" => "bedrock".to_string(),
@@ -6974,6 +6985,8 @@ fn normalized_values(values: &[String]) -> Vec<String> {
 fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
     let mut capabilities = vec![
         "agent_ping".to_string(),
+        "headless_status".to_string(),
+        "headless_observe".to_string(),
         "browser_start".to_string(),
         "browser_profiles".to_string(),
         "browser_profile_inspect".to_string(),
@@ -7406,6 +7419,8 @@ mod tests {
                 .iter()
                 .any(|value| value == "desktop_notification")
         );
+        assert!(capabilities.iter().any(|value| value == "headless_status"));
+        assert!(capabilities.iter().any(|value| value == "headless_observe"));
     }
 
     #[test]

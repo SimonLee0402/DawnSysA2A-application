@@ -18,7 +18,7 @@ use crate::{
     a2a::{self, Task},
     agent_cards::{self, InvokeAgentCardRequest},
     app_state::AppState,
-    chat_ingress, identity,
+    chat_ingress, identity, skill_registry,
 };
 
 const CONTROL_UI_HTML: &str = include_str!("../../templates/frontend/control_ui.html");
@@ -83,6 +83,13 @@ struct WorkbenchSkillRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchSkillInspectRequest {
+    skill_id: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchLogsRequest {
     limit: Option<usize>,
 }
@@ -142,6 +149,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "dashboard.refresh",
                     "command.run",
                     "skill.run",
+                    "skill.inspect",
                     "config.apply",
                     "logs.tail",
                     "session.list",
@@ -250,6 +258,10 @@ async fn handle_workbench_rpc(
             let params: WorkbenchSkillRequest = parse_rpc_params(request.params)?;
             run_skill_inner(state, params).await
         }
+        "skill.inspect" => {
+            let params: WorkbenchSkillInspectRequest = parse_rpc_params(request.params)?;
+            inspect_skill_inner(state, params).await
+        }
         "config.apply" => {
             let params: WorkbenchConfigApplyRequest = parse_rpc_params(request.params)?;
             apply_config_inner(state, params).await
@@ -342,6 +354,25 @@ async fn run_skill_inner(
         },
     )
     .await
+}
+
+async fn inspect_skill_inner(
+    state: Arc<AppState>,
+    request: WorkbenchSkillInspectRequest,
+) -> anyhow::Result<Value> {
+    let skill_id = request.skill_id.trim();
+    if skill_id.is_empty() {
+        anyhow::bail!("skillId is required");
+    }
+    let skill = skill_registry::find_skill(&state, skill_id, request.version.as_deref())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown skill: {skill_id}"))?;
+    let native_usage = skill_registry::native_builtin_skill_usage(skill_id);
+    Ok(json!({
+        "skill": skill,
+        "nativeUsage": native_usage,
+        "nativeBuiltin": skill_registry::is_native_builtin_skill(&skill),
+    }))
 }
 
 async fn apply_config_inner(
@@ -463,6 +494,7 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("/app/command"));
         assert!(CONTROL_UI_HTML.contains("/app/ws"));
         assert!(CONTROL_UI_HTML.contains("skill.run"));
+        assert!(CONTROL_UI_HTML.contains("skill.inspect"));
         assert!(CONTROL_UI_HTML.contains("config.apply"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));

@@ -1398,6 +1398,8 @@ async fn dashboard() -> Html<&'static str> {
     const commandTemplates = {
       agent_ping: {},
       list_capabilities: {},
+      headless_status: {},
+      headless_observe: { processLimit: 10, directoryLimit: 10, path: "." },
       browser_start: { sessionId: "browser-managed-1", url: "https://example.com", profileName: "ops", persistProfile: true, approvalRequired: true },
       browser_profiles: { approvalRequired: true },
       browser_profile_inspect: { profileName: "ops", approvalRequired: true },
@@ -1480,6 +1482,8 @@ async fn dashboard() -> Html<&'static str> {
     const commandTemplateDescriptions = {
       agent_ping: "Fast liveness probe",
       list_capabilities: "Attested capability list",
+      headless_status: "Read-only runtime profile for a service, server, or other headless Dawn node",
+      headless_observe: "Collect a read-only headless snapshot with system info, top processes, and a bounded directory listing",
       browser_start: "Launch a fresh managed Chromium or Edge process, optionally backed by a reusable local profile directory",
       browser_profiles: "List the managed browser profiles currently saved on disk and any tracked sessions using them",
       browser_profile_inspect: "Inspect one saved managed browser profile directory, including file counts, bytes, modification time, and any tracked sessions using it",

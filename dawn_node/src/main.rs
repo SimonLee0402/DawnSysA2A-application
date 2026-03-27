@@ -8,6 +8,7 @@ use std::{
     future::Future,
     path::PathBuf,
     pin::Pin,
+    process::Command as StdCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -584,6 +585,8 @@ fn dispatch_command_future<'a>(
                 error: None,
             }
         }),
+        "headless_status" => Box::pin(execute_headless_status_command(config, envelope)),
+        "headless_observe" => Box::pin(execute_headless_observe_command(config, envelope)),
         "system_info" => Box::pin(execute_system_info_command(config, envelope)),
         "list_directory" => Box::pin(execute_list_directory_command(envelope)),
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
@@ -835,6 +838,16 @@ async fn execute_system_info_command(
     config: &NodeConfig,
     envelope: GatewayCommandEnvelope,
 ) -> CommandResultEnvelope {
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(build_system_info_result(config)),
+        error: None,
+    }
+}
+
+fn build_system_info_result(config: &NodeConfig) -> Value {
     let current_dir = env::current_dir()
         .ok()
         .map(|path| path.display().to_string());
@@ -849,28 +862,22 @@ async fn execute_system_info_command(
         .ok()
         .or_else(|| env::var("HOSTNAME").ok());
 
-    CommandResultEnvelope {
-        message_type: "command_result",
-        command_id: envelope.command_id,
-        status: "succeeded",
-        result: Some(json!({
-            "nodeId": config.node_id,
-            "nodeName": config.node_name,
-            "issuerDid": config.issuer_did,
-            "os": env::consts::OS,
-            "arch": env::consts::ARCH,
-            "family": env::consts::FAMILY,
-            "currentDir": current_dir,
-            "currentExe": current_exe,
-            "cpuCount": cpu_count,
-            "username": username,
-            "hostname": hostname,
-            "allowShell": config.allow_shell,
-            "capabilities": config.capabilities,
-            "observedAtUnixMs": unix_timestamp_ms()
-        })),
-        error: None,
-    }
+    json!({
+        "nodeId": config.node_id,
+        "nodeName": config.node_name,
+        "issuerDid": config.issuer_did,
+        "os": env::consts::OS,
+        "arch": env::consts::ARCH,
+        "family": env::consts::FAMILY,
+        "currentDir": current_dir,
+        "currentExe": current_exe,
+        "cpuCount": cpu_count,
+        "username": username,
+        "hostname": hostname,
+        "allowShell": config.allow_shell,
+        "capabilities": config.capabilities,
+        "observedAtUnixMs": unix_timestamp_ms()
+    })
 }
 
 async fn execute_list_directory_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
@@ -1046,35 +1053,43 @@ async fn execute_process_snapshot_command(
     envelope: GatewayCommandEnvelope,
 ) -> CommandResultEnvelope {
     let limit = payload_usize(&envelope.payload, "limit", 50, 500);
+    match build_process_snapshot_result(limit) {
+        Ok(result) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn build_process_snapshot_result(limit: usize) -> anyhow::Result<Value> {
     let output = if cfg!(target_os = "windows") {
-        Command::new("tasklist")
+        StdCommand::new("tasklist")
             .arg("/FO")
             .arg("CSV")
             .arg("/NH")
             .output()
-            .await
     } else {
-        Command::new("ps")
-            .arg("-eo")
-            .arg("pid=,comm=")
-            .output()
-            .await
+        StdCommand::new("ps").arg("-eo").arg("pid=,comm=").output()
     };
 
     match output {
         Ok(output) => {
             if !output.status.success() {
-                return CommandResultEnvelope {
-                    message_type: "command_result",
-                    command_id: envelope.command_id,
-                    status: "failed",
-                    result: Some(json!({
-                        "exitCode": output.status.code(),
-                        "stdout": String::from_utf8_lossy(&output.stdout),
-                        "stderr": String::from_utf8_lossy(&output.stderr)
-                    })),
-                    error: Some("process snapshot command failed".to_string()),
-                };
+                anyhow::bail!(
+                    "process snapshot command failed: exitCode={:?} stderr={}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1084,25 +1099,104 @@ async fn execute_process_snapshot_command(
                 parse_unix_process_snapshot(&stdout, limit)
             };
 
-            CommandResultEnvelope {
+            Ok(json!({
+                "count": processes.len(),
+                "limit": limit,
+                "processes": processes
+            }))
+        }
+        Err(error) => anyhow::bail!("failed to gather process snapshot: {error}"),
+    }
+}
+
+async fn execute_headless_status_command(
+    config: &NodeConfig,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let mut result = build_system_info_result(config);
+    if let Some(object) = result.as_object_mut() {
+        object.insert("runtimeProfile".to_string(), json!("headless"));
+        object.insert("interactiveDesktop".to_string(), json!(false));
+        object.insert("managedBrowserPreferred".to_string(), json!(false));
+        object.insert(
+            "recommendedCapabilities".to_string(),
+            json!([
+                "headless_status",
+                "headless_observe",
+                "system_info",
+                "process_snapshot",
+                "list_directory",
+                "read_file_preview",
+                "stat_path"
+            ]),
+        );
+    }
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(result),
+        error: None,
+    }
+}
+
+async fn execute_headless_observe_command(
+    config: &NodeConfig,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let process_limit = payload_usize(&envelope.payload, "processLimit", 10, 100);
+    let directory_limit = payload_usize(&envelope.payload, "directoryLimit", 10, 100);
+    let directory_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+
+    let process_snapshot = match build_process_snapshot_result(process_limit) {
+        Ok(result) => result,
+        Err(error) => {
+            return CommandResultEnvelope {
                 message_type: "command_result",
                 command_id: envelope.command_id,
-                status: "succeeded",
-                result: Some(json!({
-                    "count": processes.len(),
-                    "limit": limit,
-                    "processes": processes
-                })),
-                error: None,
-            }
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
         }
-        Err(error) => CommandResultEnvelope {
+    };
+
+    let directory_envelope = GatewayCommandEnvelope {
+        command_id: format!("{}:list_directory", envelope.command_id),
+        command_type: "list_directory".to_string(),
+        payload: json!({
+            "path": directory_path,
+            "limit": directory_limit
+        }),
+    };
+    let directory_result = execute_list_directory_command(directory_envelope).await;
+    if directory_result.status != "succeeded" {
+        return CommandResultEnvelope {
             message_type: "command_result",
             command_id: envelope.command_id,
             status: "failed",
             result: None,
-            error: Some(format!("failed to gather process snapshot: {error}")),
-        },
+            error: directory_result.error,
+        };
+    }
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "runtimeProfile": "headless",
+            "system": build_system_info_result(config),
+            "processSnapshot": process_snapshot,
+            "directory": directory_result.result,
+            "observedAtUnixMs": unix_timestamp_ms()
+        })),
+        error: None,
     }
 }
 
@@ -11494,6 +11588,8 @@ fn default_capabilities() -> Vec<String> {
         "echo".to_string(),
         "list_capabilities".to_string(),
         "agent_ping".to_string(),
+        "headless_status".to_string(),
+        "headless_observe".to_string(),
         "browser_start".to_string(),
         "browser_profiles".to_string(),
         "browser_profile_inspect".to_string(),
@@ -12191,6 +12287,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_status_command_reports_headless_profile() {
+        let config = base_config();
+        let response = execute_headless_status_command(
+            &config,
+            GatewayCommandEnvelope {
+                command_id: "cmd-headless-status".to_string(),
+                command_type: "headless_status".to_string(),
+                payload: json!({}),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["runtimeProfile"], "headless");
+        assert_eq!(result["interactiveDesktop"], false);
+    }
+
+    #[tokio::test]
+    async fn headless_observe_command_collects_process_and_directory_views() {
+        let config = base_config();
+        let response = execute_headless_observe_command(
+            &config,
+            GatewayCommandEnvelope {
+                command_id: "cmd-headless-observe".to_string(),
+                command_type: "headless_observe".to_string(),
+                payload: json!({
+                    "processLimit": 5,
+                    "directoryLimit": 5,
+                    "path": "."
+                }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["runtimeProfile"], "headless");
+        assert!(result.get("system").is_some());
+        assert!(result.get("processSnapshot").is_some());
+        assert!(result.get("directory").is_some());
+    }
+
+    #[tokio::test]
     async fn read_file_preview_command_truncates_large_files() {
         let temp_path = std::env::temp_dir().join(format!(
             "dawn-node-read-preview-{}.txt",
@@ -12802,6 +12942,8 @@ mod tests {
     #[test]
     fn default_capabilities_include_browser_session_commands() {
         let capabilities = default_capabilities();
+        assert!(capabilities.iter().any(|value| value == "headless_status"));
+        assert!(capabilities.iter().any(|value| value == "headless_observe"));
         assert!(capabilities.iter().any(|value| value == "browser_start"));
         assert!(capabilities.iter().any(|value| value == "browser_profiles"));
         assert!(
