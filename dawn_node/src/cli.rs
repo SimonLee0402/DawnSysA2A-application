@@ -2193,7 +2193,7 @@ fn runtime_policy_payload(node_profile: &str, requested_capabilities: &[String])
             "interactiveCommandsBlocked": true,
             "blockedClasses": ["desktop_interaction", "managed_browser", "shell_exec"],
             "entrypoints": ["headless_status", "headless_observe"],
-            "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "read_file_preview", "tail_file_preview", "stat_path", "find_paths", "grep_files"],
+                    "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "read_file_preview", "tail_file_preview", "read_file_range", "stat_path", "find_paths", "grep_files"],
             "requestedCapabilities": requested_capabilities,
         }),
         _ => json!({
@@ -2234,7 +2234,7 @@ fn print_node_profile_summary(profile: &DawnCliProfile) -> anyhow::Result<()> {
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
         println!(
-            "Headless tools: process_snapshot, list_directory, read_file_preview, tail_file_preview, stat_path, find_paths, grep_files"
+            "Headless tools: process_snapshot, list_directory, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
         );
         println!("Tip: run `dawn-node node status` to inspect the headless runtime preset.");
     }
@@ -3586,7 +3586,7 @@ fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Res
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
         println!(
-            "Headless tools: process_snapshot, list_directory, read_file_preview, tail_file_preview, stat_path, find_paths, grep_files"
+            "Headless tools: process_snapshot, list_directory, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
         );
     }
     Ok(())
@@ -7286,6 +7286,7 @@ fn default_requested_capabilities_for_profile(
             "process_snapshot".to_string(),
             "read_file_preview".to_string(),
             "tail_file_preview".to_string(),
+            "read_file_range".to_string(),
             "stat_path".to_string(),
             "system_info".to_string(),
         ],
@@ -7373,6 +7374,7 @@ fn default_requested_capabilities_for_profile(
             "process_snapshot".to_string(),
             "read_file_preview".to_string(),
             "tail_file_preview".to_string(),
+            "read_file_range".to_string(),
             "stat_path".to_string(),
             "system_info".to_string(),
         ],
@@ -7751,6 +7753,7 @@ mod tests {
                 .iter()
                 .any(|value| value == "tail_file_preview")
         );
+        assert!(capabilities.iter().any(|value| value == "read_file_range"));
         assert!(
             !capabilities
                 .iter()
@@ -7812,6 +7815,13 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|value| value == "tail_file_preview")
+        );
+        assert!(
+            policy["recommendedCommands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "read_file_range")
         );
         assert!(
             policy["recommendedCommands"]

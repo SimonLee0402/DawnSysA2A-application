@@ -937,6 +937,7 @@
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="stat_path">文件信息</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="read_file_preview">文件预览</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="tail_file_preview">日志尾部</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="read_file_range">文件片段</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="find_paths">查找路径</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="grep_files">文本搜索</button>
                     </div>`
@@ -1703,7 +1704,7 @@
           ? await callWorkbenchRpc("task.inspect", { taskId })
           : await fetchJson(`/api/a2a/task/${encodeURIComponent(taskId)}`);
         const stream = response?.stream || (streamSupportsRpc()
-          ? await callWorkbenchRpc("task.stream", { taskId, after: 0 })
+          ? await callWorkbenchRpc("task.stream", { taskId, after: 0, limit: 25 })
           : null);
         const stateInfo = response?.state || {};
         const result = response?.result || {};
@@ -1744,7 +1745,7 @@
         const latestStreamSummary = latestStreamItem?.summary || latestStreamItem?.detail || "";
         const streamMeta = stream?.summary || result?.streamSummary || {};
         const streamSummary = stream
-          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${typeof streamMeta?.totalItems === "number" ? ` · visible=${Number(streamMeta.totalItems)}` : ""}${typeof streamMeta?.terminalItems === "number" ? ` · terminal=${Number(streamMeta.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${streamMeta?.kindCounts ? `\nstream.kinds=${Object.entries(streamMeta.kindCounts).map(([kind, count]) => `${kind}:${count}`).join(", ")}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
+          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${typeof stream.returnedCount === "number" ? ` · returned=${Number(stream.returnedCount)}` : ""}${typeof stream.availableCount === "number" ? ` · available=${Number(stream.availableCount)}` : ""}${stream.hasMore ? ` · next=${Number(stream.nextCursor || 0)}` : ""}${typeof streamMeta?.totalItems === "number" ? ` · visible=${Number(streamMeta.totalItems)}` : ""}${typeof streamMeta?.terminalItems === "number" ? ` · terminal=${Number(streamMeta.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${streamMeta?.kindCounts ? `\nstream.kinds=${Object.entries(streamMeta.kindCounts).map(([kind, count]) => `${kind}:${count}`).join(", ")}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
           : "";
         setNotice(
           "task-inspect-notice",
@@ -1791,6 +1792,13 @@
         const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
         if (path === null) return;
         payload.path = path;
+      } else if (commandType === "read_file_range") {
+        const path = window.prompt("输入要查看的文件路径", "D:\\Agent2Agent应用\\README.md");
+        if (path === null) return;
+        const startByte = window.prompt("输入起始字节偏移", "0");
+        if (startByte === null) return;
+        payload.path = path;
+        payload.startByte = Number.isFinite(Number(startByte)) ? Number(startByte) : 0;
       } else if (commandType === "find_paths") {
         const path = window.prompt("输入搜索根目录", "D:\\Agent2Agent应用");
         if (path === null) return;
@@ -1828,6 +1836,8 @@
                 ? `bytes=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? " · truncated" : ""}`
               : commandType === "tail_file_preview"
                 ? `tail=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? ` · start=${Number(result?.tailStartByte || 0)}` : ""}`
+              : commandType === "read_file_range"
+                ? `range=${Number(result?.startByte || 0)}-${Number(result?.endByte || 0)} · bytes=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? " · truncated" : ""}`
               : commandType === "find_paths"
                 ? `matches=${Number(result?.count || 0)} · searched=${Number(result?.searchedDirectories || 0)}${result?.truncated ? " · truncated" : ""}`
               : commandType === "grep_files"

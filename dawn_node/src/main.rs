@@ -608,6 +608,7 @@ fn dispatch_command_future<'a>(
         "list_directory" => Box::pin(execute_list_directory_command(envelope)),
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
         "tail_file_preview" => Box::pin(execute_tail_file_preview_command(envelope)),
+        "read_file_range" => Box::pin(execute_read_file_range_command(envelope)),
         "stat_path" => Box::pin(execute_stat_path_command(envelope)),
         "find_paths" => Box::pin(execute_find_paths_command(envelope)),
         "grep_files" => Box::pin(execute_grep_files_command(envelope)),
@@ -1076,6 +1077,58 @@ async fn execute_tail_file_preview_command(
     }
 }
 
+async fn execute_read_file_range_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(path) = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("read_file_range requires payload.path".to_string()),
+        };
+    };
+
+    let start_byte = payload_usize(&envelope.payload, "startByte", 0, usize::MAX);
+    let max_bytes = payload_usize(&envelope.payload, "maxBytes", 4096, 65_536);
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let bounded_start = start_byte.min(bytes.len());
+            let end_byte = bounded_start.saturating_add(max_bytes).min(bytes.len());
+            let preview_bytes = &bytes[bounded_start..end_byte];
+            let preview = String::from_utf8_lossy(preview_bytes).to_string();
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "path": path,
+                    "sizeBytes": bytes.len(),
+                    "startByte": bounded_start,
+                    "endByte": end_byte,
+                    "preview": preview,
+                    "previewBytes": preview_bytes.len(),
+                    "truncated": end_byte < bytes.len()
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!("failed to read file '{}': {error}", path)),
+        },
+    }
+}
+
 async fn execute_stat_path_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
     let Some(path) = envelope
         .payload
@@ -1517,6 +1570,7 @@ async fn execute_headless_status_command(
                 "list_directory",
                 "read_file_preview",
                 "tail_file_preview",
+                "read_file_range",
                 "stat_path",
                 "find_paths",
                 "grep_files"
@@ -1627,6 +1681,7 @@ fn headless_runtime_policy() -> Value {
             "list_directory",
             "read_file_preview",
             "tail_file_preview",
+            "read_file_range",
             "stat_path",
             "find_paths",
             "grep_files"
@@ -1664,6 +1719,7 @@ fn summarize_headless_observation(
         "recommendedNextCommands": [
             "read_file_preview",
             "tail_file_preview",
+            "read_file_range",
             "stat_path",
             "list_directory",
             "find_paths",
@@ -12157,6 +12213,7 @@ fn default_capabilities() -> Vec<String> {
         "list_directory".to_string(),
         "read_file_preview".to_string(),
         "tail_file_preview".to_string(),
+        "read_file_range".to_string(),
         "stat_path".to_string(),
         "find_paths".to_string(),
         "grep_files".to_string(),
@@ -12183,6 +12240,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "list_directory".to_string(),
         "read_file_preview".to_string(),
         "tail_file_preview".to_string(),
+        "read_file_range".to_string(),
         "stat_path".to_string(),
         "find_paths".to_string(),
         "grep_files".to_string(),
@@ -12263,6 +12321,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "list_directory"
             | "read_file_preview"
             | "tail_file_preview"
+            | "read_file_range"
             | "stat_path"
             | "find_paths"
             | "grep_files"
@@ -12943,6 +13002,35 @@ mod tests {
                 .unwrap_or_default()
                 .contains("delta")
         );
+
+        fs::remove_file(temp_path).ok();
+    }
+
+    #[tokio::test]
+    async fn read_file_range_command_reads_requested_slice() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "dawn-node-range-preview-{}.txt",
+            unix_timestamp_ms()
+        ));
+        fs::write(&temp_path, "alpha\nbeta\ngamma\ndelta").unwrap();
+
+        let response = execute_read_file_range_command(GatewayCommandEnvelope {
+            command_id: "cmd-range-preview".to_string(),
+            command_type: "read_file_range".to_string(),
+            payload: json!({
+                "path": temp_path.display().to_string(),
+                "startByte": 6,
+                "maxBytes": 5
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["startByte"], 6);
+        assert_eq!(result["previewBytes"], 5);
+        assert_eq!(result["preview"], "beta\n");
+        assert_eq!(result["truncated"], true);
 
         fs::remove_file(temp_path).ok();
     }

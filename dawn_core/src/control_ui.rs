@@ -76,6 +76,7 @@ struct WorkbenchTaskInspectRequest {
 struct WorkbenchTaskStreamRequest {
     task_id: String,
     after: Option<usize>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -593,6 +594,7 @@ async fn node_observe_inner(
             | "stat_path"
             | "read_file_preview"
             | "tail_file_preview"
+            | "read_file_range"
             | "find_paths"
             | "grep_files"
     ) {
@@ -843,16 +845,25 @@ async fn inspect_task_stream_inner(
     let task_id = Uuid::parse_str(request.task_id.trim()).context("taskId must be a valid UUID")?;
     let detail = a2a::get_task_detail(state, task_id).await?;
     let after = request.after.unwrap_or(0);
-    let items = detail
+    let filtered = detail
         .stream
         .items
         .into_iter()
         .filter(|item| item.sequence > after)
         .collect::<Vec<_>>();
+    let available_count = filtered.len();
+    let limit = request.limit.unwrap_or(available_count).max(1);
+    let has_more = available_count > limit;
+    let items = filtered.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = items.last().map(|item| item.sequence).unwrap_or(after);
     Ok(json!({
         "taskId": task_id,
         "after": after,
         "cursor": detail.stream.cursor,
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
+        "returnedCount": items.len(),
+        "availableCount": available_count,
         "complete": detail.stream.complete,
         "items": items,
     }))

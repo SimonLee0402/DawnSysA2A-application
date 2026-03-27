@@ -117,7 +117,12 @@ pub struct A2aTaskUpdate {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct A2aTaskStream {
+    pub after: usize,
     pub cursor: usize,
+    pub next_cursor: usize,
+    pub has_more: bool,
+    pub returned_count: usize,
+    pub available_count: usize,
     pub complete: bool,
     pub summary: A2aTaskStreamSummary,
     pub items: Vec<A2aTaskStreamItem>,
@@ -265,6 +270,7 @@ enum OrchestrationStep {
 #[serde(rename_all = "camelCase")]
 struct TaskStreamQuery {
     after: Option<usize>,
+    limit: Option<usize>,
 }
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -325,7 +331,12 @@ async fn get_task_stream(
         .map_err(internal_error)?
         .ok_or_else(|| not_found("task not found"))?;
     let events = state.task_events(task_id).await.map_err(internal_error)?;
-    Ok(Json(build_task_stream(&task, &events, query.after)))
+    Ok(Json(build_task_stream(
+        &task,
+        &events,
+        query.after,
+        query.limit,
+    )))
 }
 
 async fn create_task(
@@ -498,7 +509,7 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let artifacts = build_task_artifacts(&task, &events);
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
-    let stream = build_task_stream(&task, &events, None);
+    let stream = build_task_stream(&task, &events, None, None);
     let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
 
     Ok(TaskResponse {
@@ -528,7 +539,7 @@ pub async fn get_task_detail(
     let artifacts = build_task_artifacts(&task, &events);
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
-    let stream = build_task_stream(&task, &events, None);
+    let stream = build_task_stream(&task, &events, None, None);
     let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
     Ok(TaskDetailResponse {
         task,
@@ -1128,9 +1139,10 @@ fn build_task_stream(
     task: &StoredTask,
     events: &[TaskEventRecord],
     after: Option<usize>,
+    limit: Option<usize>,
 ) -> A2aTaskStream {
     let after = after.unwrap_or(0);
-    let items = events
+    let filtered = events
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
@@ -1151,8 +1163,18 @@ fn build_task_stream(
             })
         })
         .collect::<Vec<_>>();
+    let available_count = filtered.len();
+    let limit = limit.unwrap_or(available_count).max(1);
+    let has_more = available_count > limit;
+    let items = filtered.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = items.last().map(|item| item.sequence).unwrap_or(after);
     A2aTaskStream {
+        after,
         cursor: events.len(),
+        next_cursor,
+        has_more,
+        returned_count: items.len(),
+        available_count,
         complete: matches!(task.status, TaskStatus::Completed | TaskStatus::Failed),
         summary: summarize_task_stream(&items),
         items,
@@ -1738,7 +1760,7 @@ mod tests {
         let messages = build_task_messages(&task, &events);
         let artifacts = build_task_artifacts(&task, &events);
         let updates = build_task_updates(&events);
-        let stream = build_task_stream(&task, &events, None);
+        let stream = build_task_stream(&task, &events, None, None);
         let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
 
         assert_eq!(result.summary, "All done");
@@ -1907,8 +1929,13 @@ mod tests {
             },
         ];
 
-        let stream = build_task_stream(&task, &events, Some(1));
+        let stream = build_task_stream(&task, &events, Some(1), None);
+        assert_eq!(stream.after, 1);
         assert_eq!(stream.cursor, 3);
+        assert_eq!(stream.next_cursor, 3);
+        assert_eq!(stream.returned_count, 2);
+        assert_eq!(stream.available_count, 2);
+        assert!(!stream.has_more);
         assert!(!stream.complete);
         assert_eq!(stream.summary.total_items, 2);
         assert_eq!(stream.summary.terminal_items, 0);
@@ -1930,6 +1957,62 @@ mod tests {
         assert_eq!(stream.items[1].phase, "running");
         assert_eq!(stream.items[1].detail, "Halfway there");
         assert_eq!(stream.items[1].summary, "Halfway there");
+    }
+
+    #[test]
+    fn builds_paginated_task_stream_with_next_cursor() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "demo".to_string(),
+            instruction: "Observe stream pagination".to_string(),
+            status: TaskStatus::Running,
+            linked_payment_id: None,
+            last_update_reason: "running".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 12,
+        };
+        let events = vec![
+            TaskEventRecord {
+                event_type: "task_accepted".to_string(),
+                detail: "Accepted".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 1,
+            },
+            TaskEventRecord {
+                event_type: "task_started".to_string(),
+                detail: "Started".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 3,
+            },
+            TaskEventRecord {
+                event_type: "task_progress".to_string(),
+                detail: "Progress".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 6,
+            },
+            TaskEventRecord {
+                event_type: "task_completed".to_string(),
+                detail: "Done".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 12,
+            },
+        ];
+
+        let stream = build_task_stream(&task, &events, Some(1), Some(2));
+        assert_eq!(stream.after, 1);
+        assert_eq!(stream.cursor, 4);
+        assert_eq!(stream.next_cursor, 3);
+        assert_eq!(stream.returned_count, 2);
+        assert_eq!(stream.available_count, 3);
+        assert!(stream.has_more);
+        assert_eq!(stream.items.len(), 2);
+        assert_eq!(stream.items[0].sequence, 2);
+        assert_eq!(stream.items[1].sequence, 3);
+        assert_eq!(
+            stream.summary.latest_event_type.as_deref(),
+            Some("task_progress")
+        );
     }
 
     #[test]
