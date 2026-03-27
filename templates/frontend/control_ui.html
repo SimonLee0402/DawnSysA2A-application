@@ -936,6 +936,7 @@
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="list_directory">列目录</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="stat_path">文件信息</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="read_file_preview">文件预览</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="find_paths">查找路径</button>
                     </div>`
                   : ""}
               </article>
@@ -1707,14 +1708,24 @@
         const remote = response?.remote || null;
         const streamItems = Array.isArray(stream?.items) ? stream.items : [];
         const latestStreamItem = streamItems.length ? streamItems[streamItems.length - 1] : null;
-        const latestMessage = result?.latestMessage?.parts?.find((part) => part.kind === "text")?.text || result?.summary || "";
+        const latestMessage = result?.latestMessageText
+          || result?.latestMessage?.parts?.find((part) => part.kind === "text")?.text
+          || result?.summary
+          || "";
         const updateCount = Array.isArray(response?.updates) ? response.updates.length : 0;
-        const artifactNames = Array.isArray(response?.artifacts) ? response.artifacts.map((item) => item.name).filter(Boolean).join(", ") : "";
+        const artifactNames = Array.isArray(response?.artifacts) && response.artifacts.length
+          ? response.artifacts.map((item) => item.name).filter(Boolean).join(", ")
+          : (result?.primaryArtifactName || "");
         const resultLabels = Array.isArray(result?.messageLabels) && result.messageLabels.length
           ? `\nlabels=${result.messageLabels.join(", ")}`
           : "";
+        const latestLabel = result?.latestMessageLabel
+          ? `\nlatest.label=${result.latestMessageLabel}`
+          : "";
         const artifactMimes = Array.isArray(result?.artifactMimeTypes) && result.artifactMimeTypes.length
           ? `\nartifact.mime=${result.artifactMimeTypes.join(", ")}`
+          : result?.primaryArtifactMimeType
+            ? `\nartifact.mime=${result.primaryArtifactMimeType}`
           : "";
         const remoteSummary = remote
           ? `\nremote=${remote.stateLabel || "unknown"} · invocations=${Number(remote.totalInvocations || 0)}${remote.latestInvocation?.cardId ? ` · latest=${remote.latestInvocation.cardId}` : ""}`
@@ -1730,7 +1741,7 @@
         setNotice(
           "task-inspect-notice",
           stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
-          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${resultLabels}${remoteSummary}${streamSummary}`
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${latestLabel}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${resultLabels}${remoteSummary}${streamSummary}`
         );
       } catch (error) {
         setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);
@@ -1772,6 +1783,13 @@
         const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
         if (path === null) return;
         payload.path = path;
+      } else if (commandType === "find_paths") {
+        const path = window.prompt("输入搜索根目录", "D:\\Agent2Agent应用");
+        if (path === null) return;
+        const query = window.prompt("输入要查找的文件或目录名称关键字", "report");
+        if (query === null) return;
+        payload.path = path;
+        payload.query = query;
       }
       try {
         const response = await callWorkbenchRpc("node.observe", {
@@ -1793,6 +1811,8 @@
               ? `isDir=${Boolean(result?.isDir)} · isFile=${Boolean(result?.isFile)} · bytes=${Number(result?.len || 0)}`
               : commandType === "read_file_preview"
                 ? `bytes=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? " · truncated" : ""}`
+              : commandType === "find_paths"
+                ? `matches=${Number(result?.count || 0)} · searched=${Number(result?.searchedDirectories || 0)}${result?.truncated ? " · truncated" : ""}`
             : "";
         setNotice(
           "node-observe-notice",

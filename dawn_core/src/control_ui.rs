@@ -513,7 +513,9 @@ async fn channel_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
 
     let channels = identities_by_platform
         .into_iter()
-        .map(|(platform, identities)| summarize_channel_status(&workspace.default_chat_platforms, &platform, identities))
+        .map(|(platform, identities)| {
+            summarize_channel_status(&workspace.default_chat_platforms, &platform, identities)
+        })
         .collect::<Vec<_>>();
 
     let paired_channels = channels
@@ -524,7 +526,10 @@ async fn channel_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
         .iter()
         .map(|channel| channel["pendingCount"].as_u64().unwrap_or(0) as usize)
         .sum::<usize>();
-    let default_channels = channels.iter().filter(|channel| channel["isDefault"] == json!(true)).count();
+    let default_channels = channels
+        .iter()
+        .filter(|channel| channel["isDefault"] == json!(true))
+        .count();
 
     Ok(json!({
         "workspace": {
@@ -587,6 +592,7 @@ async fn node_observe_inner(
             | "list_directory"
             | "stat_path"
             | "read_file_preview"
+            | "find_paths"
     ) {
         anyhow::bail!("unsupported node observe command: {command_type}");
     }
@@ -598,13 +604,9 @@ async fn node_observe_inner(
         object.insert("source".to_string(), json!("control_ui"));
         object.insert("actor".to_string(), json!(actor.operator_name.clone()));
     }
-    let (command, delivery) = control_plane::dispatch_gateway_command(
-        &state,
-        node_id,
-        command_type.to_string(),
-        payload,
-    )
-    .await?;
+    let (command, delivery) =
+        control_plane::dispatch_gateway_command(&state, node_id, command_type.to_string(), payload)
+            .await?;
     let command = wait_for_node_command_result(&state, command.command_id, 40).await?;
     Ok(json!({
         "command": command,
@@ -773,7 +775,8 @@ async fn revoke_session_inner(
     request: WorkbenchSessionRevokeRequest,
 ) -> anyhow::Result<Value> {
     let actor = identity::resolve_session_by_token(&state, &request.session_token).await?;
-    let session_id = Uuid::parse_str(request.session_id.trim()).context("sessionId must be a valid UUID")?;
+    let session_id =
+        Uuid::parse_str(request.session_id.trim()).context("sessionId must be a valid UUID")?;
     let reason = request
         .reason
         .unwrap_or_else(|| format!("revoked from workbench by {}", actor.operator_name));

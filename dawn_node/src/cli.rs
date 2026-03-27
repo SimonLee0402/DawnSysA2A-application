@@ -2146,7 +2146,8 @@ fn apply_node_profile_override(
     let changed = profile.node_profile.as_deref() != Some(resolved.as_str());
     profile.node_profile = Some(resolved.clone());
     if changed || profile.requested_capabilities.is_empty() {
-        profile.requested_capabilities = default_requested_capabilities_for_profile(&resolved, false);
+        profile.requested_capabilities =
+            default_requested_capabilities_for_profile(&resolved, false);
     }
     let path = save_profile(profile)?;
     println!(
@@ -2178,8 +2179,7 @@ fn runtime_capability_preview(capabilities: &[String]) -> String {
 fn runtime_policy_summary(node_profile: &str) -> String {
     match node_profile {
         "headless" => {
-            "read_only_observe; blocks desktop_interaction, managed_browser, shell_exec"
-                .to_string()
+            "read_only_observe; blocks desktop_interaction, managed_browser, shell_exec".to_string()
         }
         _ => "interactive_control; desktop/browser actions allowed by requested capabilities"
             .to_string(),
@@ -2193,7 +2193,7 @@ fn runtime_policy_payload(node_profile: &str, requested_capabilities: &[String])
             "interactiveCommandsBlocked": true,
             "blockedClasses": ["desktop_interaction", "managed_browser", "shell_exec"],
             "entrypoints": ["headless_status", "headless_observe"],
-            "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "read_file_preview", "stat_path"],
+            "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "read_file_preview", "stat_path", "find_paths"],
             "requestedCapabilities": requested_capabilities,
         }),
         _ => json!({
@@ -2230,12 +2230,12 @@ fn print_node_profile_summary(profile: &DawnCliProfile) -> anyhow::Result<()> {
         "Capability preview: {}",
         runtime_capability_preview(&requested_capabilities)
     );
-    println!(
-        "Runtime policy: {}",
-        runtime_policy_summary(node_profile)
-    );
+    println!("Runtime policy: {}", runtime_policy_summary(node_profile));
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
+        println!(
+            "Headless tools: process_snapshot, list_directory, read_file_preview, stat_path, find_paths"
+        );
         println!("Tip: run `dawn-node node status` to inspect the headless runtime preset.");
     }
     Ok(())
@@ -3582,12 +3582,12 @@ fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Res
         "Capability preview: {}",
         runtime_capability_preview(&requested_capabilities)
     );
-    println!(
-        "Runtime policy: {}",
-        runtime_policy_summary(node_profile)
-    );
+    println!("Runtime policy: {}", runtime_policy_summary(node_profile));
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
+        println!(
+            "Headless tools: process_snapshot, list_directory, read_file_preview, stat_path, find_paths"
+        );
     }
     Ok(())
 }
@@ -7281,6 +7281,7 @@ fn default_requested_capabilities_for_profile(
             "headless_observe".to_string(),
             "list_capabilities".to_string(),
             "list_directory".to_string(),
+            "find_paths".to_string(),
             "process_snapshot".to_string(),
             "read_file_preview".to_string(),
             "stat_path".to_string(),
@@ -7365,6 +7366,7 @@ fn default_requested_capabilities_for_profile(
             "echo".to_string(),
             "list_capabilities".to_string(),
             "list_directory".to_string(),
+            "find_paths".to_string(),
             "process_snapshot".to_string(),
             "read_file_preview".to_string(),
             "stat_path".to_string(),
@@ -7473,10 +7475,10 @@ mod tests {
         build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
         connector_setup_option_label, default_requested_capabilities,
         default_requested_capabilities_for_profile, derive_local_node_trust_root,
-        extract_text_from_value, find_pending_approval_record, format_payment_approval_summary,
-        ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
-        normalize_node_profile_name, parse_named_selection, resolve_ap2_mcu_seed_hex,
-        effective_requested_capabilities, runtime_capability_preview, runtime_mode_label,
+        effective_requested_capabilities, extract_text_from_value, find_pending_approval_record,
+        format_payment_approval_summary, ingress_secret_pairs, normalize_connector_target,
+        normalize_ingress_target_name, normalize_node_profile_name, parse_named_selection,
+        resolve_ap2_mcu_seed_hex, runtime_capability_preview, runtime_mode_label,
         runtime_policy_payload, runtime_policy_summary, sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;

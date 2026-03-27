@@ -3,7 +3,7 @@ mod managed_browser;
 mod profile;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     env,
     future::Future,
     path::PathBuf,
@@ -608,6 +608,7 @@ fn dispatch_command_future<'a>(
         "list_directory" => Box::pin(execute_list_directory_command(envelope)),
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
         "stat_path" => Box::pin(execute_stat_path_command(envelope)),
+        "find_paths" => Box::pin(execute_find_paths_command(envelope)),
         "process_snapshot" => Box::pin(execute_process_snapshot_command(envelope)),
         "browser_start" => Box::pin(execute_browser_start_command(runtime_state, envelope)),
         "browser_profiles" => Box::pin(execute_browser_profiles_command(runtime_state, envelope)),
@@ -1066,6 +1067,132 @@ async fn execute_stat_path_command(envelope: GatewayCommandEnvelope) -> CommandR
     }
 }
 
+async fn execute_find_paths_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    let root = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+    let Some(query) = envelope
+        .payload
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("find_paths requires payload.query".to_string()),
+        };
+    };
+    let limit = payload_usize(&envelope.payload, "limit", 20, 200);
+    let max_depth = payload_usize(&envelope.payload, "maxDepth", 4, 12);
+    let root_path = PathBuf::from(root);
+    let display_root = root_path.display().to_string();
+    let lowered_query = query.to_lowercase();
+    let mut pending = VecDeque::from([(root_path.clone(), 0usize)]);
+    let mut matches = Vec::new();
+    let mut searched_directories = 0usize;
+    let mut skipped_directories = 0usize;
+    let mut truncated = false;
+
+    while let Some((current_path, depth)) = pending.pop_front() {
+        let mut read_dir = match tokio::fs::read_dir(&current_path).await {
+            Ok(read_dir) => read_dir,
+            Err(_) => {
+                skipped_directories += 1;
+                continue;
+            }
+        };
+        searched_directories += 1;
+
+        loop {
+            let Some(entry) = (match read_dir.next_entry().await {
+                Ok(value) => value,
+                Err(_) => {
+                    skipped_directories += 1;
+                    break;
+                }
+            }) else {
+                break;
+            };
+
+            let name = entry.file_name().to_string_lossy().to_string();
+            let entry_path = entry.path();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => Some(metadata),
+                Err(_) => None,
+            };
+            let is_dir = metadata.as_ref().is_some_and(|item| item.is_dir());
+            let is_file = metadata.as_ref().is_some_and(|item| item.is_file());
+
+            if name.to_lowercase().contains(&lowered_query) {
+                matches.push(json!({
+                    "name": name,
+                    "path": entry_path.display().to_string(),
+                    "depth": depth + 1,
+                    "isDir": is_dir,
+                    "isFile": is_file,
+                    "len": metadata.as_ref().map(|item| item.len()),
+                    "modifiedAtUnixMs": metadata
+                        .as_ref()
+                        .and_then(|item| item.modified().ok())
+                        .map(system_time_to_unix_ms)
+                }));
+                if matches.len() >= limit {
+                    truncated = true;
+                    break;
+                }
+            }
+
+            if is_dir && depth < max_depth {
+                pending.push_back((entry_path, depth + 1));
+            }
+        }
+
+        if truncated {
+            break;
+        }
+    }
+
+    let first_match = matches
+        .first()
+        .and_then(|item| item.get("path"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "path": display_root.clone(),
+            "query": query,
+            "limit": limit,
+            "maxDepth": max_depth,
+            "matches": matches,
+            "count": matches.len(),
+            "searchedDirectories": searched_directories,
+            "skippedDirectories": skipped_directories,
+            "truncated": truncated,
+            "summary": {
+                "query": query,
+                "searchRoot": display_root,
+                "matchCount": matches.len(),
+                "searchedDirectories": searched_directories,
+                "skippedDirectories": skipped_directories,
+                "truncated": truncated,
+                "firstMatch": first_match
+            }
+        })),
+        error: None,
+    }
+}
+
 async fn execute_process_snapshot_command(
     envelope: GatewayCommandEnvelope,
 ) -> CommandResultEnvelope {
@@ -1145,7 +1272,8 @@ async fn execute_headless_status_command(
                 "process_snapshot",
                 "list_directory",
                 "read_file_preview",
-                "stat_path"
+                "stat_path",
+                "find_paths"
             ]),
         );
         object.insert(
@@ -1213,7 +1341,8 @@ async fn execute_headless_observe_command(
     }
 
     let directory_payload = directory_result.result.unwrap_or(Value::Null);
-    let summary = summarize_headless_observation(&process_snapshot, &directory_payload, directory_path);
+    let summary =
+        summarize_headless_observation(&process_snapshot, &directory_payload, directory_path);
 
     CommandResultEnvelope {
         message_type: "command_result",
@@ -1251,12 +1380,17 @@ fn headless_runtime_policy() -> Value {
             "process_snapshot",
             "list_directory",
             "read_file_preview",
-            "stat_path"
+            "stat_path",
+            "find_paths"
         ]
     })
 }
 
-fn summarize_headless_observation(process_snapshot: &Value, directory: &Value, directory_path: &str) -> Value {
+fn summarize_headless_observation(
+    process_snapshot: &Value,
+    directory: &Value,
+    directory_path: &str,
+) -> Value {
     let top_process = process_snapshot
         .get("processes")
         .and_then(Value::as_array)
@@ -1282,7 +1416,8 @@ fn summarize_headless_observation(process_snapshot: &Value, directory: &Value, d
         "recommendedNextCommands": [
             "read_file_preview",
             "stat_path",
-            "list_directory"
+            "list_directory",
+            "find_paths"
         ]
     })
 }
@@ -11772,6 +11907,7 @@ fn default_capabilities() -> Vec<String> {
         "list_directory".to_string(),
         "read_file_preview".to_string(),
         "stat_path".to_string(),
+        "find_paths".to_string(),
         "process_snapshot".to_string(),
     ]
 }
@@ -11795,6 +11931,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "list_directory".to_string(),
         "read_file_preview".to_string(),
         "stat_path".to_string(),
+        "find_paths".to_string(),
         "process_snapshot".to_string(),
     ]
 }
@@ -11872,6 +12009,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "list_directory"
             | "read_file_preview"
             | "stat_path"
+            | "find_paths"
             | "process_snapshot"
     )
 }
@@ -12547,6 +12685,38 @@ mod tests {
                 .iter()
                 .any(|entry| entry["name"] == "alpha.txt" && entry["isFile"] == true)
         );
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn find_paths_command_returns_matches_with_summary() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dawn-node-find-paths-{}", unix_timestamp_ms()));
+        let nested_dir = temp_dir.join("nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(temp_dir.join("alpha-demo.txt"), "alpha").unwrap();
+        fs::write(nested_dir.join("report-demo.log"), "report").unwrap();
+        fs::write(nested_dir.join("ignore.bin"), "bin").unwrap();
+
+        let response = execute_find_paths_command(GatewayCommandEnvelope {
+            command_id: "cmd-find-paths".to_string(),
+            command_type: "find_paths".to_string(),
+            payload: json!({
+                "path": temp_dir.display().to_string(),
+                "query": "demo",
+                "limit": 10,
+                "maxDepth": 4
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["query"], "demo");
+        assert_eq!(result["count"], 2);
+        assert_eq!(result["summary"]["matchCount"], 2);
+        assert!(result["summary"]["firstMatch"].as_str().is_some());
 
         fs::remove_dir_all(temp_dir).ok();
     }
@@ -13555,7 +13725,11 @@ mod tests {
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
         assert!(capabilities.iter().any(|value| value == "process_snapshot"));
         assert!(!capabilities.iter().any(|value| value == "browser_start"));
-        assert!(!capabilities.iter().any(|value| value == "desktop_notification"));
+        assert!(
+            !capabilities
+                .iter()
+                .any(|value| value == "desktop_notification")
+        );
     }
 
     #[tokio::test]

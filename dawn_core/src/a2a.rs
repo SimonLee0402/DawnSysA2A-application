@@ -85,7 +85,11 @@ pub struct A2aTaskResult {
     pub complete: bool,
     pub updated_at_unix_ms: u128,
     pub last_event_type: Option<String>,
+    pub latest_message_label: Option<String>,
+    pub latest_message_text: Option<String>,
     pub latest_message: Option<A2aMessage>,
+    pub primary_artifact_name: Option<String>,
+    pub primary_artifact_mime_type: Option<String>,
     pub artifact_names: Vec<String>,
     pub message_labels: Vec<String>,
     pub artifact_mime_types: Vec<String>,
@@ -507,7 +511,10 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     })
 }
 
-pub async fn get_task_detail(state: Arc<AppState>, task_id: Uuid) -> anyhow::Result<TaskDetailResponse> {
+pub async fn get_task_detail(
+    state: Arc<AppState>,
+    task_id: Uuid,
+) -> anyhow::Result<TaskDetailResponse> {
     let task = state
         .get_task(task_id)
         .await?
@@ -1310,6 +1317,15 @@ fn build_task_result(
 ) -> A2aTaskResult {
     let latest_message = messages.last().cloned();
     let complete = matches!(task.status, TaskStatus::Completed | TaskStatus::Failed);
+    let latest_message_label = latest_message
+        .as_ref()
+        .and_then(|message| message.label.clone());
+    let latest_message_text = latest_message.as_ref().and_then(|message| {
+        message.parts.iter().find_map(|part| match part {
+            A2aPart::Text { text } => Some(text.clone()),
+            A2aPart::Data { .. } => None,
+        })
+    });
     let last_event_type = messages.iter().rev().find_map(|message| {
         message.label.as_ref().and_then(|label| {
             if label == "instruction" {
@@ -1319,22 +1335,22 @@ fn build_task_result(
             }
         })
     });
-    let summary = latest_message
-        .as_ref()
-        .and_then(|message| {
-            message.parts.iter().find_map(|part| match part {
-                A2aPart::Text { text } => Some(text.clone()),
-                A2aPart::Data { .. } => None,
-            })
-        })
+    let summary = latest_message_text
+        .clone()
         .unwrap_or_else(|| task.last_update_reason.clone());
+    let primary_artifact_name = artifacts.first().map(|artifact| artifact.name.clone());
+    let primary_artifact_mime_type = artifacts.first().map(|artifact| artifact.mime_type.clone());
     A2aTaskResult {
         summary,
         status: task.status,
         complete,
         updated_at_unix_ms: task.updated_at_unix_ms,
         last_event_type,
+        latest_message_label,
+        latest_message_text,
         latest_message,
+        primary_artifact_name,
+        primary_artifact_mime_type,
         artifact_names: artifacts
             .iter()
             .map(|artifact| artifact.name.clone())
@@ -1698,10 +1714,29 @@ mod tests {
         assert_eq!(result.status, TaskStatus::Completed);
         assert!(result.complete);
         assert_eq!(result.updated_at_unix_ms, 2);
+        assert_eq!(
+            result.latest_message_label.as_deref(),
+            Some("task_completed")
+        );
+        assert_eq!(result.latest_message_text.as_deref(), Some("All done"));
         assert_eq!(result.last_event_type.as_deref(), Some("task_completed"));
         assert_eq!(result.artifact_names, vec!["task-summary".to_string()]);
-        assert_eq!(result.message_labels, vec!["instruction".to_string(), "task_completed".to_string()]);
-        assert_eq!(result.artifact_mime_types, vec!["application/json".to_string()]);
+        assert_eq!(
+            result.primary_artifact_name.as_deref(),
+            Some("task-summary")
+        );
+        assert_eq!(
+            result.primary_artifact_mime_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(
+            result.message_labels,
+            vec!["instruction".to_string(), "task_completed".to_string()]
+        );
+        assert_eq!(
+            result.artifact_mime_types,
+            vec!["application/json".to_string()]
+        );
         assert!(result.latest_message.is_some());
         assert_eq!(result.message_count, 2);
         assert_eq!(result.artifact_count, 1);
@@ -1832,7 +1867,10 @@ mod tests {
         assert_eq!(stream.summary.terminal_items, 0);
         assert_eq!(stream.summary.latest_kind.as_deref(), Some("progress"));
         assert_eq!(stream.summary.latest_phase.as_deref(), Some("running"));
-        assert_eq!(stream.summary.latest_event_type.as_deref(), Some("task_progress"));
+        assert_eq!(
+            stream.summary.latest_event_type.as_deref(),
+            Some("task_progress")
+        );
         assert_eq!(stream.summary.kind_counts.get("lifecycle"), Some(&1));
         assert_eq!(stream.summary.kind_counts.get("progress"), Some(&1));
         assert_eq!(stream.items.len(), 2);
