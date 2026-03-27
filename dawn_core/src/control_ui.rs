@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use axum::http::StatusCode;
 use axum::{
     Json, Router,
     extract::{
@@ -10,7 +11,6 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
-use axum::http::StatusCode;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
@@ -71,6 +71,24 @@ struct WorkbenchDelegateRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchSkillRequest {
+    session_token: String,
+    skill_id: String,
+    function: Option<String>,
+    platform: Option<String>,
+    chat_id: Option<String>,
+    sender_id: Option<String>,
+    sender_display: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchLogsRequest {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchRpcRequest {
     id: Option<String>,
     method: String,
@@ -106,6 +124,8 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 "methods": [
                     "dashboard.refresh",
                     "command.run",
+                    "skill.run",
+                    "logs.tail",
                     "task.create",
                     "delegate.invoke",
                     "ping"
@@ -207,6 +227,14 @@ async fn handle_workbench_rpc(
             let params: WorkbenchCommandRequest = parse_rpc_params(request.params)?;
             submit_command_inner(state, params).await
         }
+        "skill.run" => {
+            let params: WorkbenchSkillRequest = parse_rpc_params(request.params)?;
+            run_skill_inner(state, params).await
+        }
+        "logs.tail" => {
+            let params: WorkbenchLogsRequest = parse_rpc_params(request.params)?;
+            tail_logs_inner(state, params).await
+        }
         "task.create" => {
             let params: WorkbenchTaskRequest = parse_rpc_params(request.params)?;
             create_task_inner(state, params).await
@@ -259,6 +287,45 @@ async fn submit_command_inner(
     Ok(json!({
         "record": record,
         "actor": session.operator_name,
+    }))
+}
+
+async fn run_skill_inner(
+    state: Arc<AppState>,
+    request: WorkbenchSkillRequest,
+) -> anyhow::Result<Value> {
+    let skill_id = request.skill_id.trim();
+    if skill_id.is_empty() {
+        anyhow::bail!("skillId is required");
+    }
+    let selector = request
+        .function
+        .map(|function| format!("{skill_id}#{function}"))
+        .unwrap_or_else(|| skill_id.to_string());
+    submit_command_inner(
+        state,
+        WorkbenchCommandRequest {
+            session_token: request.session_token,
+            platform: request.platform.unwrap_or_else(|| "app".to_string()),
+            chat_id: request.chat_id,
+            sender_id: request.sender_id,
+            sender_display: request.sender_display,
+            text: format!("/skill {selector}"),
+            route_to_task: Some(true),
+        },
+    )
+    .await
+}
+
+async fn tail_logs_inner(
+    state: Arc<AppState>,
+    request: WorkbenchLogsRequest,
+) -> anyhow::Result<Value> {
+    let limit = request.limit.unwrap_or(24).clamp(1, 100);
+    let events = state.recent_console_events(limit);
+    Ok(json!({
+        "events": events,
+        "limit": limit,
     }))
 }
 
@@ -331,9 +398,13 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("id=\"bootstrap-form\""));
         assert!(CONTROL_UI_HTML.contains("id=\"task-form\""));
         assert!(CONTROL_UI_HTML.contains("id=\"command-form\""));
+        assert!(CONTROL_UI_HTML.contains("id=\"native-skill-list\""));
+        assert!(CONTROL_UI_HTML.contains("id=\"workbench-log-list\""));
         assert!(CONTROL_UI_HTML.contains("/api/gateway/identity/status"));
         assert!(CONTROL_UI_HTML.contains("/api/a2a/task"));
         assert!(CONTROL_UI_HTML.contains("/app/command"));
         assert!(CONTROL_UI_HTML.contains("/app/ws"));
+        assert!(CONTROL_UI_HTML.contains("skill.run"));
+        assert!(CONTROL_UI_HTML.contains("logs.tail"));
     }
 }

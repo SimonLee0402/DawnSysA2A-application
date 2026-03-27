@@ -550,6 +550,29 @@
             <h3 style="margin-bottom: 12px;">Remote Invocations</h3>
             <div class="list" id="invocation-list"></div>
           </div>
+          <div class="split" style="margin-top: 18px;">
+            <div>
+              <div class="panel-head" style="margin-bottom: 12px;">
+                <div>
+                  <h3>Native Skills</h3>
+                  <p>把 Dawn 内建的原生技能直接拉到工作台里，不需要先切回 CLI。</p>
+                </div>
+                <div class="badge-row">
+                  <button class="chip-button" type="button" data-command-template="#chat ">#chat</button>
+                  <button class="chip-button" type="button" data-command-template="#observe ">#observe</button>
+                  <button class="chip-button" type="button" data-command-template="#assist ">#assist</button>
+                  <button class="chip-button" type="button" data-command-template="#autopilot ">#autopilot</button>
+                </div>
+              </div>
+              <div class="list" id="native-skill-list"></div>
+              <div class="notice" id="native-skill-notice">原生技能入口就绪。</div>
+            </div>
+            <div>
+              <h3 style="margin-bottom: 12px;">Recent Workbench Logs</h3>
+              <div class="list" id="workbench-log-list"></div>
+              <div class="footer-note" id="workbench-log-note">等待工作台日志流。</div>
+            </div>
+          </div>
         </section>
       </div>
     </main>
@@ -565,10 +588,12 @@
       connectorStatus: null,
       ingressStatus: null,
       cards: [],
+      skills: [],
       approvals: [],
       pairings: [],
       tasks: [],
       nodes: [],
+      workbenchLogs: [],
       refreshTimer: null,
       stream: null,
       streamTransport: "none",
@@ -954,6 +979,7 @@
 
     function renderSkills(skills) {
       const list = Array.isArray(skills) ? skills : [];
+      state.skills = list;
       $("skill-list").innerHTML = list.length
         ? list.slice(0, 6).map((skill) => `
             <article class="mini-card">
@@ -967,6 +993,52 @@
             </article>
           `).join("")
         : `<div class="empty">还没有注册技能。</div>`;
+      renderNativeSkills(list);
+    }
+
+    function renderNativeSkills(skills) {
+      const nativeSkills = (Array.isArray(skills) ? skills : []).filter((skill) => skill.sourceKind === "native_builtin");
+      $("native-skill-list").innerHTML = nativeSkills.length
+        ? nativeSkills.map((skill) => `
+            <article class="list-card">
+              <strong>${escapeHtml(skill.displayName || skill.skillId)}</strong>
+              <div>${escapeHtml(skill.skillId)} · ${escapeHtml(skill.version || "native")}</div>
+              <div class="list-meta">
+                <span class="badge ${skill.active ? "success" : "neutral"}">${skill.active ? "active" : "inactive"}</span>
+                <span>${escapeHtml(skill.sourceKind || "native_builtin")}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(skill.description || "No description.")}</div>
+              <div class="inline-actions" style="margin-top: 10px;">
+                <button class="chip-button" type="button" data-native-skill-run="${escapeHtml(skill.skillId)}">运行技能</button>
+                <button class="chip-button" type="button" data-command-template="/skill ${escapeHtml(skill.skillId)}">填入命令</button>
+              </div>
+            </article>
+          `).join("")
+        : `<div class="empty">当前没有暴露原生技能。</div>`;
+    }
+
+    function renderWorkbenchLogs(payload) {
+      const events = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.events)
+          ? payload.events
+          : [];
+      state.workbenchLogs = events;
+      $("workbench-log-list").innerHTML = events.length
+        ? events.map((event) => `
+            <article class="mini-card">
+              <strong>${escapeHtml(event.channel || "console")}</strong>
+              <div>${escapeHtml(event.status || "update")} · ${escapeHtml(event.entityId || "n/a")}</div>
+              <div class="list-meta">
+                <span>${formatTime(event.createdAtUnixMs)}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(event.detail || "")}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">还没有工作台日志。</div>`;
+      $("workbench-log-note").textContent = events.length
+        ? `显示最近 ${events.length} 条 console events。`
+        : "等待工作台日志流。";
     }
 
     function renderCards(cards) {
@@ -1034,6 +1106,9 @@
     }
 
     async function refreshDashboard() {
+      const logsPromise = streamSupportsRpc()
+        ? callWorkbenchRpc("logs.tail", { limit: 12 })
+        : Promise.resolve({ events: state.workbenchLogs });
       const responses = await Promise.allSettled([
         fetchJson("/api/gateway/identity/status"),
         fetchJson("/api/gateway/connectors/status"),
@@ -1045,10 +1120,11 @@
         fetchJsonFallback(["/api/gateway/agent-cards", "/api/gateway/agent-cards/"]),
         fetchJsonFallback(["/api/gateway/skills", "/api/gateway/skills/"]),
         fetchJson("/api/gateway/ingress/events?limit=8"),
-        fetchJson("/api/gateway/agent-cards/invocations")
+        fetchJson("/api/gateway/agent-cards/invocations"),
+        logsPromise
       ]);
 
-      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations] = responses.map((item) =>
+      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, workbenchLogs] = responses.map((item) =>
         item.status === "fulfilled" ? item.value : null
       );
       state.ingressStatus = ingressStatus || null;
@@ -1067,6 +1143,7 @@
       renderSkills(skills || []);
       renderIngress(ingress || []);
       renderInvocations(invocations || []);
+      renderWorkbenchLogs(workbenchLogs || { events: state.workbenchLogs });
       updateRefreshStamp(`最后刷新：${new Date().toLocaleString("zh-CN", { hour12: false })}`);
     }
 
@@ -1085,6 +1162,10 @@
       const event = payload?.event || payload;
       const detail = event?.detail || event?.status || event?.channel || payload?.detail || "update";
       $("stream-pill").textContent = event?.status || payload?.kind || "live";
+      if (payload?.kind === "console_update" && payload?.event) {
+        state.workbenchLogs = [payload.event, ...state.workbenchLogs].slice(0, 12);
+        renderWorkbenchLogs({ events: state.workbenchLogs });
+      }
       renderStreamSummary(
         detail,
         `${event?.channel || payload?.transport || "control"} · ${formatTime(event?.createdAtUnixMs)}`
@@ -1122,6 +1203,7 @@
           payload.detail || "gateway workbench websocket connected",
           `${state.streamTransport} · ${(payload.methods || []).join(", ")}`
         );
+        scheduleRealtimeRefresh();
         return;
       }
       if (payload.kind === "refresh_requested") {
@@ -1321,6 +1403,42 @@
       }
     }
 
+    async function handleNativeSkillRun(skillId, functionName) {
+      if (!state.sessionToken) {
+        setNotice("native-skill-notice", "error", "先创建或保存一个 session token。");
+        return;
+      }
+      try {
+        const payload = {
+          sessionToken: state.sessionToken,
+          skillId,
+          function: functionName || null,
+          platform: "app"
+        };
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("skill.run", payload)
+          : await fetchJson("/app/command", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sessionToken: state.sessionToken,
+                platform: "app",
+                text: `/skill ${functionName ? `${skillId}#${functionName}` : skillId}`,
+                routeToTask: true
+              })
+            });
+        const record = response.record || {};
+        setNotice(
+          "native-skill-notice",
+          "success",
+          `技能已发出：${record.status || response.task?.status || "queued"}${record.linkedTaskId ? ` · task ${record.linkedTaskId}` : ""}`
+        );
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("native-skill-notice", "error", `技能执行失败：${error.message}`);
+      }
+    }
+
     async function handleApprovalAction(action, approvalId) {
       const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
       const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
@@ -1385,6 +1503,11 @@
         const target = event.target.closest("[data-pairing-action]");
         if (!target) return;
         handlePairingAction(target.dataset.pairingAction, target.dataset.pairingPlatform, target.dataset.pairingId);
+      });
+      $("native-skill-list").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-native-skill-run]");
+        if (!target) return;
+        handleNativeSkillRun(target.dataset.nativeSkillRun, target.dataset.nativeSkillFunction || null);
       });
     }
 

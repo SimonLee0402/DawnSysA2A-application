@@ -1,6 +1,6 @@
 use std::{
-    collections::HashMap,
-    sync::Arc,
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -718,6 +718,7 @@ pub struct AppState {
     pool: SqlitePool,
     node_sessions: RwLock<HashMap<String, NodeSessionSender>>,
     console_events: broadcast::Sender<ConsoleStreamEvent>,
+    console_event_history: Mutex<VecDeque<ConsoleStreamEvent>>,
     delivery_outbox_wakeup: Notify,
 }
 
@@ -755,6 +756,7 @@ impl AppState {
             pool,
             node_sessions: RwLock::new(HashMap::new()),
             console_events,
+            console_event_history: Mutex::new(VecDeque::with_capacity(256)),
             delivery_outbox_wakeup: Notify::new(),
         });
         crate::agent_cards::spawn_delivery_outbox_worker(state.clone());
@@ -769,6 +771,14 @@ impl AppState {
         self.console_events.subscribe()
     }
 
+    pub fn recent_console_events(&self, limit: usize) -> Vec<ConsoleStreamEvent> {
+        let history = self
+            .console_event_history
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        history.iter().rev().take(limit.max(1)).cloned().collect()
+    }
+
     pub fn emit_console_event(
         &self,
         channel: impl Into<String>,
@@ -776,13 +786,22 @@ impl AppState {
         status: Option<String>,
         detail: impl Into<String>,
     ) {
-        let _ = self.console_events.send(ConsoleStreamEvent {
+        let event = ConsoleStreamEvent {
             channel: channel.into(),
             entity_id,
             status,
             detail: detail.into(),
             created_at_unix_ms: unix_timestamp_ms(),
-        });
+        };
+        let _ = self.console_events.send(event.clone());
+        let mut history = self
+            .console_event_history
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        history.push_back(event);
+        while history.len() > 200 {
+            history.pop_front();
+        }
     }
 
     pub fn wake_delivery_outbox(&self) {
@@ -1571,7 +1590,9 @@ impl AppState {
         .bind(chat_key)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("failed to fetch chat automation mode for {platform}:{chat_key}"))?;
+        .with_context(|| {
+            format!("failed to fetch chat automation mode for {platform}:{chat_key}")
+        })?;
 
         row.map(TryInto::try_into).transpose()
     }
@@ -4919,6 +4940,44 @@ mod tests {
         assert!(matches!(first.channel.as_str(), "task" | "approval"));
         assert!(matches!(second.channel.as_str(), "task" | "approval"));
         assert_ne!(first.channel, second.channel);
+
+        drop(state);
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn recent_console_events_returns_newest_events_first() {
+        let (database_url, db_path) = temp_database_url();
+        let engine = sandbox::init_engine().unwrap();
+        let state = AppState::new_with_database_url(engine, &database_url)
+            .await
+            .unwrap();
+
+        state.emit_console_event(
+            "task",
+            Some("task-1".to_string()),
+            Some("accepted".to_string()),
+            "first event",
+        );
+        state.emit_console_event(
+            "approval",
+            Some("approval-1".to_string()),
+            Some("pending".to_string()),
+            "second event",
+        );
+        state.emit_console_event(
+            "task",
+            Some("task-2".to_string()),
+            Some("completed".to_string()),
+            "third event",
+        );
+
+        let recent = state.recent_console_events(2);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].entity_id.as_deref(), Some("task-2"));
+        assert_eq!(recent[0].detail, "third event");
+        assert_eq!(recent[1].entity_id.as_deref(), Some("approval-1"));
+        assert_eq!(recent[1].detail, "second event");
 
         drop(state);
         let _ = fs::remove_file(db_path);
