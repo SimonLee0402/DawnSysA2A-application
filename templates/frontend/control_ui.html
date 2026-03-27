@@ -1697,8 +1697,12 @@
         const remoteSummary = remote
           ? `\nremote=${remote.stateLabel || "unknown"} · invocations=${Number(remote.totalInvocations || 0)}${remote.latestInvocation?.cardId ? ` · latest=${remote.latestInvocation.cardId}` : ""}`
           : "";
+        const latestStreamLabel = latestStreamItem
+          ? `${latestStreamItem.kind || "update"} / ${latestStreamItem.phase || "running"} / ${latestStreamItem.eventType || latestStreamItem.event_type || "unknown"}#${latestStreamItem.sequence || "?"}`
+          : "";
+        const latestStreamSummary = latestStreamItem?.summary || latestStreamItem?.detail || "";
         const streamSummary = stream
-          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${latestStreamItem ? ` · latest=${latestStreamItem.eventType || latestStreamItem.event_type || "unknown"}#${latestStreamItem.sequence || "?"}` : ""}`
+          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
           : "";
         setNotice(
           "task-inspect-notice",

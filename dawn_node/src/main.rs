@@ -1135,6 +1135,7 @@ async fn execute_headless_status_command(
         object.insert("runtimeProfile".to_string(), json!("headless"));
         object.insert("interactiveDesktop".to_string(), json!(false));
         object.insert("managedBrowserPreferred".to_string(), json!(false));
+        object.insert("runtimePolicy".to_string(), headless_runtime_policy());
         object.insert(
             "recommendedCapabilities".to_string(),
             json!([
@@ -1146,6 +1147,15 @@ async fn execute_headless_status_command(
                 "read_file_preview",
                 "stat_path"
             ]),
+        );
+        object.insert(
+            "summary".to_string(),
+            json!({
+                "mode": "read_only_observe",
+                "requestedCapabilities": config.capabilities,
+                "interactiveCommandsBlocked": true,
+                "recommendedCommand": "headless_observe"
+            }),
         );
     }
     CommandResultEnvelope {
@@ -1202,19 +1212,91 @@ async fn execute_headless_observe_command(
         };
     }
 
+    let directory_payload = directory_result.result.unwrap_or(Value::Null);
+    let summary = summarize_headless_observation(&process_snapshot, &directory_payload, directory_path);
+
     CommandResultEnvelope {
         message_type: "command_result",
         command_id: envelope.command_id,
         status: "succeeded",
         result: Some(json!({
             "runtimeProfile": "headless",
+            "runtimePolicy": headless_runtime_policy(),
+            "summary": summary,
             "system": build_system_info_result(config),
             "processSnapshot": process_snapshot,
-            "directory": directory_result.result,
+            "directory": directory_payload,
             "observedAtUnixMs": unix_timestamp_ms()
         })),
         error: None,
     }
+}
+
+fn headless_runtime_policy() -> Value {
+    json!({
+        "mode": "read_only_observe",
+        "interactiveDesktop": false,
+        "managedBrowserAllowed": false,
+        "shellExecAllowed": false,
+        "allowedCommandTypes": headless_default_capabilities(),
+        "blockedCommandClasses": [
+            "desktop_interaction",
+            "managed_browser",
+            "shell_exec"
+        ],
+        "recommendedCommands": [
+            "headless_status",
+            "headless_observe",
+            "system_info",
+            "process_snapshot",
+            "list_directory",
+            "read_file_preview",
+            "stat_path"
+        ]
+    })
+}
+
+fn summarize_headless_observation(process_snapshot: &Value, directory: &Value, directory_path: &str) -> Value {
+    let top_process = process_snapshot
+        .get("processes")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .map(headless_process_label)
+        .unwrap_or_else(|| "unknown".to_string());
+    let first_entry = directory
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    json!({
+        "mode": "read_only_observe",
+        "processCount": process_snapshot.get("count").and_then(Value::as_u64).unwrap_or(0),
+        "topProcess": top_process,
+        "directoryPath": directory_path,
+        "directoryEntryCount": directory.get("count").and_then(Value::as_u64).unwrap_or(0),
+        "directoryTruncated": directory.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+        "firstDirectoryEntry": if first_entry.is_empty() { Value::Null } else { json!(first_entry) },
+        "recommendedNextCommands": [
+            "read_file_preview",
+            "stat_path",
+            "list_directory"
+        ]
+    })
+}
+
+fn headless_process_label(process: &Value) -> String {
+    if let Some(name) = process.get("imageName").and_then(Value::as_str) {
+        let pid = process.get("pid").and_then(Value::as_str).unwrap_or("?");
+        return format!("{name} (pid {pid})");
+    }
+    if let Some(command) = process.get("command").and_then(Value::as_str) {
+        let pid = process.get("pid").and_then(Value::as_str).unwrap_or("?");
+        return format!("{command} (pid {pid})");
+    }
+    "unknown".to_string()
 }
 
 async fn execute_shell_command(
@@ -12381,6 +12463,8 @@ mod tests {
         let result = response.result.unwrap();
         assert_eq!(result["runtimeProfile"], "headless");
         assert_eq!(result["interactiveDesktop"], false);
+        assert_eq!(result["runtimePolicy"]["mode"], "read_only_observe");
+        assert_eq!(result["summary"]["recommendedCommand"], "headless_observe");
     }
 
     #[tokio::test]
@@ -12406,6 +12490,9 @@ mod tests {
         assert!(result.get("system").is_some());
         assert!(result.get("processSnapshot").is_some());
         assert!(result.get("directory").is_some());
+        assert_eq!(result["summary"]["mode"], "read_only_observe");
+        assert_eq!(result["summary"]["directoryPath"], ".");
+        assert!(result["summary"].get("topProcess").is_some());
     }
 
     #[tokio::test]

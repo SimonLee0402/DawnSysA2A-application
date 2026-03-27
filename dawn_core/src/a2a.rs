@@ -110,8 +110,11 @@ pub struct A2aTaskStream {
 #[serde(rename_all = "camelCase")]
 pub struct A2aTaskStreamItem {
     pub sequence: usize,
+    pub kind: String,
+    pub phase: String,
     pub event_type: String,
     pub detail: String,
+    pub summary: String,
     pub created_at_unix_ms: u128,
     pub terminal: bool,
 }
@@ -1104,15 +1107,14 @@ fn build_task_stream(
             if sequence <= after {
                 return None;
             }
-            let normalized = event.event_type.to_ascii_lowercase();
-            let terminal = normalized.contains("completed")
-                || normalized.contains("failed")
-                || normalized.contains("rejected")
-                || normalized.contains("revoked");
+            let (kind, phase, terminal) = classify_task_stream_event(&event.event_type);
             Some(A2aTaskStreamItem {
                 sequence,
+                kind: kind.to_string(),
+                phase: phase.to_string(),
                 event_type: event.event_type.clone(),
                 detail: event.detail.clone(),
+                summary: event.detail.clone(),
                 created_at_unix_ms: event.created_at_unix_ms,
                 terminal,
             })
@@ -1122,6 +1124,57 @@ fn build_task_stream(
         cursor: events.len(),
         complete: matches!(task.status, TaskStatus::Completed | TaskStatus::Failed),
         items,
+    }
+}
+
+fn classify_task_stream_event(event_type: &str) -> (&'static str, &'static str, bool) {
+    let normalized = event_type.to_ascii_lowercase();
+    if normalized.contains("awaiting_skill_binding") {
+        ("binding", "awaiting_binding", false)
+    } else if normalized.contains("payment") {
+        (
+            "payment",
+            if normalized.contains("authorized") {
+                "completed"
+            } else {
+                "awaiting_payment"
+            },
+            normalized.contains("authorized"),
+        )
+    } else if normalized.contains("policy") {
+        ("policy", "running", false)
+    } else if normalized.contains("remote")
+        || normalized.contains("invocation")
+        || normalized.contains("delegate")
+    {
+        (
+            "remote",
+            if normalized.contains("failed") {
+                "failed"
+            } else if normalized.contains("completed") {
+                "completed"
+            } else {
+                "running"
+            },
+            normalized.contains("failed") || normalized.contains("completed"),
+        )
+    } else if normalized.contains("failed")
+        || normalized.contains("rejected")
+        || normalized.contains("revoked")
+    {
+        ("failure", "failed", true)
+    } else if normalized.contains("completed") || normalized.contains("executed") {
+        ("result", "completed", true)
+    } else if normalized.contains("progress") || normalized.contains("resumed") {
+        ("progress", "running", false)
+    } else if normalized.contains("started") {
+        ("lifecycle", "running", false)
+    } else if normalized.contains("queued") {
+        ("lifecycle", "queued", false)
+    } else if normalized.contains("accepted") {
+        ("lifecycle", "accepted", false)
+    } else {
+        ("update", "running", false)
     }
 }
 
@@ -1318,9 +1371,10 @@ mod tests {
     use super::{
         A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
         TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
-        build_task_result, build_task_state, build_task_stream, build_task_updates, extract_text_from_value,
-        parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
-        resolve_template_string, summarize_remote_status,
+        build_task_result, build_task_state, build_task_stream, build_task_updates,
+        classify_task_stream_event, extract_text_from_value, parse_orchestration_plan,
+        parse_wasm_instruction, resolve_json_templates, resolve_template_string,
+        summarize_remote_status,
     };
     use uuid::Uuid;
 
@@ -1701,9 +1755,26 @@ mod tests {
         assert!(!stream.complete);
         assert_eq!(stream.items.len(), 2);
         assert_eq!(stream.items[0].sequence, 2);
+        assert_eq!(stream.items[0].kind, "lifecycle");
+        assert_eq!(stream.items[0].phase, "running");
         assert_eq!(stream.items[0].event_type, "task_started");
         assert_eq!(stream.items[1].sequence, 3);
+        assert_eq!(stream.items[1].kind, "progress");
+        assert_eq!(stream.items[1].phase, "running");
         assert_eq!(stream.items[1].detail, "Halfway there");
+        assert_eq!(stream.items[1].summary, "Halfway there");
+    }
+
+    #[test]
+    fn classifies_binding_and_failure_stream_events() {
+        assert_eq!(
+            classify_task_stream_event("awaiting_skill_binding"),
+            ("binding", "awaiting_binding", false)
+        );
+        assert_eq!(
+            classify_task_stream_event("orchestration_step_failed"),
+            ("failure", "failed", true)
+        );
     }
 }
 
