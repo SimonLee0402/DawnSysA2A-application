@@ -108,6 +108,8 @@ struct LoginArgs {
     #[arg(long)]
     allow_shell: bool,
     #[arg(long)]
+    node_profile: Option<String>,
+    #[arg(long)]
     no_claim: bool,
     #[arg(long)]
     session_only: bool,
@@ -144,6 +146,8 @@ struct OnboardArgs {
     #[arg(long)]
     node_name: Option<String>,
     #[arg(long)]
+    node_profile: Option<String>,
+    #[arg(long)]
     allow_shell: bool,
     #[arg(long)]
     no_claim: bool,
@@ -177,6 +181,8 @@ struct SetupArgs {
     allow_unsigned_skills: bool,
     #[arg(long)]
     allow_shell: bool,
+    #[arg(long)]
+    node_profile: Option<String>,
     #[arg(long)]
     no_claim: bool,
     #[arg(long)]
@@ -946,6 +952,8 @@ struct NodeClaimArgs {
     #[arg(long)]
     capability: Vec<String>,
     #[arg(long)]
+    node_profile: Option<String>,
+    #[arg(long)]
     allow_shell: bool,
     #[arg(long, default_value_t = 1800)]
     expires_seconds: u64,
@@ -1300,6 +1308,7 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
                     federated_skills: false,
                     allow_unsigned_skills: false,
                     allow_shell: false,
+                    node_profile: None,
                     no_claim: false,
                     yes: false,
                     advanced: false,
@@ -1331,6 +1340,7 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
                         federated_skills: false,
                         allow_unsigned_skills: false,
                         allow_shell: false,
+                        node_profile: None,
                         no_claim: false,
                         yes: false,
                         advanced: false,
@@ -1464,6 +1474,7 @@ async fn login(args: LoginArgs) -> anyhow::Result<()> {
             federated_skills: args.federated_skills,
             allow_unsigned_skills: args.allow_unsigned_skills,
             allow_shell: args.allow_shell,
+            node_profile: args.node_profile,
             no_claim: args.no_claim,
             yes: args.yes,
             advanced: args.advanced,
@@ -1541,6 +1552,7 @@ async fn onboard(args: OnboardArgs) -> anyhow::Result<()> {
 
     let mut claim_summary = None;
     if !args.no_claim {
+        let node_profile = resolve_node_profile_name(args.node_profile.as_deref(), &profile)?;
         let node_id = args
             .node_id
             .clone()
@@ -1550,21 +1562,29 @@ async fn onboard(args: OnboardArgs) -> anyhow::Result<()> {
             .node_name
             .clone()
             .or_else(|| profile.node_name.clone())
-            .unwrap_or_else(|| "Dawn Local Node".to_string());
-        let requested_capabilities = default_requested_capabilities(args.allow_shell);
+            .unwrap_or_else(|| {
+                if node_profile == "headless" {
+                    "Dawn Headless Node".to_string()
+                } else {
+                    "Dawn Local Node".to_string()
+                }
+            });
+        let requested_capabilities =
+            default_requested_capabilities_for_profile(&node_profile, args.allow_shell);
         let claim = issue_node_claim(
             &client,
             &response.session_token,
             &node_id,
             &node_name,
-            requested_capabilities,
+            requested_capabilities.clone(),
             1800,
         )
         .await?;
         profile.node_id = Some(claim.claim.node_id.clone());
         profile.node_name = Some(claim.claim.display_name.clone());
+        profile.node_profile = Some(node_profile);
         profile.claim_token = Some(claim.claim_token.clone());
-        profile.requested_capabilities = default_requested_capabilities(args.allow_shell);
+        profile.requested_capabilities = requested_capabilities;
         claim_summary = Some(claim);
     }
 
@@ -1868,15 +1888,20 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         args.allow_shell
     };
     if should_claim {
+        let node_profile = resolve_node_profile_name(args.node_profile.as_deref(), &profile)?;
         let node_id = profile
             .node_id
             .clone()
             .unwrap_or_else(|| "node-local".to_string());
-        let node_name = profile
-            .node_name
-            .clone()
-            .unwrap_or_else(|| "Dawn Local Node".to_string());
-        let requested_capabilities = default_requested_capabilities(allow_shell);
+        let node_name = profile.node_name.clone().unwrap_or_else(|| {
+            if node_profile == "headless" {
+                "Dawn Headless Node".to_string()
+            } else {
+                "Dawn Local Node".to_string()
+            }
+        });
+        let requested_capabilities =
+            default_requested_capabilities_for_profile(&node_profile, allow_shell);
         let claim = issue_node_claim(
             &client,
             &response.session_token,
@@ -1888,11 +1913,16 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
         .await?;
         profile.node_id = Some(claim.claim.node_id.clone());
         profile.node_name = Some(claim.claim.display_name.clone());
+        profile.node_profile = Some(node_profile);
         profile.claim_token = Some(claim.claim_token.clone());
         profile.requested_capabilities = requested_capabilities;
         println!(
             "Issued node claim for {}. claimToken hint: {}",
             claim.claim.node_id, claim.token_hint
+        );
+        println!(
+            "Node profile: {}",
+            profile.node_profile.as_deref().unwrap_or("desktop")
         );
         println!("Next: run `dawn-node node trust-self` so the gateway trusts this local node.");
     }
@@ -5906,6 +5936,7 @@ async fn create_node_claim(args: NodeClaimArgs) -> anyhow::Result<()> {
     let session_token = require_session_token(&profile)?;
     let gateway_base_url = resolve_gateway_base_url(args.gateway.as_deref(), &profile);
     let client = GatewayClient::new(gateway_base_url.clone())?;
+    let node_profile = resolve_node_profile_name(args.node_profile.as_deref(), &profile)?;
     let node_id = args
         .node_id
         .clone()
@@ -5915,9 +5946,15 @@ async fn create_node_claim(args: NodeClaimArgs) -> anyhow::Result<()> {
         .display_name
         .clone()
         .or_else(|| profile.node_name.clone())
-        .unwrap_or_else(|| "Dawn Local Node".to_string());
+        .unwrap_or_else(|| {
+            if node_profile == "headless" {
+                "Dawn Headless Node".to_string()
+            } else {
+                "Dawn Local Node".to_string()
+            }
+        });
     let requested_capabilities = if args.capability.is_empty() {
-        default_requested_capabilities(args.allow_shell)
+        default_requested_capabilities_for_profile(&node_profile, args.allow_shell)
     } else {
         normalized_values(&args.capability)
     };
@@ -5935,12 +5972,17 @@ async fn create_node_claim(args: NodeClaimArgs) -> anyhow::Result<()> {
     profile.gateway_base_url = Some(gateway_base_url);
     profile.node_id = Some(response.claim.node_id.clone());
     profile.node_name = Some(response.claim.display_name.clone());
+    profile.node_profile = Some(node_profile);
     profile.claim_token = Some(response.claim_token.clone());
     profile.requested_capabilities = requested_capabilities;
     let path = save_profile(&profile)?;
 
     println!("Issued node claim for {}", response.claim.node_id);
     println!("Display name: {}", response.claim.display_name);
+    println!(
+        "Node profile: {}",
+        profile.node_profile.as_deref().unwrap_or("desktop")
+    );
     println!("Token hint: {}", response.token_hint);
     println!("Session URL: {}", response.session_url);
     println!("Launch URL: {}", response.launch_url);
@@ -5958,12 +6000,18 @@ async fn ensure_node_runtime_preflight(profile: &mut DawnCliProfile) -> anyhow::
         .node_id
         .clone()
         .unwrap_or_else(|| "node-local".to_string());
-    let node_name = profile
-        .node_name
-        .clone()
-        .unwrap_or_else(|| "Dawn Local Node".to_string());
+    let node_name = profile.node_name.clone().unwrap_or_else(|| {
+        if profile.node_profile.as_deref() == Some("headless") {
+            "Dawn Headless Node".to_string()
+        } else {
+            "Dawn Local Node".to_string()
+        }
+    });
     let requested_capabilities = if profile.requested_capabilities.is_empty() {
-        default_requested_capabilities(false)
+        default_requested_capabilities_for_profile(
+            profile.node_profile.as_deref().unwrap_or("desktop"),
+            false,
+        )
     } else {
         profile.requested_capabilities.clone()
     };
@@ -6982,97 +7030,138 @@ fn normalized_values(values: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
-    let mut capabilities = vec![
-        "agent_ping".to_string(),
-        "headless_status".to_string(),
-        "headless_observe".to_string(),
-        "browser_start".to_string(),
-        "browser_profiles".to_string(),
-        "browser_profile_inspect".to_string(),
-        "browser_profile_import".to_string(),
-        "browser_profile_export".to_string(),
-        "browser_profile_delete".to_string(),
-        "browser_status".to_string(),
-        "browser_stop".to_string(),
-        "browser_navigate".to_string(),
-        "browser_new_tab".to_string(),
-        "browser_new_window".to_string(),
-        "browser_extract".to_string(),
-        "browser_click".to_string(),
-        "browser_back".to_string(),
-        "browser_forward".to_string(),
-        "browser_reload".to_string(),
-        "browser_focus".to_string(),
-        "browser_close".to_string(),
-        "browser_tabs".to_string(),
-        "browser_snapshot".to_string(),
-        "browser_screenshot".to_string(),
-        "browser_pdf".to_string(),
-        "browser_console_messages".to_string(),
-        "browser_network_requests".to_string(),
-        "browser_network_export".to_string(),
-        "browser_trace".to_string(),
-        "browser_trace_export".to_string(),
-        "browser_errors".to_string(),
-        "browser_errors_export".to_string(),
-        "browser_cookies".to_string(),
-        "browser_storage".to_string(),
-        "browser_storage_set".to_string(),
-        "browser_set_headers".to_string(),
-        "browser_set_offline".to_string(),
-        "browser_set_geolocation".to_string(),
-        "browser_emulate_device".to_string(),
-        "browser_evaluate".to_string(),
-        "browser_wait_for".to_string(),
-        "browser_handle_dialog".to_string(),
-        "browser_press_key".to_string(),
-        "browser_type".to_string(),
-        "browser_upload".to_string(),
-        "browser_download".to_string(),
-        "browser_form_fill".to_string(),
-        "browser_form_submit".to_string(),
-        "browser_open".to_string(),
-        "browser_search".to_string(),
-        "desktop_open".to_string(),
-        "system_lock".to_string(),
-        "system_sleep".to_string(),
-        "desktop_notification".to_string(),
-        "desktop_clipboard_set".to_string(),
-        "desktop_type_text".to_string(),
-        "desktop_key_press".to_string(),
-        "desktop_windows_list".to_string(),
-        "desktop_window_focus".to_string(),
-        "desktop_wait_for_window".to_string(),
-        "desktop_focus_app".to_string(),
-        "desktop_launch_and_focus".to_string(),
-        "desktop_mouse_move".to_string(),
-        "desktop_mouse_click".to_string(),
-        "desktop_screenshot".to_string(),
-        "desktop_ocr".to_string(),
-        "desktop_accessibility_query".to_string(),
-        "desktop_accessibility_click".to_string(),
-        "desktop_accessibility_wait_for".to_string(),
-        "desktop_accessibility_fill".to_string(),
-        "desktop_accessibility_workflow".to_string(),
-        "desktop_accessibility_snapshot".to_string(),
-        "desktop_accessibility_focus".to_string(),
-        "desktop_accessibility_invoke".to_string(),
-        "desktop_accessibility_set_value".to_string(),
-        "echo".to_string(),
-        "list_capabilities".to_string(),
-        "list_directory".to_string(),
-        "process_snapshot".to_string(),
-        "read_file_preview".to_string(),
-        "stat_path".to_string(),
-        "system_info".to_string(),
-    ];
+fn normalize_node_profile_name(value: &str) -> anyhow::Result<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "desktop" | "local" | "interactive" => Ok("desktop"),
+        "headless" | "server" | "service" => Ok("headless"),
+        other => bail!("unsupported node profile `{other}`. Supported: desktop, headless"),
+    }
+}
+
+fn resolve_node_profile_name(
+    explicit: Option<&str>,
+    profile: &DawnCliProfile,
+) -> anyhow::Result<String> {
+    let candidate = explicit
+        .map(str::to_string)
+        .or_else(|| profile.node_profile.clone())
+        .unwrap_or_else(|| "desktop".to_string());
+    Ok(normalize_node_profile_name(&candidate)?.to_string())
+}
+
+fn default_requested_capabilities_for_profile(
+    node_profile: &str,
+    allow_shell: bool,
+) -> Vec<String> {
+    let normalized_profile = normalize_node_profile_name(node_profile).unwrap_or("desktop");
+    let mut capabilities = match normalized_profile {
+        "headless" => vec![
+            "agent_ping".to_string(),
+            "echo".to_string(),
+            "headless_status".to_string(),
+            "headless_observe".to_string(),
+            "list_capabilities".to_string(),
+            "list_directory".to_string(),
+            "process_snapshot".to_string(),
+            "read_file_preview".to_string(),
+            "stat_path".to_string(),
+            "system_info".to_string(),
+        ],
+        _ => vec![
+            "agent_ping".to_string(),
+            "headless_status".to_string(),
+            "headless_observe".to_string(),
+            "browser_start".to_string(),
+            "browser_profiles".to_string(),
+            "browser_profile_inspect".to_string(),
+            "browser_profile_import".to_string(),
+            "browser_profile_export".to_string(),
+            "browser_profile_delete".to_string(),
+            "browser_status".to_string(),
+            "browser_stop".to_string(),
+            "browser_navigate".to_string(),
+            "browser_new_tab".to_string(),
+            "browser_new_window".to_string(),
+            "browser_extract".to_string(),
+            "browser_click".to_string(),
+            "browser_back".to_string(),
+            "browser_forward".to_string(),
+            "browser_reload".to_string(),
+            "browser_focus".to_string(),
+            "browser_close".to_string(),
+            "browser_tabs".to_string(),
+            "browser_snapshot".to_string(),
+            "browser_screenshot".to_string(),
+            "browser_pdf".to_string(),
+            "browser_console_messages".to_string(),
+            "browser_network_requests".to_string(),
+            "browser_network_export".to_string(),
+            "browser_trace".to_string(),
+            "browser_trace_export".to_string(),
+            "browser_errors".to_string(),
+            "browser_errors_export".to_string(),
+            "browser_cookies".to_string(),
+            "browser_storage".to_string(),
+            "browser_storage_set".to_string(),
+            "browser_set_headers".to_string(),
+            "browser_set_offline".to_string(),
+            "browser_set_geolocation".to_string(),
+            "browser_emulate_device".to_string(),
+            "browser_evaluate".to_string(),
+            "browser_wait_for".to_string(),
+            "browser_handle_dialog".to_string(),
+            "browser_press_key".to_string(),
+            "browser_type".to_string(),
+            "browser_upload".to_string(),
+            "browser_download".to_string(),
+            "browser_form_fill".to_string(),
+            "browser_form_submit".to_string(),
+            "browser_open".to_string(),
+            "browser_search".to_string(),
+            "desktop_open".to_string(),
+            "system_lock".to_string(),
+            "system_sleep".to_string(),
+            "desktop_notification".to_string(),
+            "desktop_clipboard_set".to_string(),
+            "desktop_type_text".to_string(),
+            "desktop_key_press".to_string(),
+            "desktop_windows_list".to_string(),
+            "desktop_window_focus".to_string(),
+            "desktop_wait_for_window".to_string(),
+            "desktop_focus_app".to_string(),
+            "desktop_launch_and_focus".to_string(),
+            "desktop_mouse_move".to_string(),
+            "desktop_mouse_click".to_string(),
+            "desktop_screenshot".to_string(),
+            "desktop_ocr".to_string(),
+            "desktop_accessibility_query".to_string(),
+            "desktop_accessibility_click".to_string(),
+            "desktop_accessibility_wait_for".to_string(),
+            "desktop_accessibility_fill".to_string(),
+            "desktop_accessibility_workflow".to_string(),
+            "desktop_accessibility_snapshot".to_string(),
+            "desktop_accessibility_focus".to_string(),
+            "desktop_accessibility_invoke".to_string(),
+            "desktop_accessibility_set_value".to_string(),
+            "echo".to_string(),
+            "list_capabilities".to_string(),
+            "list_directory".to_string(),
+            "process_snapshot".to_string(),
+            "read_file_preview".to_string(),
+            "stat_path".to_string(),
+            "system_info".to_string(),
+        ],
+    };
     if allow_shell {
         capabilities.push("shell_exec".to_string());
     }
     capabilities.sort();
     capabilities.dedup();
     capabilities
+}
+
+fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
+    default_requested_capabilities_for_profile("desktop", allow_shell)
 }
 
 fn join_json_array(value: &Value) -> String {
@@ -7163,10 +7252,12 @@ mod tests {
     use super::{
         ApprovalRequestSummary, ChannelSendArgs, PaymentRecordSummary, build_ap2_signature_payload,
         build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
-        connector_setup_option_label, default_requested_capabilities, derive_local_node_trust_root,
+        connector_setup_option_label, default_requested_capabilities,
+        default_requested_capabilities_for_profile, derive_local_node_trust_root,
         extract_text_from_value, find_pending_approval_record, format_payment_approval_summary,
         ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
-        parse_named_selection, resolve_ap2_mcu_seed_hex, sign_ap2_payload, update_values,
+        normalize_node_profile_name, parse_named_selection, resolve_ap2_mcu_seed_hex,
+        sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
     use serde_json::json;
@@ -7421,6 +7512,28 @@ mod tests {
         );
         assert!(capabilities.iter().any(|value| value == "headless_status"));
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
+    }
+
+    #[test]
+    fn headless_profile_requested_capabilities_are_read_only() {
+        let capabilities = default_requested_capabilities_for_profile("headless", false);
+        assert!(capabilities.iter().any(|value| value == "headless_status"));
+        assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(
+            !capabilities
+                .iter()
+                .any(|value| value == "desktop_notification")
+        );
+        assert!(!capabilities.iter().any(|value| value == "browser_start"));
+    }
+
+    #[test]
+    fn normalizes_headless_profile_aliases() {
+        assert_eq!(normalize_node_profile_name("server").unwrap(), "headless");
+        assert_eq!(
+            normalize_node_profile_name("interactive").unwrap(),
+            "desktop"
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub struct DawnCliProfile {
     pub bootstrap_mode: Option<String>,
     pub node_id: Option<String>,
     pub node_name: Option<String>,
+    pub node_profile: Option<String>,
     pub claim_token: Option<String>,
     pub requested_capabilities: Vec<String>,
     #[serde(default)]
