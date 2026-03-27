@@ -89,6 +89,10 @@ struct WorkbenchLogsRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchSessionListRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchRpcRequest {
     id: Option<String>,
     method: String,
@@ -126,6 +130,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "command.run",
                     "skill.run",
                     "logs.tail",
+                    "session.list",
                     "task.create",
                     "delegate.invoke",
                     "ping"
@@ -235,6 +240,10 @@ async fn handle_workbench_rpc(
             let params: WorkbenchLogsRequest = parse_rpc_params(request.params)?;
             tail_logs_inner(state, params).await
         }
+        "session.list" => {
+            let _params: WorkbenchSessionListRequest = parse_rpc_params(request.params)?;
+            list_sessions_inner(state).await
+        }
         "task.create" => {
             let params: WorkbenchTaskRequest = parse_rpc_params(request.params)?;
             create_task_inner(state, params).await
@@ -329,6 +338,14 @@ async fn tail_logs_inner(
     }))
 }
 
+async fn list_sessions_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
+    let sessions = identity::list_operator_session_records(&state).await?;
+    Ok(json!({
+        "sessions": sessions,
+        "count": sessions.len(),
+    }))
+}
+
 async fn create_task_inner(
     state: Arc<AppState>,
     request: WorkbenchTaskRequest,
@@ -400,11 +417,14 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("id=\"command-form\""));
         assert!(CONTROL_UI_HTML.contains("id=\"native-skill-list\""));
         assert!(CONTROL_UI_HTML.contains("id=\"workbench-log-list\""));
+        assert!(CONTROL_UI_HTML.contains("id=\"session-list\""));
         assert!(CONTROL_UI_HTML.contains("/api/gateway/identity/status"));
+        assert!(CONTROL_UI_HTML.contains("/api/gateway/identity/sessions"));
         assert!(CONTROL_UI_HTML.contains("/api/a2a/task"));
         assert!(CONTROL_UI_HTML.contains("/app/command"));
         assert!(CONTROL_UI_HTML.contains("/app/ws"));
         assert!(CONTROL_UI_HTML.contains("skill.run"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
+        assert!(CONTROL_UI_HTML.contains("session.list"));
     }
 }

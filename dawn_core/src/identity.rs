@@ -1292,7 +1292,10 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             endpoint: "/api/gateway/connectors/model/litellm/respond",
             note: "LiteLLM gateway path for OpenAI-compatible routing.",
             env_hints: vec!["LITELLM_CHAT_COMPLETIONS_URL or LITELLM_BASE_URL"],
-            env_requirement_groups: vec![vec!["LITELLM_CHAT_COMPLETIONS_URL"], vec!["LITELLM_BASE_URL"]],
+            env_requirement_groups: vec![
+                vec!["LITELLM_CHAT_COMPLETIONS_URL"],
+                vec!["LITELLM_BASE_URL"],
+            ],
         }),
         ("model", "ollama") => Some(SetupTargetProfile {
             surface: "model",
@@ -1625,9 +1628,9 @@ fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
             "moonshot",
             "doubao",
         ]
-            .into_iter()
-            .filter(|provider| is_model_provider_configured(provider))
-            .map(ToString::to_string)
+        .into_iter()
+        .filter(|provider| is_model_provider_configured(provider))
+        .map(ToString::to_string)
         .collect(),
         configured_chat_platforms: [
             "telegram",
@@ -2357,7 +2360,11 @@ fn env_var_present(name: &str) -> bool {
 }
 
 fn resolve_first_present_env(names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 fn any_env_var_present(names: &[&str]) -> bool {
@@ -2457,8 +2464,7 @@ fn openai_codex_login_ready() -> bool {
     match output {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.contains("Logged in using")
-                || stdout.to_ascii_lowercase().contains("logged in")
+            stdout.contains("Logged in using") || stdout.to_ascii_lowercase().contains("logged in")
         }
         _ => false,
     }
@@ -2474,7 +2480,8 @@ fn codex_auth_file_present() -> bool {
                 .map(std::path::PathBuf::from)
                 .map(|home| home.join(".codex"))
         });
-    base.map(|dir| dir.join("auth.json").exists()).unwrap_or(false)
+    base.map(|dir| dir.join("auth.json").exists())
+        .unwrap_or(false)
 }
 
 fn resolve_codex_cli_path() -> std::path::PathBuf {
@@ -2521,8 +2528,7 @@ fn resolve_codex_cli_path() -> std::path::PathBuf {
                     2
                 }
             });
-            if let Some(first) = candidates.into_iter().find(|path| path.exists())
-            {
+            if let Some(first) = candidates.into_iter().find(|path| path.exists()) {
                 return first;
             }
         }
@@ -2566,11 +2572,13 @@ fn is_chat_platform_configured(platform: &str) -> bool {
         "discord" => env_var_present("DISCORD_BOT_WEBHOOK_URL"),
         "mattermost" => env_var_present("MATTERMOST_BOT_WEBHOOK_URL"),
         "msteams" => env_var_present("MSTEAMS_BOT_WEBHOOK_URL"),
-        "whatsapp" => env_var_present("WHATSAPP_ACCESS_TOKEN")
-            && env_var_present("WHATSAPP_PHONE_NUMBER_ID"),
+        "whatsapp" => {
+            env_var_present("WHATSAPP_ACCESS_TOKEN") && env_var_present("WHATSAPP_PHONE_NUMBER_ID")
+        }
         "line" => env_var_present("LINE_CHANNEL_ACCESS_TOKEN"),
-        "matrix" => env_var_present("MATRIX_ACCESS_TOKEN")
-            && env_var_present("MATRIX_HOMESERVER_URL"),
+        "matrix" => {
+            env_var_present("MATRIX_ACCESS_TOKEN") && env_var_present("MATRIX_HOMESERVER_URL")
+        }
         "google_chat" => env_var_present("GOOGLE_CHAT_BOT_WEBHOOK_URL"),
         "signal" => has_signal_account_configuration(),
         "bluebubbles" => has_bluebubbles_account_configuration(),
@@ -2900,7 +2908,7 @@ pub(crate) async fn resolve_session_by_token(
     Ok(session)
 }
 
-async fn list_operator_session_records(
+pub(crate) async fn list_operator_session_records(
     state: &Arc<AppState>,
 ) -> anyhow::Result<Vec<OperatorSessionRecord>> {
     let rows = sqlx::query_as::<_, OperatorSessionRow>(

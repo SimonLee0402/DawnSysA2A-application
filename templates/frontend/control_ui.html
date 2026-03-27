@@ -568,9 +568,21 @@
               <div class="notice" id="native-skill-notice">原生技能入口就绪。</div>
             </div>
             <div>
+              <h3 style="margin-bottom: 12px;">Recent Sessions</h3>
+              <div class="list" id="session-list"></div>
+              <div class="footer-note" id="session-list-note">等待 operator session 列表。</div>
+            </div>
+          </div>
+          <div class="split" style="margin-top: 18px;">
+            <div>
               <h3 style="margin-bottom: 12px;">Recent Workbench Logs</h3>
               <div class="list" id="workbench-log-list"></div>
               <div class="footer-note" id="workbench-log-note">等待工作台日志流。</div>
+            </div>
+            <div>
+              <h3 style="margin-bottom: 12px;">Skill Feedback</h3>
+              <div class="list" id="skill-feedback-list"></div>
+              <div class="footer-note" id="skill-feedback-note">最近一次技能执行结果会显示在这里。</div>
             </div>
           </div>
         </section>
@@ -589,11 +601,13 @@
       ingressStatus: null,
       cards: [],
       skills: [],
+      sessions: [],
       approvals: [],
       pairings: [],
       tasks: [],
       nodes: [],
       workbenchLogs: [],
+      skillFeedback: [],
       refreshTimer: null,
       stream: null,
       streamTransport: "none",
@@ -1041,6 +1055,56 @@
         : "等待工作台日志流。";
     }
 
+    function renderSessions(payload) {
+      const sessions = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.sessions)
+          ? payload.sessions
+          : [];
+      state.sessions = sessions;
+      $("session-list").innerHTML = sessions.length
+        ? sessions.slice(0, 6).map((session) => `
+            <article class="mini-card">
+              <strong>${escapeHtml(session.operatorName || "operator")}</strong>
+              <div>${escapeHtml(session.sessionId || "n/a")}</div>
+              <div class="list-meta">
+                <span class="badge ${session.revoked ? "danger" : "success"}">${session.revoked ? "revoked" : "active"}</span>
+                <span>${formatTime(session.lastSeenAtUnixMs)}</span>
+              </div>
+              <div class="footer-note">created ${formatTime(session.createdAtUnixMs)}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">没有可见的 operator session。</div>`;
+      $("session-list-note").textContent = sessions.length
+        ? `显示最近 ${sessions.length} 个 operator sessions。`
+        : "等待 operator session 列表。";
+    }
+
+    function renderSkillFeedback(payload) {
+      const feedback = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.items)
+          ? payload.items
+          : [];
+      state.skillFeedback = feedback;
+      $("skill-feedback-list").innerHTML = feedback.length
+        ? feedback.map((item) => `
+            <article class="mini-card">
+              <strong>${escapeHtml(item.title || item.skillId || "skill")}</strong>
+              <div>${escapeHtml(item.detail || item.replyText || "")}</div>
+              <div class="list-meta">
+                <span class="badge ${item.status === "failed" ? "danger" : item.status === "completed" ? "success" : "warn"}">${escapeHtml(item.status || "queued")}</span>
+                <span>${formatTime(item.createdAtUnixMs || item.updatedAtUnixMs)}</span>
+              </div>
+              <div class="footer-note">${escapeHtml(item.taskId || item.linkedTaskId || "")}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">最近没有技能执行反馈。</div>`;
+      $("skill-feedback-note").textContent = feedback.length
+        ? `显示最近 ${feedback.length} 条技能反馈。`
+        : "最近一次技能执行结果会显示在这里。";
+    }
+
     function renderCards(cards) {
       state.cards = Array.isArray(cards) ? cards : [];
       $("agent-list").innerHTML = state.cards.length
@@ -1109,6 +1173,9 @@
       const logsPromise = streamSupportsRpc()
         ? callWorkbenchRpc("logs.tail", { limit: 12 })
         : Promise.resolve({ events: state.workbenchLogs });
+      const sessionsPromise = streamSupportsRpc()
+        ? callWorkbenchRpc("session.list", {})
+        : fetchJson("/api/gateway/identity/sessions");
       const responses = await Promise.allSettled([
         fetchJson("/api/gateway/identity/status"),
         fetchJson("/api/gateway/connectors/status"),
@@ -1121,10 +1188,11 @@
         fetchJsonFallback(["/api/gateway/skills", "/api/gateway/skills/"]),
         fetchJson("/api/gateway/ingress/events?limit=8"),
         fetchJson("/api/gateway/agent-cards/invocations"),
+        sessionsPromise,
         logsPromise
       ]);
 
-      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, workbenchLogs] = responses.map((item) =>
+      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, sessions, workbenchLogs] = responses.map((item) =>
         item.status === "fulfilled" ? item.value : null
       );
       state.ingressStatus = ingressStatus || null;
@@ -1143,6 +1211,7 @@
       renderSkills(skills || []);
       renderIngress(ingress || []);
       renderInvocations(invocations || []);
+      renderSessions(sessions || []);
       renderWorkbenchLogs(workbenchLogs || { events: state.workbenchLogs });
       updateRefreshStamp(`最后刷新：${new Date().toLocaleString("zh-CN", { hour12: false })}`);
     }
@@ -1428,10 +1497,22 @@
               })
             });
         const record = response.record || {};
+        const reply = record.replyText || response.replyText || response.result?.replyText || "";
+        const linkedTask = record.linkedTaskId || response.result?.linkedTaskId || response.task?.taskId || "";
+        const status = record.status || response.result?.status || response.task?.status || "queued";
+        const feedback = {
+          title: skillId,
+          status,
+          detail: reply || response.result?.detail || response.task?.lastUpdateReason || "skill requested",
+          taskId: linkedTask,
+          createdAtUnixMs: Date.now()
+        };
+        state.skillFeedback = [feedback, ...state.skillFeedback].slice(0, 6);
+        renderSkillFeedback(state.skillFeedback);
         setNotice(
           "native-skill-notice",
           "success",
-          `技能已发出：${record.status || response.task?.status || "queued"}${record.linkedTaskId ? ` · task ${record.linkedTaskId}` : ""}`
+          `技能已发出：${status}${linkedTask ? ` · task ${linkedTask}` : ""}${reply ? `\n回复：${reply}` : ""}`
         );
         await refreshDashboard();
       } catch (error) {
