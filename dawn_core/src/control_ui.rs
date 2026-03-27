@@ -63,6 +63,12 @@ struct WorkbenchTaskRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchTaskInspectRequest {
+    task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchDelegateRequest {
     card_id: String,
     name: Option<String>,
@@ -176,6 +182,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "session.inspect",
                     "session.revoke",
                     "task.create",
+                    "task.inspect",
                     "delegate.invoke",
                     "ping"
                 ]
@@ -311,6 +318,10 @@ async fn handle_workbench_rpc(
         "task.create" => {
             let params: WorkbenchTaskRequest = parse_rpc_params(request.params)?;
             create_task_inner(state, params).await
+        }
+        "task.inspect" => {
+            let params: WorkbenchTaskInspectRequest = parse_rpc_params(request.params)?;
+            inspect_task_inner(state, params).await
         }
         "delegate.invoke" => {
             let params: WorkbenchDelegateRequest = parse_rpc_params(request.params)?;
@@ -519,6 +530,23 @@ async fn create_task_inner(
     Ok(json!(response))
 }
 
+async fn inspect_task_inner(
+    state: Arc<AppState>,
+    request: WorkbenchTaskInspectRequest,
+) -> anyhow::Result<Value> {
+    let task_id = Uuid::parse_str(request.task_id.trim()).context("taskId must be a valid UUID")?;
+    let detail = a2a::get_task_detail(state, task_id).await?;
+    Ok(json!({
+        "task": detail.task,
+        "state": detail.state,
+        "result": detail.result,
+        "messages": detail.messages,
+        "artifacts": detail.artifacts,
+        "updates": detail.updates,
+        "events": detail.events,
+    }))
+}
+
 async fn invoke_delegate_inner(
     state: Arc<AppState>,
     request: WorkbenchDelegateRequest,
@@ -579,5 +607,6 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("session.list"));
         assert!(CONTROL_UI_HTML.contains("session.inspect"));
         assert!(CONTROL_UI_HTML.contains("session.revoke"));
+        assert!(CONTROL_UI_HTML.contains("task.inspect"));
     }
 }

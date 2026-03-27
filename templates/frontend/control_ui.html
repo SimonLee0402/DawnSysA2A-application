@@ -520,6 +520,7 @@
             <div>
               <h3 style="margin-bottom: 12px;">Recent Tasks</h3>
               <div class="list" id="task-list"></div>
+              <div class="notice" id="task-inspect-notice" style="margin-top: 12px;">点击“查看详情”可检查任务的 A2A state、updates 和 result。</div>
             </div>
             <div>
               <h3 style="margin-bottom: 12px;">Ingress Events</h3>
@@ -972,6 +973,9 @@
                   <span>${formatTime(task.updatedAtUnixMs)}</span>
                 </div>
                 <div class="footer-note">${escapeHtml(task.lastUpdateReason || task.instruction || "")}</div>
+                <div class="inline-actions" style="margin-top: 10px;">
+                  <button class="chip-button" type="button" data-task-inspect="${escapeHtml(task.taskId || "")}">查看详情</button>
+                </div>
               </article>
             `).join("")
         : `<div class="empty">还没有任务。可以直接用左侧 composer 发一个 A2A task。</div>`;
@@ -1634,6 +1638,30 @@
       }
     }
 
+    async function handleTaskInspect(taskId) {
+      if (!taskId) {
+        setNotice("task-inspect-notice", "error", "缺少 taskId。");
+        return;
+      }
+      try {
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("task.inspect", { taskId })
+          : await fetchJson(`/api/a2a/task/${encodeURIComponent(taskId)}`);
+        const stateInfo = response?.state || {};
+        const result = response?.result || {};
+        const latestMessage = result?.latestMessage?.parts?.find((part) => part.kind === "text")?.text || result?.summary || "";
+        const updateCount = Array.isArray(response?.updates) ? response.updates.length : 0;
+        const artifactNames = Array.isArray(response?.artifacts) ? response.artifacts.map((item) => item.name).filter(Boolean).join(", ") : "";
+        setNotice(
+          "task-inspect-notice",
+          stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${artifactNames ? `\nartifacts=${artifactNames}` : ""}`
+        );
+      } catch (error) {
+        setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);
+      }
+    }
+
     async function handleApprovalAction(action, approvalId) {
       const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
       const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
@@ -1719,6 +1747,11 @@
         const target = event.target.closest("[data-session-inspect]");
         if (!target) return;
         handleSessionInspect(target.dataset.sessionInspect);
+      });
+      $("task-list").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-task-inspect]");
+        if (!target) return;
+        handleTaskInspect(target.dataset.taskInspect);
       });
     }
 

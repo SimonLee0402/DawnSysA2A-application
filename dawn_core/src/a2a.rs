@@ -199,26 +199,10 @@ async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<Uuid>,
 ) -> Result<Json<TaskDetailResponse>, (StatusCode, Json<Value>)> {
-    let task = state
-        .get_task(task_id)
+    get_task_detail(state, task_id)
         .await
-        .map_err(internal_error)?
-        .ok_or_else(|| not_found("task not found"))?;
-    let events = state.task_events(task_id).await.map_err(internal_error)?;
-    let state_envelope = build_task_state(&task);
-    let messages = build_task_messages(&task, &events);
-    let artifacts = build_task_artifacts(&task, &events);
-    let result = build_task_result(&task, &messages, &artifacts);
-    let updates = build_task_updates(&events);
-    Ok(Json(TaskDetailResponse {
-        task,
-        events,
-        state: state_envelope,
-        result,
-        messages,
-        artifacts,
-        updates,
-    }))
+        .map(Json)
+        .map_err(service_error)
 }
 
 async fn get_task_events(
@@ -412,6 +396,28 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     Ok(TaskResponse {
         task,
         sandbox_status,
+        state: state_envelope,
+        result,
+        messages,
+        artifacts,
+        updates,
+    })
+}
+
+pub async fn get_task_detail(state: Arc<AppState>, task_id: Uuid) -> anyhow::Result<TaskDetailResponse> {
+    let task = state
+        .get_task(task_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+    let events = state.task_events(task_id).await?;
+    let state_envelope = build_task_state(&task);
+    let messages = build_task_messages(&task, &events);
+    let artifacts = build_task_artifacts(&task, &events);
+    let result = build_task_result(&task, &messages, &artifacts);
+    let updates = build_task_updates(&events);
+    Ok(TaskDetailResponse {
+        task,
+        events,
         state: state_envelope,
         result,
         messages,
