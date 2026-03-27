@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     a2a::{self, Task},
     agent_cards::{self, InvokeAgentCardRequest},
-    app_state::{AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus},
+    app_state::{AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus, NodeRecord},
     chat_ingress, identity, skill_registry,
 };
 
@@ -139,6 +139,10 @@ struct WorkbenchChannelStatusRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchNodeStatusRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchConfigApplyRequest {
     session_token: String,
     tenant_id: String,
@@ -191,6 +195,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "skill.inspect",
                     "config.get",
                     "channel.status",
+                    "node.status",
                     "config.apply",
                     "logs.tail",
                     "session.list",
@@ -314,6 +319,10 @@ async fn handle_workbench_rpc(
         "channel.status" => {
             let _params: WorkbenchChannelStatusRequest = parse_rpc_params(request.params)?;
             channel_status_inner(state).await
+        }
+        "node.status" => {
+            let _params: WorkbenchNodeStatusRequest = parse_rpc_params(request.params)?;
+            node_status_inner(state).await
         }
         "config.apply" => {
             let params: WorkbenchConfigApplyRequest = parse_rpc_params(request.params)?;
@@ -515,6 +524,72 @@ async fn channel_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
             "pendingPairingCount": pending_pairings,
         }
     }))
+}
+
+async fn node_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
+    let nodes = state.list_nodes().await?;
+    let connected_count = nodes.iter().filter(|node| node.connected).count();
+    let mapped = nodes
+        .into_iter()
+        .map(workbench_node_status)
+        .collect::<Vec<_>>();
+    let total_nodes = mapped.len();
+    let headless_nodes = mapped
+        .iter()
+        .filter(|node| node["runtimeMode"] == "headless / read-only observability")
+        .count();
+    let desktop_nodes = mapped
+        .iter()
+        .filter(|node| node["runtimeMode"] == "desktop / interactive control")
+        .count();
+    Ok(json!({
+        "nodes": mapped,
+        "summary": {
+            "totalNodes": total_nodes,
+            "connectedNodes": connected_count,
+            "headlessNodes": headless_nodes,
+            "desktopNodes": desktop_nodes,
+        }
+    }))
+}
+
+fn workbench_node_status(node: NodeRecord) -> Value {
+    let is_headless = node
+        .capabilities
+        .iter()
+        .any(|capability| capability == "headless_status" || capability == "headless_observe");
+    let runtime_mode = if is_headless {
+        "headless / read-only observability"
+    } else {
+        "desktop / interactive control"
+    };
+    let runtime_policy_summary = if is_headless {
+        "read_only_observe; blocks desktop_interaction, managed_browser, shell_exec"
+    } else {
+        "interactive_control; desktop/browser actions allowed by requested capabilities"
+    };
+    let capability_preview = node
+        .capabilities
+        .iter()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    json!({
+        "nodeId": node.node_id,
+        "displayName": node.display_name,
+        "transport": node.transport,
+        "capabilities": node.capabilities,
+        "attestationVerified": node.attestation_verified,
+        "status": node.status,
+        "connected": node.connected,
+        "lastSeenUnixMs": node.last_seen_unix_ms,
+        "createdAtUnixMs": node.created_at_unix_ms,
+        "updatedAtUnixMs": node.updated_at_unix_ms,
+        "runtimeMode": runtime_mode,
+        "runtimePolicySummary": runtime_policy_summary,
+        "capabilityPreview": capability_preview,
+    })
 }
 
 fn summarize_channel_status(
@@ -748,6 +823,7 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("skill.inspect"));
         assert!(CONTROL_UI_HTML.contains("config.get"));
         assert!(CONTROL_UI_HTML.contains("channel.status"));
+        assert!(CONTROL_UI_HTML.contains("node.status"));
         assert!(CONTROL_UI_HTML.contains("config.apply"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));

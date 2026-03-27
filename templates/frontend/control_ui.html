@@ -923,8 +923,10 @@
                   <span class="badge ${node.connected ? "success" : "neutral"}">${escapeHtml(node.status || "unknown")}</span>
                   <span>${escapeHtml(node.transport || "transport unknown")}</span>
                   <span>${node.attestationVerified ? "attested" : "unverified"}</span>
+                  <span>${escapeHtml(node.runtimeMode || "runtime unknown")}</span>
                 </div>
-                <div class="footer-note">${escapeHtml((node.capabilities || []).slice(0, 5).join(", ") || "no declared capabilities")}</div>
+                <div class="footer-note">${escapeHtml(node.capabilityPreview || (node.capabilities || []).slice(0, 5).join(", ") || "no declared capabilities")}</div>
+                <div class="footer-note">${escapeHtml(node.runtimePolicySummary || "")}</div>
               </article>
             `).join("")
         : `<div class="empty">还没有节点记录。先在 CLI 执行 <code>dawn-node node claim</code> 或 <code>dawn-node run</code>。</div>`;
@@ -1244,6 +1246,9 @@
       const channelStatusPromise = streamSupportsRpc()
         ? callWorkbenchRpc("channel.status", {})
         : Promise.resolve(null);
+      const nodeStatusPromise = streamSupportsRpc()
+        ? callWorkbenchRpc("node.status", {})
+        : fetchJson("/api/gateway/control-plane/nodes");
       const responses = await Promise.allSettled([
         fetchJson("/api/gateway/identity/status"),
         fetchJson("/api/gateway/connectors/status"),
@@ -1251,7 +1256,7 @@
         fetchJson("/api/gateway/approvals?status=pending"),
         fetchJson("/api/gateway/ingress/pairings?status=pending"),
         fetchJson("/api/gateway/ingress/status"),
-        fetchJson("/api/gateway/control-plane/nodes"),
+        nodeStatusPromise,
         fetchJsonFallback(["/api/gateway/agent-cards", "/api/gateway/agent-cards/"]),
         fetchJsonFallback(["/api/gateway/skills", "/api/gateway/skills/"]),
         fetchJson("/api/gateway/ingress/events?limit=8"),
@@ -1277,7 +1282,7 @@
       renderTasks(tasks || []);
       renderApprovals(approvals || []);
       renderPairings(pairings || [], ingressStatus || {});
-      renderNodes(nodes || []);
+      renderNodes(nodes?.nodes || nodes || []);
       renderCards(cards || []);
       renderSkills(skills || []);
       renderIngress(ingress || []);
@@ -1702,7 +1707,7 @@
           : "";
         const latestStreamSummary = latestStreamItem?.summary || latestStreamItem?.detail || "";
         const streamSummary = stream
-          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
+          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${stream?.summary?.totalItems ? ` · visible=${Number(stream.summary.totalItems)}` : ""}${stream?.summary?.terminalItems ? ` · terminal=${Number(stream.summary.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
           : "";
         setNotice(
           "task-inspect-notice",

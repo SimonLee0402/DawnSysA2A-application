@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -109,7 +109,19 @@ pub struct A2aTaskUpdate {
 pub struct A2aTaskStream {
     pub cursor: usize,
     pub complete: bool,
+    pub summary: A2aTaskStreamSummary,
     pub items: Vec<A2aTaskStreamItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskStreamSummary {
+    pub total_items: usize,
+    pub terminal_items: usize,
+    pub latest_kind: Option<String>,
+    pub latest_phase: Option<String>,
+    pub latest_event_type: Option<String>,
+    pub kind_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -1129,7 +1141,28 @@ fn build_task_stream(
     A2aTaskStream {
         cursor: events.len(),
         complete: matches!(task.status, TaskStatus::Completed | TaskStatus::Failed),
+        summary: summarize_task_stream(&items),
         items,
+    }
+}
+
+fn summarize_task_stream(items: &[A2aTaskStreamItem]) -> A2aTaskStreamSummary {
+    let mut kind_counts = BTreeMap::new();
+    let mut terminal_items = 0usize;
+    for item in items {
+        *kind_counts.entry(item.kind.clone()).or_insert(0) += 1;
+        if item.terminal {
+            terminal_items += 1;
+        }
+    }
+    let latest = items.last();
+    A2aTaskStreamSummary {
+        total_items: items.len(),
+        terminal_items,
+        latest_kind: latest.map(|item| item.kind.clone()),
+        latest_phase: latest.map(|item| item.phase.clone()),
+        latest_event_type: latest.map(|item| item.event_type.clone()),
+        kind_counts,
     }
 }
 
@@ -1779,6 +1812,13 @@ mod tests {
         let stream = build_task_stream(&task, &events, Some(1));
         assert_eq!(stream.cursor, 3);
         assert!(!stream.complete);
+        assert_eq!(stream.summary.total_items, 2);
+        assert_eq!(stream.summary.terminal_items, 0);
+        assert_eq!(stream.summary.latest_kind.as_deref(), Some("progress"));
+        assert_eq!(stream.summary.latest_phase.as_deref(), Some("running"));
+        assert_eq!(stream.summary.latest_event_type.as_deref(), Some("task_progress"));
+        assert_eq!(stream.summary.kind_counts.get("lifecycle"), Some(&1));
+        assert_eq!(stream.summary.kind_counts.get("progress"), Some(&1));
         assert_eq!(stream.items.len(), 2);
         assert_eq!(stream.items[0].sequence, 2);
         assert_eq!(stream.items[0].kind, "lifecycle");
