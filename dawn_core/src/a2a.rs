@@ -91,6 +91,7 @@ pub struct A2aTaskResult {
     pub artifact_count: usize,
     pub update_count: usize,
     pub stream_cursor: usize,
+    pub stream_summary: A2aTaskStreamSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_stream_item: Option<A2aTaskStreamItem>,
 }
@@ -1340,6 +1341,7 @@ fn build_task_result(
         artifact_count: artifacts.len(),
         update_count: updates.len(),
         stream_cursor: stream.cursor,
+        stream_summary: stream.summary.clone(),
         latest_stream_item: stream.items.last().cloned(),
     }
 }
@@ -1693,6 +1695,8 @@ mod tests {
         assert_eq!(result.artifact_count, 1);
         assert_eq!(result.update_count, 1);
         assert_eq!(result.stream_cursor, 1);
+        assert_eq!(result.stream_summary.total_items, 1);
+        assert_eq!(result.stream_summary.latest_kind.as_deref(), Some("result"));
         assert_eq!(
             result
                 .latest_stream_item

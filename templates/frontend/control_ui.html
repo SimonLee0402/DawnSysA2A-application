@@ -932,6 +932,8 @@
                   ? `<div class="inline-actions">
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_status">状态探查</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_observe">只读观察</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="process_snapshot">进程快照</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="list_directory">列目录</button>
                     </div>`
                   : ""}
               </article>
@@ -1713,8 +1715,9 @@
           ? `${latestStreamItem.kind || "update"} / ${latestStreamItem.phase || "running"} / ${latestStreamItem.eventType || latestStreamItem.event_type || "unknown"}#${latestStreamItem.sequence || "?"}`
           : "";
         const latestStreamSummary = latestStreamItem?.summary || latestStreamItem?.detail || "";
+        const streamMeta = stream?.summary || result?.streamSummary || {};
         const streamSummary = stream
-          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${typeof stream?.summary?.totalItems === "number" ? ` · visible=${Number(stream.summary.totalItems)}` : ""}${typeof stream?.summary?.terminalItems === "number" ? ` · terminal=${Number(stream.summary.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${stream?.summary?.kindCounts ? `\nstream.kinds=${Object.entries(stream.summary.kindCounts).map(([kind, count]) => `${kind}:${count}`).join(", ")}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
+          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${typeof streamMeta?.totalItems === "number" ? ` · visible=${Number(streamMeta.totalItems)}` : ""}${typeof streamMeta?.terminalItems === "number" ? ` · terminal=${Number(streamMeta.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${streamMeta?.kindCounts ? `\nstream.kinds=${Object.entries(streamMeta.kindCounts).map(([kind, count]) => `${kind}:${count}`).join(", ")}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
           : "";
         setNotice(
           "task-inspect-notice",
@@ -1751,21 +1754,38 @@
         setNotice("node-observe-notice", "error", "当前工作台 websocket 不可用，无法直接探查节点。");
         return;
       }
+      let payload = {};
+      if (commandType === "process_snapshot") {
+        const limit = window.prompt("进程快照数量", "8");
+        if (limit === null) return;
+        const parsed = Number(limit);
+        payload.limit = Number.isFinite(parsed) && parsed > 0 ? parsed : 8;
+      } else if (commandType === "list_directory" || commandType === "stat_path" || commandType === "read_file_preview") {
+        const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
+        if (path === null) return;
+        payload.path = path;
+      }
       try {
         const response = await callWorkbenchRpc("node.observe", {
           sessionToken: state.sessionToken,
           nodeId,
-          commandType
+          commandType,
+          payload
         });
         const command = response?.command || {};
         const result = command?.result || {};
         const summary = result?.summary && typeof result.summary === "object"
           ? JSON.stringify(result.summary)
           : (result?.summary || "");
+        const headline = commandType === "process_snapshot"
+          ? `processes=${Number(result?.count || result?.processSnapshot?.count || 0)}`
+          : commandType === "list_directory"
+            ? `entries=${Number(result?.count || result?.directory?.count || 0)}`
+            : "";
         setNotice(
           "node-observe-notice",
           command?.status === "failed" ? "error" : "success",
-          `node=${nodeId}\ncommand=${commandType} · status=${command?.status || "unknown"}${response?.delivery ? ` · delivery=${response.delivery}` : ""}${summary ? `\nsummary=${summary}` : ""}`
+          `node=${nodeId}\ncommand=${commandType} · status=${command?.status || "unknown"}${response?.delivery ? ` · delivery=${response.delivery}` : ""}${headline ? ` · ${headline}` : ""}${summary ? `\nsummary=${summary}` : ""}`
         );
       } catch (error) {
         setNotice("node-observe-notice", "error", `节点探查失败：${error.message}`);

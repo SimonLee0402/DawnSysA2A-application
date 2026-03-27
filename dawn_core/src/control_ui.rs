@@ -148,6 +148,7 @@ struct WorkbenchNodeObserveRequest {
     session_token: String,
     node_id: String,
     command_type: String,
+    payload: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -577,17 +578,31 @@ async fn node_observe_inner(
         anyhow::bail!("nodeId is required");
     }
     let command_type = request.command_type.trim();
-    if !matches!(command_type, "headless_status" | "headless_observe") {
+    if !matches!(
+        command_type,
+        "headless_status"
+            | "headless_observe"
+            | "system_info"
+            | "process_snapshot"
+            | "list_directory"
+            | "stat_path"
+            | "read_file_preview"
+    ) {
         anyhow::bail!("unsupported node observe command: {command_type}");
+    }
+    let mut payload = request.payload.unwrap_or_else(|| json!({}));
+    if !payload.is_object() {
+        anyhow::bail!("node observe payload must be a JSON object");
+    }
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("source".to_string(), json!("control_ui"));
+        object.insert("actor".to_string(), json!(actor.operator_name.clone()));
     }
     let (command, delivery) = control_plane::dispatch_gateway_command(
         &state,
         node_id,
         command_type.to_string(),
-        json!({
-            "source": "control_ui",
-            "actor": actor.operator_name.clone(),
-        }),
+        payload,
     )
     .await?;
     let command = wait_for_node_command_result(&state, command.command_id, 40).await?;
