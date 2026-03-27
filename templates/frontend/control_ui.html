@@ -521,7 +521,7 @@
             <div>
               <h3 style="margin-bottom: 12px;">Recent Tasks</h3>
               <div class="list" id="task-list"></div>
-              <div class="notice" id="task-inspect-notice" style="margin-top: 12px;">点击“查看详情”可检查任务的 A2A state、updates 和 result。</div>
+              <div class="notice" id="task-inspect-notice" style="margin-top: 12px;">点击“查看详情”可检查任务的 A2A state、updates、result 和增量 stream。</div>
             </div>
             <div>
               <h3 style="margin-bottom: 12px;">Ingress Events</h3>
@@ -1683,19 +1683,27 @@
         const response = streamSupportsRpc()
           ? await callWorkbenchRpc("task.inspect", { taskId })
           : await fetchJson(`/api/a2a/task/${encodeURIComponent(taskId)}`);
+        const stream = streamSupportsRpc()
+          ? await callWorkbenchRpc("task.stream", { taskId, after: 0 })
+          : response?.stream || null;
         const stateInfo = response?.state || {};
         const result = response?.result || {};
         const remote = response?.remote || null;
+        const streamItems = Array.isArray(stream?.items) ? stream.items : [];
+        const latestStreamItem = streamItems.length ? streamItems[streamItems.length - 1] : null;
         const latestMessage = result?.latestMessage?.parts?.find((part) => part.kind === "text")?.text || result?.summary || "";
         const updateCount = Array.isArray(response?.updates) ? response.updates.length : 0;
         const artifactNames = Array.isArray(response?.artifacts) ? response.artifacts.map((item) => item.name).filter(Boolean).join(", ") : "";
         const remoteSummary = remote
           ? `\nremote=${remote.stateLabel || "unknown"} · invocations=${Number(remote.totalInvocations || 0)}${remote.latestInvocation?.cardId ? ` · latest=${remote.latestInvocation.cardId}` : ""}`
           : "";
+        const streamSummary = stream
+          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${latestStreamItem ? ` · latest=${latestStreamItem.eventType || latestStreamItem.event_type || "unknown"}#${latestStreamItem.sequence || "?"}` : ""}`
+          : "";
         setNotice(
           "task-inspect-notice",
           stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
-          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${remoteSummary}`
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${remoteSummary}${streamSummary}`
         );
       } catch (error) {
         setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);

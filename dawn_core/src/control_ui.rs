@@ -72,6 +72,13 @@ struct WorkbenchTaskInspectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchTaskStreamRequest {
+    task_id: String,
+    after: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchDelegateRequest {
     card_id: String,
     name: Option<String>,
@@ -191,6 +198,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "session.revoke",
                     "task.create",
                     "task.inspect",
+                    "task.stream",
                     "delegate.invoke",
                     "ping"
                 ]
@@ -334,6 +342,10 @@ async fn handle_workbench_rpc(
         "task.inspect" => {
             let params: WorkbenchTaskInspectRequest = parse_rpc_params(request.params)?;
             inspect_task_inner(state, params).await
+        }
+        "task.stream" => {
+            let params: WorkbenchTaskStreamRequest = parse_rpc_params(request.params)?;
+            inspect_task_stream_inner(state, params).await
         }
         "delegate.invoke" => {
             let params: WorkbenchDelegateRequest = parse_rpc_params(request.params)?;
@@ -658,6 +670,28 @@ async fn inspect_task_inner(
     }))
 }
 
+async fn inspect_task_stream_inner(
+    state: Arc<AppState>,
+    request: WorkbenchTaskStreamRequest,
+) -> anyhow::Result<Value> {
+    let task_id = Uuid::parse_str(request.task_id.trim()).context("taskId must be a valid UUID")?;
+    let detail = a2a::get_task_detail(state, task_id).await?;
+    let after = request.after.unwrap_or(0);
+    let items = detail
+        .stream
+        .items
+        .into_iter()
+        .filter(|item| item.sequence > after)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "taskId": task_id,
+        "after": after,
+        "cursor": detail.stream.cursor,
+        "complete": detail.stream.complete,
+        "items": items,
+    }))
+}
+
 async fn invoke_delegate_inner(
     state: Arc<AppState>,
     request: WorkbenchDelegateRequest,
@@ -720,6 +754,7 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("session.inspect"));
         assert!(CONTROL_UI_HTML.contains("session.revoke"));
         assert!(CONTROL_UI_HTML.contains("task.inspect"));
+        assert!(CONTROL_UI_HTML.contains("task.stream"));
         assert!(CONTROL_UI_HTML.contains("id=\"channel-footer\""));
     }
 }
