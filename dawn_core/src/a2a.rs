@@ -87,6 +87,12 @@ pub struct A2aTaskResult {
     pub last_event_type: Option<String>,
     pub latest_message: Option<A2aMessage>,
     pub artifact_names: Vec<String>,
+    pub message_count: usize,
+    pub artifact_count: usize,
+    pub update_count: usize,
+    pub stream_cursor: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_stream_item: Option<A2aTaskStreamItem>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -468,10 +474,10 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let state_envelope = build_task_state(&task);
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
-    let result = build_task_result(&task, &messages, &artifacts);
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
     let stream = build_task_stream(&task, &events, None);
+    let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
 
     Ok(TaskResponse {
         task,
@@ -495,10 +501,10 @@ pub async fn get_task_detail(state: Arc<AppState>, task_id: Uuid) -> anyhow::Res
     let state_envelope = build_task_state(&task);
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
-    let result = build_task_result(&task, &messages, &artifacts);
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
     let stream = build_task_stream(&task, &events, None);
+    let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
     Ok(TaskDetailResponse {
         task,
         events,
@@ -1263,6 +1269,8 @@ fn build_task_result(
     task: &StoredTask,
     messages: &[A2aMessage],
     artifacts: &[A2aArtifact],
+    updates: &[A2aTaskUpdate],
+    stream: &A2aTaskStream,
 ) -> A2aTaskResult {
     let latest_message = messages.last().cloned();
     let complete = matches!(task.status, TaskStatus::Completed | TaskStatus::Failed);
@@ -1295,6 +1303,11 @@ fn build_task_result(
             .iter()
             .map(|artifact| artifact.name.clone())
             .collect(),
+        message_count: messages.len(),
+        artifact_count: artifacts.len(),
+        update_count: updates.len(),
+        stream_cursor: stream.cursor,
+        latest_stream_item: stream.items.last().cloned(),
     }
 }
 
@@ -1632,7 +1645,9 @@ mod tests {
 
         let messages = build_task_messages(&task, &events);
         let artifacts = build_task_artifacts(&task, &events);
-        let result = build_task_result(&task, &messages, &artifacts);
+        let updates = build_task_updates(&events);
+        let stream = build_task_stream(&task, &events, None);
+        let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
 
         assert_eq!(result.summary, "All done");
         assert_eq!(result.status, TaskStatus::Completed);
@@ -1641,6 +1656,17 @@ mod tests {
         assert_eq!(result.last_event_type.as_deref(), Some("task_completed"));
         assert_eq!(result.artifact_names, vec!["task-summary".to_string()]);
         assert!(result.latest_message.is_some());
+        assert_eq!(result.message_count, 2);
+        assert_eq!(result.artifact_count, 1);
+        assert_eq!(result.update_count, 1);
+        assert_eq!(result.stream_cursor, 1);
+        assert_eq!(
+            result
+                .latest_stream_item
+                .as_ref()
+                .map(|item| item.event_type.as_str()),
+            Some("task_completed")
+        );
     }
 
     #[test]

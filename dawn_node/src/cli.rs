@@ -2175,6 +2175,37 @@ fn runtime_capability_preview(capabilities: &[String]) -> String {
     }
 }
 
+fn runtime_policy_summary(node_profile: &str) -> String {
+    match node_profile {
+        "headless" => {
+            "read_only_observe; blocks desktop_interaction, managed_browser, shell_exec"
+                .to_string()
+        }
+        _ => "interactive_control; desktop/browser actions allowed by requested capabilities"
+            .to_string(),
+    }
+}
+
+fn runtime_policy_payload(node_profile: &str, requested_capabilities: &[String]) -> Value {
+    match node_profile {
+        "headless" => json!({
+            "mode": "read_only_observe",
+            "interactiveCommandsBlocked": true,
+            "blockedClasses": ["desktop_interaction", "managed_browser", "shell_exec"],
+            "entrypoints": ["headless_status", "headless_observe"],
+            "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "read_file_preview", "stat_path"],
+            "requestedCapabilities": requested_capabilities,
+        }),
+        _ => json!({
+            "mode": "interactive_control",
+            "interactiveCommandsBlocked": false,
+            "blockedClasses": [],
+            "entrypoints": ["run", "browser_*", "desktop_*", "system_*"],
+            "requestedCapabilities": requested_capabilities,
+        }),
+    }
+}
+
 fn effective_requested_capabilities(profile: &DawnCliProfile) -> Vec<String> {
     if profile.requested_capabilities.is_empty() {
         default_requested_capabilities_for_profile(
@@ -2198,6 +2229,10 @@ fn print_node_profile_summary(profile: &DawnCliProfile) -> anyhow::Result<()> {
     println!(
         "Capability preview: {}",
         runtime_capability_preview(&requested_capabilities)
+    );
+    println!(
+        "Runtime policy: {}",
+        runtime_policy_summary(node_profile)
     );
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
@@ -3491,6 +3526,7 @@ fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Res
                 "requestedCapabilities": requested_capabilities,
                 "requestedCapabilityCount": requested_capabilities.len(),
                 "requestedCapabilityPreview": runtime_capability_preview(&requested_capabilities),
+                "runtimePolicy": runtime_policy_payload(node_profile, &requested_capabilities),
             }))?
         );
         return Ok(());
@@ -3545,6 +3581,10 @@ fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Res
     println!(
         "Capability preview: {}",
         runtime_capability_preview(&requested_capabilities)
+    );
+    println!(
+        "Runtime policy: {}",
+        runtime_policy_summary(node_profile)
     );
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
@@ -7437,7 +7477,7 @@ mod tests {
         ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
         normalize_node_profile_name, parse_named_selection, resolve_ap2_mcu_seed_hex,
         effective_requested_capabilities, runtime_capability_preview, runtime_mode_label,
-        sign_ap2_payload, update_values,
+        runtime_policy_payload, runtime_policy_summary, sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
     use serde_json::json;
@@ -7731,6 +7771,35 @@ mod tests {
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
         assert!(preview.contains("headless_status"));
         assert!(preview.contains("headless_observe"));
+    }
+
+    #[test]
+    fn headless_runtime_policy_payload_blocks_interactive_classes() {
+        let capabilities = default_requested_capabilities_for_profile("headless", false);
+        let policy = runtime_policy_payload("headless", &capabilities);
+
+        assert_eq!(policy["mode"], json!("read_only_observe"));
+        assert_eq!(policy["interactiveCommandsBlocked"], json!(true));
+        assert!(
+            policy["blockedClasses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "managed_browser")
+        );
+        assert!(
+            policy["entrypoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "headless_observe")
+        );
+    }
+
+    #[test]
+    fn desktop_runtime_policy_summary_mentions_interactive_control() {
+        assert!(runtime_policy_summary("desktop").contains("interactive_control"));
+        assert!(runtime_policy_summary("headless").contains("read_only_observe"));
     }
 
     #[test]
