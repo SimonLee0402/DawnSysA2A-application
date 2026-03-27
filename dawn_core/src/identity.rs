@@ -230,14 +230,14 @@ pub struct BootstrapSessionResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceProfileUpdateRequest {
-    session_token: String,
-    tenant_id: String,
-    project_id: String,
-    display_name: String,
-    region: String,
-    default_model_providers: Vec<String>,
-    default_chat_platforms: Vec<String>,
-    onboarding_status: Option<String>,
+    pub(crate) session_token: String,
+    pub(crate) tenant_id: String,
+    pub(crate) project_id: String,
+    pub(crate) display_name: String,
+    pub(crate) region: String,
+    pub(crate) default_model_providers: Vec<String>,
+    pub(crate) default_chat_platforms: Vec<String>,
+    pub(crate) onboarding_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -568,12 +568,36 @@ async fn update_workspace(
     State(state): State<Arc<AppState>>,
     Json(request): Json<WorkspaceProfileUpdateRequest>,
 ) -> Result<Json<WorkspaceProfileUpdateResponse>, (StatusCode, Json<Value>)> {
-    let session = resolve_session_by_token(&state, &request.session_token)
+    apply_workspace_update(&state, request)
         .await
-        .map_err(auth_error)?;
-    let previous = ensure_workspace_profile(&state)
-        .await
-        .map_err(internal_error)?;
+        .map(Json)
+        .map_err(|error| {
+            if error
+                .to_string()
+                .contains("tenantId, projectId, displayName, and region are required")
+            {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": error.to_string() })),
+                )
+            } else if error
+                .to_string()
+                .contains("invalid or unknown session token")
+                || error.to_string().contains("session token has been revoked")
+            {
+                auth_error(error)
+            } else {
+                internal_error(error)
+            }
+        })
+}
+
+pub(crate) async fn apply_workspace_update(
+    state: &Arc<AppState>,
+    request: WorkspaceProfileUpdateRequest,
+) -> anyhow::Result<WorkspaceProfileUpdateResponse> {
+    let session = resolve_session_by_token(state, &request.session_token).await?;
+    let previous = ensure_workspace_profile(state).await?;
     let workspace = WorkspaceProfileRecord {
         workspace_id: DEFAULT_WORKSPACE_ID.to_string(),
         tenant_id: request.tenant_id.trim().to_string(),
@@ -593,24 +617,19 @@ async fn update_workspace(
         || workspace.display_name.is_empty()
         || workspace.region.is_empty()
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "tenantId, projectId, displayName, and region are required" })),
-        ));
+        anyhow::bail!("tenantId, projectId, displayName, and region are required");
     }
-    let workspace = save_workspace_profile(&state, &workspace)
-        .await
-        .map_err(internal_error)?;
+    let workspace = save_workspace_profile(state, &workspace).await?;
     state.emit_console_event(
         "identity",
         Some(workspace.workspace_id.clone()),
         Some("workspace_updated".to_string()),
         format!("workspace updated by {}", session.operator_name),
     );
-    Ok(Json(WorkspaceProfileUpdateResponse {
+    Ok(WorkspaceProfileUpdateResponse {
         workspace,
         actor: session.operator_name,
-    }))
+    })
 }
 
 async fn list_setup_verification_receipts(

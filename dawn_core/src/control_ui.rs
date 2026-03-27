@@ -93,6 +93,19 @@ struct WorkbenchSessionListRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchConfigApplyRequest {
+    session_token: String,
+    tenant_id: String,
+    project_id: String,
+    display_name: String,
+    region: String,
+    default_model_providers: Vec<String>,
+    default_chat_platforms: Vec<String>,
+    onboarding_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchRpcRequest {
     id: Option<String>,
     method: String,
@@ -129,6 +142,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "dashboard.refresh",
                     "command.run",
                     "skill.run",
+                    "config.apply",
                     "logs.tail",
                     "session.list",
                     "task.create",
@@ -236,6 +250,10 @@ async fn handle_workbench_rpc(
             let params: WorkbenchSkillRequest = parse_rpc_params(request.params)?;
             run_skill_inner(state, params).await
         }
+        "config.apply" => {
+            let params: WorkbenchConfigApplyRequest = parse_rpc_params(request.params)?;
+            apply_config_inner(state, params).await
+        }
         "logs.tail" => {
             let params: WorkbenchLogsRequest = parse_rpc_params(request.params)?;
             tail_logs_inner(state, params).await
@@ -324,6 +342,27 @@ async fn run_skill_inner(
         },
     )
     .await
+}
+
+async fn apply_config_inner(
+    state: Arc<AppState>,
+    request: WorkbenchConfigApplyRequest,
+) -> anyhow::Result<Value> {
+    let response = identity::apply_workspace_update(
+        &state,
+        identity::WorkspaceProfileUpdateRequest {
+            session_token: request.session_token,
+            tenant_id: request.tenant_id,
+            project_id: request.project_id,
+            display_name: request.display_name,
+            region: request.region,
+            default_model_providers: request.default_model_providers,
+            default_chat_platforms: request.default_chat_platforms,
+            onboarding_status: request.onboarding_status,
+        },
+    )
+    .await?;
+    Ok(json!(response))
 }
 
 async fn tail_logs_inner(
@@ -424,6 +463,7 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("/app/command"));
         assert!(CONTROL_UI_HTML.contains("/app/ws"));
         assert!(CONTROL_UI_HTML.contains("skill.run"));
+        assert!(CONTROL_UI_HTML.contains("config.apply"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));
     }

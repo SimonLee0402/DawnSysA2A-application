@@ -1366,20 +1366,23 @@
         return;
       }
       try {
-        const response = await fetchJson("/api/gateway/identity/workspace", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionToken: state.sessionToken,
-            tenantId: $("workspace-tenant-id").value.trim(),
-            projectId: $("workspace-project-id").value.trim(),
-            displayName: $("workspace-display-name").value.trim(),
-            region: $("workspace-region").value.trim(),
-            defaultModelProviders: $("workspace-models").value.split(",").map((item) => item.trim()).filter(Boolean),
-            defaultChatPlatforms: $("workspace-channels").value.split(",").map((item) => item.trim()).filter(Boolean),
-            onboardingStatus: "configured"
-          })
-        });
+        const payload = {
+          sessionToken: state.sessionToken,
+          tenantId: $("workspace-tenant-id").value.trim(),
+          projectId: $("workspace-project-id").value.trim(),
+          displayName: $("workspace-display-name").value.trim(),
+          region: $("workspace-region").value.trim(),
+          defaultModelProviders: $("workspace-models").value.split(",").map((item) => item.trim()).filter(Boolean),
+          defaultChatPlatforms: $("workspace-channels").value.split(",").map((item) => item.trim()).filter(Boolean),
+          onboardingStatus: "configured"
+        };
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("config.apply", payload)
+          : await fetchJson("/api/gateway/identity/workspace", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
         applyWorkspaceToForm(response.workspace || null);
         setNotice("workspace-notice", "success", `工作区已更新，actor = ${response.actor || state.operatorName}`);
         await refreshDashboard();

@@ -39,6 +39,7 @@ pub struct Task {
 pub struct TaskResponse {
     pub task: StoredTask,
     pub sandbox_status: String,
+    pub state: A2aTaskState,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
 }
@@ -48,8 +49,19 @@ pub struct TaskResponse {
 pub struct TaskDetailResponse {
     pub task: StoredTask,
     pub events: Vec<TaskEventRecord>,
+    pub state: A2aTaskState,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskState {
+    pub status: TaskStatus,
+    pub phase: String,
+    pub terminal: bool,
+    pub awaiting_binding: bool,
+    pub awaiting_payment: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -168,11 +180,13 @@ async fn get_task(
         .map_err(internal_error)?
         .ok_or_else(|| not_found("task not found"))?;
     let events = state.task_events(task_id).await.map_err(internal_error)?;
+    let state_envelope = build_task_state(&task);
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
     Ok(Json(TaskDetailResponse {
         task,
         events,
+        state: state_envelope,
         messages,
         artifacts,
     }))
@@ -360,12 +374,14 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let task = state.get_task(task_id).await?.unwrap_or(stored_task);
 
     let events = state.task_events(task_id).await?;
+    let state_envelope = build_task_state(&task);
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
 
     Ok(TaskResponse {
         task,
         sandbox_status,
+        state: state_envelope,
         messages,
         artifacts,
     })
@@ -884,6 +900,25 @@ fn build_task_messages(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2a
     messages
 }
 
+fn build_task_state(task: &StoredTask) -> A2aTaskState {
+    let (phase, terminal, awaiting_binding, awaiting_payment) = match task.status {
+        TaskStatus::Accepted => ("accepted", false, false, false),
+        TaskStatus::AwaitingSkillBinding => ("awaiting_binding", false, true, false),
+        TaskStatus::WaitingPaymentAuthorization => ("awaiting_payment", false, false, true),
+        TaskStatus::Queued => ("queued", false, false, false),
+        TaskStatus::Running => ("running", false, false, false),
+        TaskStatus::Completed => ("completed", true, false, false),
+        TaskStatus::Failed => ("failed", true, false, false),
+    };
+    A2aTaskState {
+        status: task.status,
+        phase: phase.to_string(),
+        terminal,
+        awaiting_binding,
+        awaiting_payment,
+    }
+}
+
 fn task_event_to_message(event: &TaskEventRecord) -> A2aMessage {
     A2aMessage {
         role: if event.event_type.contains("failed") {
@@ -985,8 +1020,8 @@ mod tests {
     use super::{
         A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
         TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
-        extract_text_from_value, parse_orchestration_plan, parse_wasm_instruction,
-        resolve_json_templates, resolve_template_string,
+        build_task_state, extract_text_from_value, parse_orchestration_plan,
+        parse_wasm_instruction, resolve_json_templates, resolve_template_string,
     };
     use uuid::Uuid;
 
@@ -1199,6 +1234,27 @@ mod tests {
             }
             other => panic!("expected data artifact part, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn maps_task_status_into_a2a_state_flags() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "demo".to_string(),
+            instruction: "Summarize the system status".to_string(),
+            status: TaskStatus::WaitingPaymentAuthorization,
+            linked_payment_id: None,
+            last_update_reason: "awaiting payment".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        };
+
+        let state = build_task_state(&task);
+        assert_eq!(state.phase, "awaiting_payment");
+        assert!(!state.terminal);
+        assert!(!state.awaiting_binding);
+        assert!(state.awaiting_payment);
     }
 }
 
