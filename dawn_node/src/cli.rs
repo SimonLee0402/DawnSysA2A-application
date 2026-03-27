@@ -85,6 +85,8 @@ struct StartArgs {
     app: bool,
     #[arg(long)]
     release: bool,
+    #[arg(long)]
+    node_profile: Option<String>,
 }
 
 #[derive(Args)]
@@ -901,6 +903,13 @@ enum NodeCommand {
     Claim(NodeClaimArgs),
     #[command(name = "trust-self")]
     TrustSelf(NodeTrustSelfArgs),
+    Status(NodeStatusArgs),
+}
+
+#[derive(Args)]
+struct NodeStatusArgs {
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1356,6 +1365,7 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
                 StartupAction::Exit => return Ok(CliOutcome::Exit),
             }
         }
+        print_node_profile_summary(&profile)?;
         ensure_node_runtime_preflight(&mut profile).await?;
         return Ok(CliOutcome::RunNode);
     };
@@ -1368,6 +1378,7 @@ pub async fn dispatch_from_args() -> anyhow::Result<CliOutcome> {
         }
         Commands::Run => {
             let mut profile = load_profile_or_default();
+            print_node_profile_summary(&profile)?;
             ensure_node_runtime_preflight(&mut profile).await?;
             Ok(CliOutcome::RunNode)
         }
@@ -2103,6 +2114,8 @@ fn prompt_startup_action(profile: &DawnCliProfile) -> anyhow::Result<StartupActi
 }
 
 async fn start_stack(profile: &mut DawnCliProfile, args: &StartArgs) -> anyhow::Result<()> {
+    apply_node_profile_override(profile, args.node_profile.as_deref())?;
+    print_node_profile_summary(profile)?;
     if !args.skip_gateway {
         ensure_gateway_running(profile, args.release).await?;
     }
@@ -2118,6 +2131,77 @@ async fn start_stack(profile: &mut DawnCliProfile, args: &StartArgs) -> anyhow::
         );
         open_default_browser(&app_url)?;
         println!("Opened {app_url}");
+    }
+    Ok(())
+}
+
+fn apply_node_profile_override(
+    profile: &mut DawnCliProfile,
+    node_profile: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(node_profile) = node_profile else {
+        return Ok(());
+    };
+    let resolved = normalize_node_profile_name(node_profile)?.to_string();
+    let changed = profile.node_profile.as_deref() != Some(resolved.as_str());
+    profile.node_profile = Some(resolved.clone());
+    if changed || profile.requested_capabilities.is_empty() {
+        profile.requested_capabilities = default_requested_capabilities_for_profile(&resolved, false);
+    }
+    let path = save_profile(profile)?;
+    println!(
+        "Selected node profile override: {} (saved to {})",
+        resolved,
+        path.display()
+    );
+    Ok(())
+}
+
+fn runtime_mode_label(node_profile: &str) -> &'static str {
+    match node_profile {
+        "headless" => "headless / read-only observability",
+        _ => "desktop / interactive control",
+    }
+}
+
+fn runtime_capability_preview(capabilities: &[String]) -> String {
+    let preview = capabilities.iter().take(8).cloned().collect::<Vec<_>>();
+    if preview.is_empty() {
+        "<none>".to_string()
+    } else if capabilities.len() > preview.len() {
+        format!("{} ...", preview.join(", "))
+    } else {
+        preview.join(", ")
+    }
+}
+
+fn effective_requested_capabilities(profile: &DawnCliProfile) -> Vec<String> {
+    if profile.requested_capabilities.is_empty() {
+        default_requested_capabilities_for_profile(
+            profile.node_profile.as_deref().unwrap_or("desktop"),
+            false,
+        )
+    } else {
+        profile.requested_capabilities.clone()
+    }
+}
+
+fn print_node_profile_summary(profile: &DawnCliProfile) -> anyhow::Result<()> {
+    let node_profile = profile.node_profile.as_deref().unwrap_or("desktop");
+    let requested_capabilities = effective_requested_capabilities(profile);
+    println!("Node profile: {node_profile}");
+    println!("Runtime mode: {}", runtime_mode_label(node_profile));
+    println!(
+        "Requested capabilities: {} total",
+        requested_capabilities.len()
+    );
+    println!(
+        "Capability preview: {}",
+        runtime_capability_preview(&requested_capabilities)
+    );
+    if node_profile == "headless" {
+        println!("Headless entrypoints: headless_status, headless_observe");
+        println!("Tip: run `dawn-node node status` to inspect the headless runtime preset.");
     }
     Ok(())
 }
@@ -3337,12 +3421,14 @@ fn print_local_status() -> anyhow::Result<()> {
         "Gateway: {}",
         profile
             .gateway_base_url
+            .clone()
             .unwrap_or_else(default_gateway_base_url)
     );
     println!(
         "Operator: {}",
         profile
             .operator_name
+            .clone()
             .unwrap_or_else(|| "<none>".to_string())
     );
     println!(
@@ -3355,14 +3441,19 @@ fn print_local_status() -> anyhow::Result<()> {
     );
     println!(
         "Node id: {}",
-        profile.node_id.unwrap_or_else(|| "node-local".to_string())
+        profile
+            .node_id
+            .clone()
+            .unwrap_or_else(|| "node-local".to_string())
     );
     println!(
         "Node display: {}",
         profile
             .node_name
+            .clone()
             .unwrap_or_else(|| "Dawn Local Node".to_string())
     );
+    print_node_profile_summary(&profile)?;
     println!(
         "Claim token: {}",
         if profile.claim_token.is_some() {
@@ -3373,6 +3464,90 @@ fn print_local_status() -> anyhow::Result<()> {
     );
     if profile.session_token.is_none() {
         println!("Tip: run `dawn-node login` to start the guided CLI onboarding flow.");
+    }
+    Ok(())
+}
+
+fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Result<()> {
+    let requested_capabilities = effective_requested_capabilities(profile);
+    let node_profile = profile.node_profile.as_deref().unwrap_or("desktop");
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "nodeProfile": node_profile,
+                "runtimeMode": runtime_mode_label(node_profile),
+                "nodeId": profile.node_id.clone().unwrap_or_else(|| "node-local".to_string()),
+                "nodeName": profile.node_name.clone().unwrap_or_else(|| {
+                    if node_profile == "headless" {
+                        "Dawn Headless Node".to_string()
+                    } else {
+                        "Dawn Local Node".to_string()
+                    }
+                }),
+                "gatewayBaseUrl": profile.gateway_base_url.clone().unwrap_or_else(default_gateway_base_url),
+                "hasSessionToken": profile.session_token.is_some(),
+                "hasClaimToken": profile.claim_token.is_some(),
+                "requestedCapabilities": requested_capabilities,
+                "requestedCapabilityCount": requested_capabilities.len(),
+                "requestedCapabilityPreview": runtime_capability_preview(&requested_capabilities),
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("Node profile: {node_profile}");
+    println!("Runtime mode: {}", runtime_mode_label(node_profile));
+    println!(
+        "Node id: {}",
+        profile
+            .node_id
+            .clone()
+            .unwrap_or_else(|| "node-local".to_string())
+    );
+    println!(
+        "Node name: {}",
+        profile.node_name.clone().unwrap_or_else(|| {
+            if node_profile == "headless" {
+                "Dawn Headless Node".to_string()
+            } else {
+                "Dawn Local Node".to_string()
+            }
+        })
+    );
+    println!(
+        "Gateway: {}",
+        profile
+            .gateway_base_url
+            .clone()
+            .unwrap_or_else(default_gateway_base_url)
+    );
+    println!(
+        "Session token: {}",
+        if profile.session_token.is_some() {
+            "stored"
+        } else {
+            "<none>"
+        }
+    );
+    println!(
+        "Claim token: {}",
+        if profile.claim_token.is_some() {
+            "stored"
+        } else {
+            "<none>"
+        }
+    );
+    println!(
+        "Requested capabilities: {} total",
+        requested_capabilities.len()
+    );
+    println!(
+        "Capability preview: {}",
+        runtime_capability_preview(&requested_capabilities)
+    );
+    if node_profile == "headless" {
+        println!("Headless entrypoints: headless_status, headless_observe");
     }
     Ok(())
 }
@@ -5856,6 +6031,10 @@ async fn handle_node(args: NodeArgs) -> anyhow::Result<()> {
     match args.command {
         NodeCommand::Claim(claim) => create_node_claim(claim).await,
         NodeCommand::TrustSelf(args) => trust_self_node(args).await,
+        NodeCommand::Status(args) => {
+            let profile = load_profile_or_default();
+            print_node_status(&profile, args.json)
+        }
     }
 }
 
@@ -7257,6 +7436,7 @@ mod tests {
         extract_text_from_value, find_pending_approval_record, format_payment_approval_summary,
         ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
         normalize_node_profile_name, parse_named_selection, resolve_ap2_mcu_seed_hex,
+        effective_requested_capabilities, runtime_capability_preview, runtime_mode_label,
         sign_ap2_payload, update_values,
     };
     use crate::profile::DawnCliProfile;
@@ -7525,6 +7705,32 @@ mod tests {
                 .any(|value| value == "desktop_notification")
         );
         assert!(!capabilities.iter().any(|value| value == "browser_start"));
+    }
+
+    #[test]
+    fn headless_runtime_mode_label_is_observable() {
+        assert_eq!(
+            runtime_mode_label("headless"),
+            "headless / read-only observability"
+        );
+        assert_eq!(
+            runtime_mode_label("desktop"),
+            "desktop / interactive control"
+        );
+    }
+
+    #[test]
+    fn headless_status_uses_effective_requested_capabilities() {
+        let mut profile = DawnCliProfile::default();
+        profile.node_profile = Some("headless".to_string());
+
+        let capabilities = effective_requested_capabilities(&profile);
+        let preview = runtime_capability_preview(&capabilities);
+
+        assert!(capabilities.iter().any(|value| value == "headless_status"));
+        assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(preview.contains("headless_status"));
+        assert!(preview.contains("headless_observe"));
     }
 
     #[test]
