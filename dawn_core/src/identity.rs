@@ -2099,7 +2099,14 @@ fn build_identity_readiness(
             } else if missing_chat_platforms.is_empty() {
                 None
             } else {
-                Some("Configure the missing chat connector credentials.".to_string())
+                Some(
+                    first_missing_chat
+                        .as_deref()
+                        .map(chat_connector_action_hint)
+                        .unwrap_or_else(|| {
+                            "Configure the missing chat connector credentials.".to_string()
+                        }),
+                )
             },
             first_missing_chat.as_ref().map(|_| "chat".to_string()),
             first_missing_chat,
@@ -2135,7 +2142,15 @@ fn build_identity_readiness(
             } else if missing_ingress_platforms.is_empty() {
                 None
             } else {
-                Some("Set the callback secret or token for the missing ingress route.".to_string())
+                Some(
+                    first_missing_ingress
+                        .as_deref()
+                        .map(ingress_route_action_hint)
+                        .unwrap_or_else(|| {
+                            "Set the callback secret or token for the missing ingress route."
+                                .to_string()
+                        }),
+                )
             },
             first_missing_ingress
                 .as_ref()
@@ -2326,6 +2341,82 @@ fn readiness_item(
         action,
         surface,
         target,
+    }
+}
+
+fn chat_connector_action_hint(platform: &str) -> String {
+    match platform {
+        "telegram" => {
+            "Configure the Telegram bot token, then send /help to verify command discovery."
+                .to_string()
+        }
+        "feishu" => {
+            "Set FEISHU_BOT_WEBHOOK_URL, then send `帮助` or `@机器人 /help` in Feishu."
+                .to_string()
+        }
+        "dingtalk" => {
+            "Set DINGTALK_BOT_WEBHOOK_URL, then test with `帮助` or `@机器人 /help` in DingTalk."
+                .to_string()
+        }
+        "wecom_bot" | "wecom" => {
+            "Set WECOM_BOT_WEBHOOK_URL, then test with `帮助` or `@机器人 /help` in WeCom."
+                .to_string()
+        }
+        "wechat_official_account" => {
+            "Set the WeChat Official Account credentials, then test with `帮助` or `／skills`."
+                .to_string()
+        }
+        "qq" => {
+            "Set QQ_BOT_APP_ID and QQ_BOT_CLIENT_SECRET, then test with `帮助` or `@机器人 /help`."
+                .to_string()
+        }
+        "signal" => {
+            "Configure the Signal account and server URL, then send /help in the paired chat."
+                .to_string()
+        }
+        "bluebubbles" => {
+            "Configure the BlueBubbles server URL and password, then send /help in the paired chat."
+                .to_string()
+        }
+        _ => "Configure the missing chat connector credentials.".to_string(),
+    }
+}
+
+fn ingress_route_action_hint(platform: &str) -> String {
+    match platform {
+        "telegram" => {
+            "Set DAWN_TELEGRAM_WEBHOOK_SECRET or enable polling, then send /help to confirm ingress."
+                .to_string()
+        }
+        "feishu" => {
+            "Point the Feishu event callback at /api/gateway/ingress/feishu/events, then send `帮助`."
+                .to_string()
+        }
+        "dingtalk" => {
+            "Set DAWN_DINGTALK_CALLBACK_TOKEN, wire the DingTalk callback URL, then send `帮助`."
+                .to_string()
+        }
+        "wecom" => {
+            "Set DAWN_WECOM_CALLBACK_TOKEN, wire the WeCom callback URL, then send `帮助`."
+                .to_string()
+        }
+        "wechat_official_account" => {
+            "Set DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN, complete the WeChat callback verification, then send `帮助`."
+                .to_string()
+        }
+        "qq" => {
+            "Set DAWN_QQ_BOT_CALLBACK_SECRET, wire the QQ bot callback, then send `帮助`."
+                .to_string()
+        }
+        "signal" => {
+            "Set DAWN_SIGNAL_CALLBACK_SECRET, expose the Signal callback URL, then send /help."
+                .to_string()
+        }
+        "bluebubbles" => {
+            "Set DAWN_BLUEBUBBLES_CALLBACK_SECRET, expose the BlueBubbles callback URL, then send /help."
+                .to_string()
+        }
+        _ => "Set the callback secret or token for the missing ingress route.".to_string(),
     }
 }
 
@@ -3696,6 +3787,83 @@ mod tests {
                 .checklist
                 .iter()
                 .all(|item| item.status == "ready")
+        );
+    }
+
+    #[test]
+    fn readiness_uses_platform_specific_chat_guidance_for_feishu() {
+        let readiness = build_identity_readiness(
+            &test_workspace_with_targets(
+                "identity_ready",
+                vec!["openai".to_string()],
+                vec!["feishu".to_string()],
+            ),
+            1,
+            &[],
+            &[],
+            0,
+            0,
+            &IdentityEnvironmentReadiness {
+                public_base_url: Some("https://dawn.example.com".to_string()),
+                configured_model_providers: vec!["openai".to_string()],
+                configured_chat_platforms: vec![],
+                configured_ingress_platforms: vec!["feishu".to_string()],
+                present_env_keys: vec!["OPENAI_API_KEY".to_string()],
+            },
+        );
+        let chat_item = readiness
+            .checklist
+            .iter()
+            .find(|item| item.key == "default_chat_connectors")
+            .expect("chat readiness item");
+        assert_eq!(chat_item.surface.as_deref(), Some("chat"));
+        assert_eq!(chat_item.target.as_deref(), Some("feishu"));
+        assert!(
+            chat_item
+                .action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("FEISHU_BOT_WEBHOOK_URL")
+        );
+    }
+
+    #[test]
+    fn readiness_uses_platform_specific_ingress_guidance_for_wechat() {
+        let readiness = build_identity_readiness(
+            &test_workspace_with_targets(
+                "identity_ready",
+                vec!["openai".to_string()],
+                vec!["wechat_official_account".to_string()],
+            ),
+            1,
+            &[],
+            &[],
+            0,
+            0,
+            &IdentityEnvironmentReadiness {
+                public_base_url: Some("https://dawn.example.com".to_string()),
+                configured_model_providers: vec!["openai".to_string()],
+                configured_chat_platforms: vec!["wechat_official_account".to_string()],
+                configured_ingress_platforms: vec![],
+                present_env_keys: vec![
+                    "OPENAI_API_KEY".to_string(),
+                    "WECHAT_OFFICIAL_ACCOUNT_ACCESS_TOKEN".to_string(),
+                ],
+            },
+        );
+        let ingress_item = readiness
+            .checklist
+            .iter()
+            .find(|item| item.key == "default_ingress_paths")
+            .expect("ingress readiness item");
+        assert_eq!(ingress_item.surface.as_deref(), Some("ingress"));
+        assert_eq!(ingress_item.target.as_deref(), Some("wechat_official_account"));
+        assert!(
+            ingress_item
+                .action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN")
         );
     }
 
