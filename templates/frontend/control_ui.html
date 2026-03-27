@@ -936,6 +936,7 @@
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="list_directory">列目录</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="stat_path">文件信息</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="read_file_preview">文件预览</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="tail_file_preview">日志尾部</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="find_paths">查找路径</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="grep_files">文本搜索</button>
                     </div>`
@@ -1731,6 +1732,9 @@
           : result?.primaryArtifactMimeType
             ? `\nartifact.mime=${result.primaryArtifactMimeType}`
           : "";
+        const artifactPreview = result?.primaryArtifactPreview
+          ? `\nartifact.preview=${String(result.primaryArtifactPreview).slice(0, 160)}`
+          : "";
         const remoteSummary = remote
           ? `\nremote=${remote.stateLabel || "unknown"} · invocations=${Number(remote.totalInvocations || 0)}${remote.latestInvocation?.cardId ? ` · latest=${remote.latestInvocation.cardId}` : ""}`
           : "";
@@ -1745,7 +1749,7 @@
         setNotice(
           "task-inspect-notice",
           stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
-          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${latestLabel}${latestUpdate}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${resultLabels}${remoteSummary}${streamSummary}`
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${latestLabel}${latestUpdate}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${artifactPreview}${resultLabels}${remoteSummary}${streamSummary}`
         );
       } catch (error) {
         setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);
@@ -1783,7 +1787,7 @@
         if (limit === null) return;
         const parsed = Number(limit);
         payload.limit = Number.isFinite(parsed) && parsed > 0 ? parsed : 8;
-      } else if (commandType === "list_directory" || commandType === "stat_path" || commandType === "read_file_preview") {
+      } else if (commandType === "list_directory" || commandType === "stat_path" || commandType === "read_file_preview" || commandType === "tail_file_preview") {
         const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
         if (path === null) return;
         payload.path = path;
@@ -1822,6 +1826,8 @@
               ? `isDir=${Boolean(result?.isDir)} · isFile=${Boolean(result?.isFile)} · bytes=${Number(result?.len || 0)}`
               : commandType === "read_file_preview"
                 ? `bytes=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? " · truncated" : ""}`
+              : commandType === "tail_file_preview"
+                ? `tail=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? ` · start=${Number(result?.tailStartByte || 0)}` : ""}`
               : commandType === "find_paths"
                 ? `matches=${Number(result?.count || 0)} · searched=${Number(result?.searchedDirectories || 0)}${result?.truncated ? " · truncated" : ""}`
               : commandType === "grep_files"

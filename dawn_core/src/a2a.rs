@@ -92,6 +92,7 @@ pub struct A2aTaskResult {
     pub latest_message: Option<A2aMessage>,
     pub primary_artifact_name: Option<String>,
     pub primary_artifact_mime_type: Option<String>,
+    pub primary_artifact_preview: Option<String>,
     pub artifact_names: Vec<String>,
     pub message_labels: Vec<String>,
     pub artifact_mime_types: Vec<String>,
@@ -1343,6 +1344,9 @@ fn build_task_result(
         .unwrap_or_else(|| task.last_update_reason.clone());
     let primary_artifact_name = artifacts.first().map(|artifact| artifact.name.clone());
     let primary_artifact_mime_type = artifacts.first().map(|artifact| artifact.mime_type.clone());
+    let primary_artifact_preview = artifacts
+        .first()
+        .and_then(summarize_primary_artifact_preview);
     A2aTaskResult {
         summary,
         status: task.status,
@@ -1356,6 +1360,7 @@ fn build_task_result(
         latest_message,
         primary_artifact_name,
         primary_artifact_mime_type,
+        primary_artifact_preview,
         artifact_names: artifacts
             .iter()
             .map(|artifact| artifact.name.clone())
@@ -1375,6 +1380,27 @@ fn build_task_result(
         stream_summary: stream.summary.clone(),
         latest_stream_item: stream.items.last().cloned(),
     }
+}
+
+fn summarize_primary_artifact_preview(artifact: &A2aArtifact) -> Option<String> {
+    artifact.parts.iter().find_map(|part| match part {
+        A2aPart::Text { text } => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.chars().take(120).collect::<String>())
+            }
+        }
+        A2aPart::Data { data } => {
+            let compact = serde_json::to_string(data).ok()?;
+            if compact.is_empty() {
+                None
+            } else {
+                Some(compact.chars().take(120).collect::<String>())
+            }
+        }
+    })
 }
 
 fn default_value_payload() -> Value {
@@ -1735,6 +1761,20 @@ mod tests {
         assert_eq!(
             result.primary_artifact_mime_type.as_deref(),
             Some("application/json")
+        );
+        assert!(
+            result
+                .primary_artifact_preview
+                .as_deref()
+                .unwrap_or_default()
+                .contains("\"taskId\":\"00000000-0000-0000-0000-000000000000\"")
+        );
+        assert!(
+            result
+                .primary_artifact_preview
+                .as_deref()
+                .unwrap_or_default()
+                .contains("\"status\":\"completed\"")
         );
         assert_eq!(
             result.message_labels,

@@ -592,6 +592,7 @@ async fn node_observe_inner(
             | "list_directory"
             | "stat_path"
             | "read_file_preview"
+            | "tail_file_preview"
             | "find_paths"
             | "grep_files"
     ) {

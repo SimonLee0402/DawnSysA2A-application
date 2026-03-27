@@ -607,6 +607,7 @@ fn dispatch_command_future<'a>(
         "system_info" => Box::pin(execute_system_info_command(config, envelope)),
         "list_directory" => Box::pin(execute_list_directory_command(envelope)),
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
+        "tail_file_preview" => Box::pin(execute_tail_file_preview_command(envelope)),
         "stat_path" => Box::pin(execute_stat_path_command(envelope)),
         "find_paths" => Box::pin(execute_find_paths_command(envelope)),
         "grep_files" => Box::pin(execute_grep_files_command(envelope)),
@@ -1012,6 +1013,55 @@ async fn execute_read_file_preview_command(
                     "preview": preview,
                     "previewBytes": preview_len,
                     "truncated": bytes.len() > max_bytes
+                })),
+                error: None,
+            }
+        }
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!("failed to read file '{}': {error}", path)),
+        },
+    }
+}
+
+async fn execute_tail_file_preview_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let Some(path) = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("tail_file_preview requires payload.path".to_string()),
+        };
+    };
+
+    let max_bytes = payload_usize(&envelope.payload, "maxBytes", 4096, 65_536);
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let preview_start = bytes.len().saturating_sub(max_bytes);
+            let preview_bytes = &bytes[preview_start..];
+            let preview = String::from_utf8_lossy(preview_bytes).to_string();
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "succeeded",
+                result: Some(json!({
+                    "path": path,
+                    "sizeBytes": bytes.len(),
+                    "preview": preview,
+                    "previewBytes": preview_bytes.len(),
+                    "tailStartByte": preview_start,
+                    "truncated": preview_start > 0
                 })),
                 error: None,
             }
@@ -1466,6 +1516,7 @@ async fn execute_headless_status_command(
                 "process_snapshot",
                 "list_directory",
                 "read_file_preview",
+                "tail_file_preview",
                 "stat_path",
                 "find_paths",
                 "grep_files"
@@ -1575,6 +1626,7 @@ fn headless_runtime_policy() -> Value {
             "process_snapshot",
             "list_directory",
             "read_file_preview",
+            "tail_file_preview",
             "stat_path",
             "find_paths",
             "grep_files"
@@ -1611,6 +1663,7 @@ fn summarize_headless_observation(
         "firstDirectoryEntry": if first_entry.is_empty() { Value::Null } else { json!(first_entry) },
         "recommendedNextCommands": [
             "read_file_preview",
+            "tail_file_preview",
             "stat_path",
             "list_directory",
             "find_paths",
@@ -12103,6 +12156,7 @@ fn default_capabilities() -> Vec<String> {
         "system_info".to_string(),
         "list_directory".to_string(),
         "read_file_preview".to_string(),
+        "tail_file_preview".to_string(),
         "stat_path".to_string(),
         "find_paths".to_string(),
         "grep_files".to_string(),
@@ -12128,6 +12182,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "system_info".to_string(),
         "list_directory".to_string(),
         "read_file_preview".to_string(),
+        "tail_file_preview".to_string(),
         "stat_path".to_string(),
         "find_paths".to_string(),
         "grep_files".to_string(),
@@ -12207,6 +12262,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "system_info"
             | "list_directory"
             | "read_file_preview"
+            | "tail_file_preview"
             | "stat_path"
             | "find_paths"
             | "grep_files"
@@ -12855,6 +12911,38 @@ mod tests {
         let result = response.result.unwrap();
         assert_eq!(result["preview"], "abcdefgh");
         assert_eq!(result["truncated"], true);
+
+        fs::remove_file(temp_path).ok();
+    }
+
+    #[tokio::test]
+    async fn tail_file_preview_command_reads_tail_bytes() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "dawn-node-tail-preview-{}.txt",
+            unix_timestamp_ms()
+        ));
+        fs::write(&temp_path, "alpha\nbeta\ngamma\ndelta").unwrap();
+
+        let response = execute_tail_file_preview_command(GatewayCommandEnvelope {
+            command_id: "cmd-tail-preview".to_string(),
+            command_type: "tail_file_preview".to_string(),
+            payload: json!({
+                "path": temp_path.display().to_string(),
+                "maxBytes": 8
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["previewBytes"], 8);
+        assert!(
+            result["preview"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("delta")
+        );
 
         fs::remove_file(temp_path).ok();
     }
