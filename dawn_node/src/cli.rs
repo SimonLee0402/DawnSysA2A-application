@@ -3912,7 +3912,7 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                         }
                     });
                 println!(
-                    "telegram\tsecret={telegram_secret}\tmode={telegram_mode}\tpolling={telegram_polling}"
+                    "telegram\tsecret={telegram_secret}\tmode={telegram_mode}\tpolling={telegram_polling}\texample=/help"
                 );
                 for platform in ["signal", "bluebubbles"] {
                     let configured =
@@ -3930,10 +3930,12 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                             .and_then(Value::as_u64)
                             .unwrap_or(0);
                     println!(
-                        "{platform}\tsecret={configured}\tdmPolicy={policy}\tallowlist={allowlist_count}\tpendingPairings={pending_pairings}"
+                        "{platform}\tsecret={configured}\tdmPolicy={policy}\tallowlist={allowlist_count}\tpendingPairings={pending_pairings}\texample=/help"
                     );
                 }
-                println!("feishu\tsecret=n/a\tmode=webhook\ttextIngress=true");
+                println!(
+                    "feishu\tsecret=n/a\tmode=webhook\ttextIngress=true\texample=@bot /help | 帮助"
+                );
                 for (platform, key) in [
                     ("dingtalk", "dingtalkCallbackTokenConfigured"),
                     ("wecom", "wecomCallbackTokenConfigured"),
@@ -3946,8 +3948,12 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                     let configured = value_at_path(&response, &[key])
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    let example = match platform {
+                        "wechat_official_account" => "帮助 | ／skills",
+                        _ => "@bot /help | 帮助",
+                    };
                     println!(
-                        "{platform}\tsecret={configured}\tmode=webhook\ttextIngress=true"
+                        "{platform}\tsecret={configured}\tmode=webhook\ttextIngress=true\texample={example}"
                     );
                 }
             }

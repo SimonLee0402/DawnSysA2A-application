@@ -1363,6 +1363,12 @@ fn normalize_ingress_command_text(platform: &str, text: &str) -> String {
         }
         break;
     }
+    let trimmed = normalized.trim();
+    if !trimmed.starts_with('/') && !trimmed.starts_with('#') {
+        if let Some(alias) = normalize_platform_command_alias(platform, trimmed) {
+            return alias;
+        }
+    }
     normalized.trim().to_string()
 }
 
@@ -1411,6 +1417,66 @@ fn strip_leading_tag_mention(text: &str) -> Option<&str> {
     }
     let close_index = lower.find(close_tag)?;
     Some(&trimmed[close_index + close_tag.len()..])
+}
+
+fn normalize_platform_command_alias(platform: &str, text: &str) -> Option<String> {
+    if !matches!(
+        platform,
+        "feishu" | "dingtalk" | "wechat_official_account" | "qq" | "wecom"
+    ) {
+        return None;
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let exact = match lowered.as_str() {
+        "help" | "commands" | "start" => Some("/help".to_string()),
+        "status" => Some("/status".to_string()),
+        "model" | "models" => Some("/model".to_string()),
+        "skills" => Some("/skills".to_string()),
+        "new" => Some("/new".to_string()),
+        "mode" => Some("#mode".to_string()),
+        _ => None,
+    };
+    if exact.is_some() {
+        return exact;
+    }
+    match trimmed {
+        "帮助" | "命令" | "菜单" | "开始" => Some("/help".to_string()),
+        "状态" => Some("/status".to_string()),
+        "模型" => Some("/model".to_string()),
+        "技能" | "技能列表" => Some("/skills".to_string()),
+        "新建" | "新对话" => Some("/new".to_string()),
+        "模式" | "功能等级" => Some("#mode".to_string()),
+        "聊天模式" => Some("#chat".to_string()),
+        "观察模式" | "观察" => Some("#observe".to_string()),
+        "辅助模式" | "辅助" => Some("#assist".to_string()),
+        "自动驾驶" | "自动模式" => Some("#autopilot".to_string()),
+        _ => {
+            if let Some(rest) = trimmed
+                .strip_prefix("技能搜索 ")
+                .or_else(|| trimmed.strip_prefix("技能 搜索 "))
+                .or_else(|| trimmed.strip_prefix("搜索技能 "))
+            {
+                let query = rest.trim();
+                if !query.is_empty() {
+                    return Some(format!("/skills search {query}"));
+                }
+            }
+            if let Some(rest) = trimmed
+                .strip_prefix("使用技能 ")
+                .or_else(|| trimmed.strip_prefix("调用技能 "))
+            {
+                let selector = rest.trim();
+                if !selector.is_empty() {
+                    return Some(format!("/skill {selector}"));
+                }
+            }
+            None
+        }
+    }
 }
 
 fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
@@ -1500,8 +1566,9 @@ async fn execute_ingress_command(
     command: IngressCommand,
     current_mode: ChatAutomationMode,
 ) -> anyhow::Result<IngressCommandResult> {
+    let help_text = help_command_text_for_platform(platform);
     match command {
-        IngressCommand::Help => Ok(IngressCommandResult::Reply(help_command_text())),
+        IngressCommand::Help => Ok(IngressCommandResult::Reply(help_text.clone())),
         IngressCommand::New => Ok(IngressCommandResult::Reply(
             "新的对话已准备好。直接发问题即可，或输入 /skills 查看已安装技能。".to_string(),
         )),
@@ -1659,7 +1726,7 @@ async fn execute_ingress_command(
         }
         IngressCommand::Unknown(command) => Ok(IngressCommandResult::Reply(format!(
             "未知命令 `{command}`。\n{}",
-            help_command_text()
+            help_text
         ))),
     }
 }
@@ -1685,6 +1752,26 @@ fn help_command_text() -> String {
         "/wasm <skill[@version][#function]> - 直接提交 Wasm 技能任务",
     ]
     .join("\n")
+}
+
+fn help_command_text_for_platform(platform: &str) -> String {
+    let mut help = help_command_text();
+    let platform_hint = match platform {
+        "telegram" => Some("平台提示：直接发送 /help、/skills、/status 即可。"),
+        "signal" | "bluebubbles" => Some("平台提示：直接发送 /help、/status 或 #observe。"),
+        "feishu" | "dingtalk" | "qq" | "wecom" => Some(
+            "平台提示：可以直接发 `帮助`、`状态`、`技能`，也支持 `@机器人 /help`、`／skills`、`＃observe`。",
+        ),
+        "wechat_official_account" => Some(
+            "平台提示：可以直接发 `帮助`、`状态`、`技能`，也支持 `／skills`、`＃observe`。",
+        ),
+        _ => None,
+    };
+    if let Some(platform_hint) = platform_hint {
+        help.push_str("\n\n");
+        help.push_str(platform_hint);
+    }
+    help
 }
 
 fn chat_mode_label(mode: ChatAutomationMode) -> &'static str {
@@ -3811,6 +3898,20 @@ mod tests {
         assert_eq!(
             normalize_ingress_command_text("wechat_official_account", "<at user_id=\"ou_x\">机器人</at> /status"),
             "/status"
+        );
+        assert_eq!(normalize_ingress_command_text("feishu", "帮助"), "/help");
+        assert_eq!(normalize_ingress_command_text("dingtalk", "状态"), "/status");
+        assert_eq!(
+            normalize_ingress_command_text("qq", "技能搜索 echo"),
+            "/skills search echo"
+        );
+        assert_eq!(
+            normalize_ingress_command_text("wechat_official_account", "观察模式"),
+            "#observe"
+        );
+        assert_eq!(
+            normalize_ingress_command_text("wecom", "使用技能 echo-skill"),
+            "/skill echo-skill"
         );
     }
 

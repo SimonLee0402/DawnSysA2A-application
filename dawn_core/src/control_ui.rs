@@ -739,6 +739,14 @@ fn summarize_channel_status(
         "idle"
     };
     let capability_profile = channel_capability_profile(platform);
+    let next_action_hint = channel_next_action_hint(
+        platform,
+        is_default,
+        paired_count,
+        pending_count,
+        blocked_count,
+        &capability_profile,
+    );
 
     json!({
         "platform": platform,
@@ -752,18 +760,68 @@ fn summarize_channel_status(
         "dmPolicies": dm_policies.into_iter().collect::<Vec<_>>(),
         "latestUpdatedAtUnixMs": if latest_updated_at_unix_ms == 0 { None::<u128> } else { Some(latest_updated_at_unix_ms) },
         "capabilityProfile": capability_profile,
+        "nextActionHint": next_action_hint,
     })
 }
 
 fn channel_capability_profile(platform: &str) -> Value {
-    let (supports_ingress, supports_slash, supports_default_model_reply, supports_platform_commands, native_action_tier, consistency_tier) =
+    let (
+        supports_ingress,
+        supports_slash,
+        supports_default_model_reply,
+        supports_platform_commands,
+        native_action_tier,
+        consistency_tier,
+        command_discovery,
+        command_hint,
+    ) =
         match platform {
-            "signal" | "bluebubbles" => (true, true, true, false, "advanced", "advanced"),
-            "telegram" => (true, true, true, true, "text", "standard"),
+            "signal" | "bluebubbles" => (
+                true,
+                true,
+                true,
+                false,
+                "advanced",
+                "advanced",
+                "slash",
+                "/help · /status · #observe",
+            ),
+            "telegram" => (
+                true,
+                true,
+                true,
+                true,
+                "text",
+                "standard",
+                "platform_commands",
+                "/help · /skills · /status",
+            ),
             "feishu" | "dingtalk" | "wechat_official_account" | "qq" | "wecom" => {
-                (true, true, true, false, "text", "minimum")
+                let hint = match platform {
+                    "wechat_official_account" => "帮助 · 状态 · 技能 · ／skills · ＃observe",
+                    _ => "@机器人 /help · 帮助 · 技能 · ／skills · ＃observe",
+                };
+                (
+                    true,
+                    true,
+                    true,
+                    false,
+                    "text",
+                    "minimum",
+                    "mention_or_alias",
+                    hint,
+                )
             }
-            _ => (false, false, false, false, "send_only", "outbound_only"),
+            _ => (
+                false,
+                false,
+                false,
+                false,
+                "send_only",
+                "outbound_only",
+                "send_only",
+                "",
+            ),
         };
     json!({
         "supportsIngress": supports_ingress,
@@ -772,7 +830,46 @@ fn channel_capability_profile(platform: &str) -> Value {
         "supportsPlatformCommands": supports_platform_commands,
         "nativeActionTier": native_action_tier,
         "consistencyTier": consistency_tier,
+        "commandDiscovery": command_discovery,
+        "commandHint": if command_hint.is_empty() { None::<&str> } else { Some(command_hint) },
     })
+}
+
+fn channel_next_action_hint(
+    platform: &str,
+    is_default: bool,
+    paired_count: usize,
+    pending_count: usize,
+    blocked_count: usize,
+    capability_profile: &Value,
+) -> Option<String> {
+    let command_hint = capability_profile["commandHint"].as_str().unwrap_or("").trim();
+    let supports_ingress = capability_profile["supportsIngress"]
+        .as_bool()
+        .unwrap_or(false);
+    if paired_count > 0 {
+        if command_hint.is_empty() {
+            return Some("通道已配对，可直接发送文本开始测试。".to_string());
+        }
+        return Some(format!("通道已就绪，直接发送 {command_hint}。"));
+    }
+    if pending_count > 0 {
+        return Some("有待处理的配对请求，先在 /app 或 CLI 里完成 approve / reject。".to_string());
+    }
+    if blocked_count > 0 {
+        return Some("该通道当前被策略阻断；先检查 allowlist、dmPolicy 或配对状态。".to_string());
+    }
+    if is_default && supports_ingress {
+        return Some(match platform {
+            "feishu" => "先确认群机器人 webhook 可达；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
+            "dingtalk" => "先补齐 callback token / 加签配置；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
+            "wechat_official_account" => "先补齐公众号 callback token；随后直接发 `帮助` 或 `／skills`。".to_string(),
+            "qq" => "先补齐 QQ callback secret；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
+            "wecom" => "先补齐企业微信 callback token；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
+            _ => "先完成 ingress 配置，再直接发送命令做 live 测试。".to_string(),
+        });
+    }
+    None
 }
 
 async fn tail_logs_inner(
