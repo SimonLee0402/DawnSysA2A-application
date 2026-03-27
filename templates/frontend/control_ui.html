@@ -933,6 +933,7 @@
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_status">状态探查</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_observe">只读观察</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_audit_snapshot">快速巡检</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_log_audit">日志巡检</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="process_snapshot">进程快照</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="list_directory">列目录</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="directory_tree_preview">目录树</button>
@@ -1741,8 +1742,11 @@
         const artifactPreview = result?.primaryArtifactPreview
           ? `\nartifact.preview=${String(result.primaryArtifactPreview).slice(0, 160)}`
           : "";
-        const remoteSummary = remote
-          ? `\nremote=${remote.stateLabel || "unknown"} · invocations=${Number(remote.totalInvocations || 0)}${remote.latestInvocation?.cardId ? ` · latest=${remote.latestInvocation.cardId}` : ""}`
+        const remoteState = result?.remoteStateLabel || remote?.stateLabel || null;
+        const remoteInvocations = Number(result?.remoteTotalInvocations ?? remote?.totalInvocations ?? 0);
+        const remoteLatestCard = result?.remoteLatestCardId || remote?.latestInvocation?.cardId || null;
+        const remoteSummary = remoteState
+          ? `\nremote=${remoteState} · invocations=${remoteInvocations}${remoteLatestCard ? ` · latest=${remoteLatestCard}` : ""}`
           : "";
         const latestStreamLabel = latestStreamItem
           ? `${latestStreamItem.kind || "update"} / ${latestStreamItem.phase || "running"} / ${latestStreamItem.eventType || latestStreamItem.event_type || "unknown"}#${latestStreamItem.sequence || "?"}`
@@ -1802,6 +1806,20 @@
         if (logPath.trim()) {
           payload.tailPath = logPath.trim();
         }
+      } else if (commandType === "headless_log_audit") {
+        const logPath = window.prompt("输入要巡检的日志文件路径", "D:\\Agent2Agent应用\\dawn_core.log");
+        if (logPath === null) return;
+        const searchRoot = window.prompt("输入搜索根路径（留空则使用日志所在目录）", "");
+        if (searchRoot === null) return;
+        const query = window.prompt("可选：输入文本搜索关键词（留空跳过搜索）", "error");
+        if (query === null) return;
+        payload.path = logPath.trim();
+        if (searchRoot.trim()) {
+          payload.searchRoot = searchRoot.trim();
+        }
+        if (query.trim()) {
+          payload.query = query.trim();
+        }
       } else if (commandType === "list_directory" || commandType === "stat_path" || commandType === "read_file_preview" || commandType === "tail_file_preview") {
         const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
         if (path === null) return;
@@ -1851,6 +1869,8 @@
           ? `processes=${Number(result?.count || result?.processSnapshot?.count || 0)}`
             : commandType === "headless_audit_snapshot"
               ? `processes=${Number(result?.summary?.processCount || result?.processSnapshot?.count || 0)} · tree=${Number(result?.summary?.directoryTree?.entryCount || result?.directoryTree?.count || 0)}${result?.tailPreview ? " · tail=on" : ""}`
+            : commandType === "headless_log_audit"
+              ? `log=${result?.summary?.logPath || result?.log?.path || "<unknown>"} · matches=${Number(result?.summary?.matchCount || result?.grep?.count || 0)}${result?.grep ? " · grep=on" : ""}`
             : commandType === "list_directory"
               ? `entries=${Number(result?.count || result?.directory?.count || 0)}`
             : commandType === "directory_tree_preview"

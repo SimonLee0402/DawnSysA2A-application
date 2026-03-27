@@ -111,6 +111,19 @@ pub struct A2aTaskResult {
     pub stream_summary: A2aTaskStreamSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_stream_item: Option<A2aTaskStreamItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_state_label: Option<String>,
+    pub remote_total_invocations: usize,
+    pub remote_dispatched_count: usize,
+    pub remote_running_count: usize,
+    pub remote_completed_count: usize,
+    pub remote_failed_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_latest_card_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_latest_agent_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_latest_task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -518,7 +531,14 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
     let stream = build_task_stream(&task, &events, None, None);
-    let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
+    let result = build_task_result(
+        &task,
+        &messages,
+        &artifacts,
+        &updates,
+        remote.as_ref(),
+        &stream,
+    );
 
     Ok(TaskResponse {
         task,
@@ -548,7 +568,14 @@ pub async fn get_task_detail(
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
     let stream = build_task_stream(&task, &events, None, None);
-    let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
+    let result = build_task_result(
+        &task,
+        &messages,
+        &artifacts,
+        &updates,
+        remote.as_ref(),
+        &stream,
+    );
     Ok(TaskDetailResponse {
         task,
         events,
@@ -1346,6 +1373,7 @@ fn build_task_result(
     messages: &[A2aMessage],
     artifacts: &[A2aArtifact],
     updates: &[A2aTaskUpdate],
+    remote: Option<&A2aRemoteStatus>,
     stream: &A2aTaskStream,
 ) -> A2aTaskResult {
     let latest_display_message = messages
@@ -1434,6 +1462,21 @@ fn build_task_result(
         stream_available_count: stream.available_count,
         stream_summary: stream.summary.clone(),
         latest_stream_item: stream.items.last().cloned(),
+        remote_state_label: remote.map(|value| value.state_label.clone()),
+        remote_total_invocations: remote.map(|value| value.total_invocations).unwrap_or(0),
+        remote_dispatched_count: remote.map(|value| value.dispatched_count).unwrap_or(0),
+        remote_running_count: remote.map(|value| value.running_count).unwrap_or(0),
+        remote_completed_count: remote.map(|value| value.completed_count).unwrap_or(0),
+        remote_failed_count: remote.map(|value| value.failed_count).unwrap_or(0),
+        remote_latest_card_id: remote
+            .and_then(|value| value.latest_invocation.as_ref())
+            .map(|item| item.card_id.clone()),
+        remote_latest_agent_url: remote
+            .and_then(|value| value.latest_invocation.as_ref())
+            .map(|item| item.remote_agent_url.clone()),
+        remote_latest_task_id: remote
+            .and_then(|value| value.latest_invocation.as_ref())
+            .and_then(|item| item.remote_task_id.clone()),
     }
 }
 
@@ -1559,11 +1602,11 @@ mod tests {
     use crate::agent_cards::{RemoteAgentInvocationRecord, RemoteInvocationStatus};
 
     use super::{
-        A2aArtifact, A2aMessage, A2aMessageRole, A2aPart, A2aTaskStream, A2aTaskStreamItem,
-        A2aTaskStreamSummary, A2aTaskUpdate, OrchestrationStep, StoredTask, TaskEventRecord,
-        TaskStatus, TemplateContext, WasmInstructionBinding, build_task_artifacts,
-        build_task_messages, build_task_result, build_task_state, build_task_stream,
-        build_task_updates, classify_task_stream_event, extract_text_from_value,
+        A2aArtifact, A2aMessage, A2aMessageRole, A2aPart, A2aRemoteInvocation, A2aRemoteStatus,
+        A2aTaskStream, A2aTaskStreamItem, A2aTaskStreamSummary, A2aTaskUpdate, OrchestrationStep,
+        StoredTask, TaskEventRecord, TaskStatus, TemplateContext, WasmInstructionBinding,
+        build_task_artifacts, build_task_messages, build_task_result, build_task_state,
+        build_task_stream, build_task_updates, classify_task_stream_event, extract_text_from_value,
         parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
         resolve_template_string, summarize_remote_status,
     };
@@ -1825,7 +1868,7 @@ mod tests {
         let artifacts = build_task_artifacts(&task, &events);
         let updates = build_task_updates(&events);
         let stream = build_task_stream(&task, &events, None, None);
-        let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
+        let result = build_task_result(&task, &messages, &artifacts, &updates, None, &stream);
 
         assert_eq!(result.summary, "All done");
         assert_eq!(result.status, TaskStatus::Completed);
@@ -1954,11 +1997,109 @@ mod tests {
             }],
         };
 
-        let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
+        let result = build_task_result(&task, &messages, &artifacts, &updates, None, &stream);
 
         assert_eq!(result.display_source, "artifact");
         assert_eq!(result.display_label.as_deref(), Some("report.txt"));
         assert_eq!(result.display_text, "artifact preview body");
+    }
+
+    #[test]
+    fn task_result_includes_remote_status_summary_fields() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "remote-demo".to_string(),
+            instruction: "Delegate to remote agent".to_string(),
+            status: TaskStatus::Completed,
+            linked_payment_id: None,
+            last_update_reason: "remote completed".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        };
+        let messages = vec![A2aMessage {
+            role: A2aMessageRole::Agent,
+            label: Some("task_completed".to_string()),
+            parts: vec![A2aPart::Text {
+                text: "remote done".to_string(),
+            }],
+        }];
+        let artifacts = Vec::new();
+        let updates = vec![A2aTaskUpdate {
+            event_type: "remote_invocation_completed".to_string(),
+            detail: "remote run completed".to_string(),
+            created_at_unix_ms: 2,
+            terminal: true,
+        }];
+        let stream = A2aTaskStream {
+            after: 0,
+            cursor: 1,
+            next_cursor: 1,
+            has_more: false,
+            returned_count: 1,
+            available_count: 1,
+            complete: true,
+            summary: A2aTaskStreamSummary {
+                total_items: 1,
+                terminal_items: 1,
+                latest_kind: Some("remote".to_string()),
+                latest_phase: Some("completed".to_string()),
+                latest_event_type: Some("remote_invocation_completed".to_string()),
+                kind_counts: BTreeMap::from([("remote".to_string(), 1usize)]),
+            },
+            items: vec![A2aTaskStreamItem {
+                sequence: 1,
+                kind: "remote".to_string(),
+                phase: "completed".to_string(),
+                event_type: "remote_invocation_completed".to_string(),
+                detail: "remote run completed".to_string(),
+                summary: "remote completed".to_string(),
+                created_at_unix_ms: 2,
+                terminal: true,
+            }],
+        };
+        let remote = A2aRemoteStatus {
+            state_label: "completed".to_string(),
+            total_invocations: 2,
+            dispatched_count: 0,
+            running_count: 0,
+            completed_count: 2,
+            failed_count: 0,
+            latest_updated_at_unix_ms: 2,
+            latest_invocation: Some(A2aRemoteInvocation {
+                invocation_id: Uuid::new_v4(),
+                card_id: "travel-agent".to_string(),
+                remote_agent_url: "https://agent.example.com/a2a".to_string(),
+                remote_task_id: Some("remote-123".to_string()),
+                status: RemoteInvocationStatus::Completed,
+                error: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 2,
+            }),
+            invocations: Vec::new(),
+        };
+
+        let result = build_task_result(
+            &task,
+            &messages,
+            &artifacts,
+            &updates,
+            Some(&remote),
+            &stream,
+        );
+
+        assert_eq!(result.remote_state_label.as_deref(), Some("completed"));
+        assert_eq!(result.remote_total_invocations, 2);
+        assert_eq!(result.remote_completed_count, 2);
+        assert_eq!(
+            result.remote_latest_card_id.as_deref(),
+            Some("travel-agent")
+        );
+        assert_eq!(
+            result.remote_latest_agent_url.as_deref(),
+            Some("https://agent.example.com/a2a")
+        );
+        assert_eq!(result.remote_latest_task_id.as_deref(), Some("remote-123"));
     }
 
     #[test]

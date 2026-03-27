@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     env,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     process::Command as StdCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -607,6 +607,7 @@ fn dispatch_command_future<'a>(
         "headless_audit_snapshot" => {
             Box::pin(execute_headless_audit_snapshot_command(config, envelope))
         }
+        "headless_log_audit" => Box::pin(execute_headless_log_audit_command(config, envelope)),
         "system_info" => Box::pin(execute_system_info_command(config, envelope)),
         "list_directory" => Box::pin(execute_list_directory_command(envelope)),
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
@@ -1483,6 +1484,32 @@ async fn execute_grep_files_command(envelope: GatewayCommandEnvelope) -> Command
         .get("caseSensitive")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    match build_grep_files_result(root, query, limit, max_depth, max_bytes, case_sensitive).await {
+        Ok(result) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn build_grep_files_result(
+    root: &str,
+    query: &str,
+    limit: usize,
+    max_depth: usize,
+    max_bytes: usize,
+    case_sensitive: bool,
+) -> anyhow::Result<Value> {
     let root_path = PathBuf::from(root);
     let display_root = root_path.display().to_string();
     let query_cmp = if case_sensitive {
@@ -1587,38 +1614,32 @@ async fn execute_grep_files_command(envelope: GatewayCommandEnvelope) -> Command
         .and_then(Value::as_str)
         .map(ToString::to_string);
 
-    CommandResultEnvelope {
-        message_type: "command_result",
-        command_id: envelope.command_id,
-        status: "succeeded",
-        result: Some(json!({
-            "path": display_root.clone(),
+    Ok(json!({
+        "path": display_root.clone(),
+        "query": query,
+        "limit": limit,
+        "maxDepth": max_depth,
+        "maxBytes": max_bytes,
+        "caseSensitive": case_sensitive,
+        "matches": matches,
+        "count": matches.len(),
+        "searchedDirectories": searched_directories,
+        "searchedFiles": searched_files,
+        "skippedDirectories": skipped_directories,
+        "skippedFiles": skipped_files,
+        "truncated": truncated,
+        "summary": {
             "query": query,
-            "limit": limit,
-            "maxDepth": max_depth,
-            "maxBytes": max_bytes,
-            "caseSensitive": case_sensitive,
-            "matches": matches,
-            "count": matches.len(),
+            "searchRoot": display_root,
+            "matchCount": matches.len(),
             "searchedDirectories": searched_directories,
             "searchedFiles": searched_files,
             "skippedDirectories": skipped_directories,
             "skippedFiles": skipped_files,
             "truncated": truncated,
-            "summary": {
-                "query": query,
-                "searchRoot": display_root,
-                "matchCount": matches.len(),
-                "searchedDirectories": searched_directories,
-                "searchedFiles": searched_files,
-                "skippedDirectories": skipped_directories,
-                "skippedFiles": skipped_files,
-                "truncated": truncated,
-                "firstMatch": first_match
-            }
-        })),
-        error: None,
-    }
+            "firstMatch": first_match
+        }
+    }))
 }
 
 fn build_match_preview(text: &str, query: &str, case_sensitive: bool, max_chars: usize) -> String {
@@ -1722,6 +1743,7 @@ async fn execute_headless_status_command(
                 "headless_status",
                 "headless_observe",
                 "headless_audit_snapshot",
+                "headless_log_audit",
                 "system_info",
                 "process_snapshot",
                 "directory_tree_preview",
@@ -1740,7 +1762,7 @@ async fn execute_headless_status_command(
                 "mode": "read_only_observe",
                 "requestedCapabilities": config.capabilities,
                 "interactiveCommandsBlocked": true,
-                "recommendedCommand": "headless_audit_snapshot"
+                "recommendedCommand": "headless_log_audit"
             }),
         );
     }
@@ -1908,6 +1930,130 @@ async fn execute_headless_audit_snapshot_command(
     }
 }
 
+async fn execute_headless_log_audit_command(
+    config: &NodeConfig,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let log_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+    let search_root = envelope
+        .payload
+        .get("searchRoot")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            Path::new(log_path)
+                .parent()
+                .and_then(Path::to_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(".")
+        });
+    let grep_query = envelope
+        .payload
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tail_bytes = payload_usize(&envelope.payload, "tailBytes", 4096, 65_536);
+    let grep_limit = payload_usize(&envelope.payload, "grepLimit", 12, 100);
+    let max_depth = payload_usize(&envelope.payload, "maxDepth", 3, 8);
+    let max_bytes = payload_usize(&envelope.payload, "maxBytes", 16_384, 262_144);
+    let case_sensitive = envelope
+        .payload
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let metadata = match tokio::fs::metadata(log_path).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!("failed to stat path '{}': {error}", log_path)),
+            };
+        }
+    };
+
+    let tail_preview = match build_tail_file_preview_result(log_path, tail_bytes).await {
+        Ok(result) => result,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let grep_result = match grep_query {
+        Some(query) => match build_grep_files_result(
+            search_root,
+            query,
+            grep_limit,
+            max_depth,
+            max_bytes,
+            case_sensitive,
+        )
+        .await
+        {
+            Ok(result) => Some(result),
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        },
+        None => None,
+    };
+
+    let summary = summarize_headless_log_audit(
+        log_path,
+        search_root,
+        grep_query,
+        &metadata,
+        &tail_preview,
+        grep_result.as_ref(),
+    );
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "runtimeProfile": "headless",
+            "runtimePolicy": headless_runtime_policy(),
+            "summary": summary,
+            "system": build_system_info_result(config),
+            "log": {
+                "path": log_path,
+                "isDir": metadata.is_dir(),
+                "isFile": metadata.is_file(),
+                "len": metadata.len(),
+                "readonly": metadata.permissions().readonly(),
+                "modifiedAtUnixMs": metadata.modified().ok().map(system_time_to_unix_ms),
+                "createdAtUnixMs": metadata.created().ok().map(system_time_to_unix_ms)
+            },
+            "tailPreview": tail_preview,
+            "grep": grep_result,
+            "observedAtUnixMs": unix_timestamp_ms()
+        })),
+        error: None,
+    }
+}
+
 fn headless_runtime_policy() -> Value {
     json!({
         "mode": "read_only_observe",
@@ -1924,6 +2070,7 @@ fn headless_runtime_policy() -> Value {
             "headless_status",
             "headless_observe",
             "headless_audit_snapshot",
+            "headless_log_audit",
             "system_info",
             "process_snapshot",
             "directory_tree_preview",
@@ -1934,6 +2081,40 @@ fn headless_runtime_policy() -> Value {
             "stat_path",
             "find_paths",
             "grep_files"
+        ]
+    })
+}
+
+fn summarize_headless_log_audit(
+    log_path: &str,
+    search_root: &str,
+    grep_query: Option<&str>,
+    metadata: &std::fs::Metadata,
+    tail_preview: &Value,
+    grep_result: Option<&Value>,
+) -> Value {
+    let grep_summary = grep_result.and_then(|value| value.get("summary"));
+    json!({
+        "mode": "read_only_observe",
+        "preset": "log_audit",
+        "logPath": log_path,
+        "searchRoot": search_root,
+        "logSizeBytes": metadata.len(),
+        "tailBytes": tail_preview.get("count").and_then(Value::as_u64).unwrap_or(0),
+        "grepQuery": grep_query,
+        "matchCount": grep_summary
+            .and_then(|item| item.get("matchCount"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        "firstMatch": grep_summary
+            .and_then(|item| item.get("firstMatch"))
+            .and_then(Value::as_str),
+        "recommendedNextCommands": [
+            "tail_file_preview",
+            "read_file_range",
+            "grep_files",
+            "find_paths",
+            "stat_path"
         ]
     })
 }
@@ -12446,6 +12627,7 @@ fn default_capabilities() -> Vec<String> {
         "headless_status".to_string(),
         "headless_observe".to_string(),
         "headless_audit_snapshot".to_string(),
+        "headless_log_audit".to_string(),
         "browser_start".to_string(),
         "browser_profiles".to_string(),
         "browser_profile_inspect".to_string(),
@@ -12547,6 +12729,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "headless_status".to_string(),
         "headless_observe".to_string(),
         "headless_audit_snapshot".to_string(),
+        "headless_log_audit".to_string(),
         "system_info".to_string(),
         "list_directory".to_string(),
         "directory_tree_preview".to_string(),
@@ -12630,6 +12813,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "headless_status"
             | "headless_observe"
             | "headless_audit_snapshot"
+            | "headless_log_audit"
             | "system_info"
             | "directory_tree_preview"
             | "list_directory"
@@ -13233,7 +13417,7 @@ mod tests {
         assert_eq!(result["runtimePolicy"]["mode"], "read_only_observe");
         assert_eq!(
             result["summary"]["recommendedCommand"],
-            "headless_audit_snapshot"
+            "headless_log_audit"
         );
     }
 
@@ -13304,6 +13488,46 @@ mod tests {
                 .unwrap_or_default()
                 .contains("delta")
         );
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn headless_log_audit_command_returns_tail_and_match_views() {
+        let config = base_config();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "dawn-node-headless-log-audit-{}",
+            unix_timestamp_ms()
+        ));
+        let nested_dir = temp_dir.join("nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let log_path = temp_dir.join("service.log");
+        fs::write(&log_path, "INFO boot\nERROR failed to bind\nWARN retry\n").unwrap();
+        fs::write(nested_dir.join("worker.txt"), "ERROR worker crashed\n").unwrap();
+
+        let response = execute_headless_log_audit_command(
+            &config,
+            GatewayCommandEnvelope {
+                command_id: "cmd-headless-log-audit".to_string(),
+                command_type: "headless_log_audit".to_string(),
+                payload: json!({
+                    "path": log_path.display().to_string(),
+                    "searchRoot": temp_dir.display().to_string(),
+                    "query": "ERROR",
+                    "tailBytes": 32
+                }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["runtimeProfile"], "headless");
+        assert_eq!(result["summary"]["preset"], "log_audit");
+        assert_eq!(result["summary"]["matchCount"], 2);
+        assert_eq!(result["log"]["isFile"], true);
+        assert!(result.get("tailPreview").is_some());
+        assert!(result.get("grep").is_some());
 
         fs::remove_dir_all(temp_dir).ok();
     }
@@ -14103,6 +14327,11 @@ mod tests {
                 .iter()
                 .any(|value| value == "headless_audit_snapshot")
         );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "headless_log_audit")
+        );
         assert!(capabilities.iter().any(|value| value == "browser_start"));
         assert!(capabilities.iter().any(|value| value == "browser_profiles"));
         assert!(
@@ -14551,6 +14780,11 @@ mod tests {
             capabilities
                 .iter()
                 .any(|value| value == "headless_audit_snapshot")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "headless_log_audit")
         );
         assert!(capabilities.iter().any(|value| value == "process_snapshot"));
         assert!(!capabilities.iter().any(|value| value == "browser_start"));
