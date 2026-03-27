@@ -100,6 +100,16 @@ struct WorkbenchSessionListRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchSessionInspectRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchConfigGetRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchConfigApplyRequest {
     session_token: String,
     tenant_id: String,
@@ -150,9 +160,11 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "command.run",
                     "skill.run",
                     "skill.inspect",
+                    "config.get",
                     "config.apply",
                     "logs.tail",
                     "session.list",
+                    "session.inspect",
                     "task.create",
                     "delegate.invoke",
                     "ping"
@@ -262,6 +274,10 @@ async fn handle_workbench_rpc(
             let params: WorkbenchSkillInspectRequest = parse_rpc_params(request.params)?;
             inspect_skill_inner(state, params).await
         }
+        "config.get" => {
+            let _params: WorkbenchConfigGetRequest = parse_rpc_params(request.params)?;
+            get_config_inner(state).await
+        }
         "config.apply" => {
             let params: WorkbenchConfigApplyRequest = parse_rpc_params(request.params)?;
             apply_config_inner(state, params).await
@@ -273,6 +289,10 @@ async fn handle_workbench_rpc(
         "session.list" => {
             let _params: WorkbenchSessionListRequest = parse_rpc_params(request.params)?;
             list_sessions_inner(state).await
+        }
+        "session.inspect" => {
+            let params: WorkbenchSessionInspectRequest = parse_rpc_params(request.params)?;
+            inspect_session_inner(state, params).await
         }
         "task.create" => {
             let params: WorkbenchTaskRequest = parse_rpc_params(request.params)?;
@@ -396,6 +416,13 @@ async fn apply_config_inner(
     Ok(json!(response))
 }
 
+async fn get_config_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
+    let workspace = identity::ensure_workspace_profile(&state).await?;
+    Ok(json!({
+        "workspace": workspace
+    }))
+}
+
 async fn tail_logs_inner(
     state: Arc<AppState>,
     request: WorkbenchLogsRequest,
@@ -413,6 +440,24 @@ async fn list_sessions_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
     Ok(json!({
         "sessions": sessions,
         "count": sessions.len(),
+    }))
+}
+
+async fn inspect_session_inner(
+    state: Arc<AppState>,
+    request: WorkbenchSessionInspectRequest,
+) -> anyhow::Result<Value> {
+    let session_id = request.session_id.trim();
+    if session_id.is_empty() {
+        anyhow::bail!("sessionId is required");
+    }
+    let sessions = identity::list_operator_session_records(&state).await?;
+    let session = sessions
+        .into_iter()
+        .find(|record| record.session_id.to_string() == session_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown operator session: {session_id}"))?;
+    Ok(json!({
+        "session": session
     }))
 }
 
@@ -495,8 +540,10 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("/app/ws"));
         assert!(CONTROL_UI_HTML.contains("skill.run"));
         assert!(CONTROL_UI_HTML.contains("skill.inspect"));
+        assert!(CONTROL_UI_HTML.contains("config.get"));
         assert!(CONTROL_UI_HTML.contains("config.apply"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));
+        assert!(CONTROL_UI_HTML.contains("session.inspect"));
     }
 }

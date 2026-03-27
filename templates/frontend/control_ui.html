@@ -571,6 +571,7 @@
               <h3 style="margin-bottom: 12px;">Recent Sessions</h3>
               <div class="list" id="session-list"></div>
               <div class="footer-note" id="session-list-note">等待 operator session 列表。</div>
+              <div class="notice" id="session-inspect-notice" style="margin-top: 12px;">点击“查看详情”可检查 session 的最近活跃状态。</div>
             </div>
           </div>
           <div class="split" style="margin-top: 18px;">
@@ -584,6 +585,7 @@
               <div class="list" id="skill-feedback-list"></div>
               <div class="footer-note" id="skill-feedback-note">最近一次技能执行结果会显示在这里。</div>
               <div class="notice" id="skill-inspect-notice" style="margin-top: 12px;">点击原生技能的“查看说明”会在这里显示详情。</div>
+              <div class="notice" id="config-snapshot-notice" style="margin-top: 12px;">当前工作区的 live 配置快照会显示在这里。</div>
             </div>
           </div>
         </section>
@@ -1057,6 +1059,25 @@
         : "等待工作台日志流。";
     }
 
+    function renderConfigSnapshot(workspace) {
+      const liveWorkspace = workspace || state.workspace || null;
+      if (!liveWorkspace) {
+        setNotice("config-snapshot-notice", "", "当前还没有可展示的 workspace 配置快照。");
+        return;
+      }
+      const models = Array.isArray(liveWorkspace.defaultModelProviders) && liveWorkspace.defaultModelProviders.length
+        ? liveWorkspace.defaultModelProviders.join(", ")
+        : "<none>";
+      const chats = Array.isArray(liveWorkspace.defaultChatPlatforms) && liveWorkspace.defaultChatPlatforms.length
+        ? liveWorkspace.defaultChatPlatforms.join(", ")
+        : "<none>";
+      setNotice(
+        "config-snapshot-notice",
+        "success",
+        `workspace=${liveWorkspace.displayName || "default"} · tenant=${liveWorkspace.tenantId || "n/a"} · project=${liveWorkspace.projectId || "n/a"}\nmodels=${models}\nchat=${chats}`
+      );
+    }
+
     function renderSessions(payload) {
       const sessions = Array.isArray(payload)
         ? payload
@@ -1074,6 +1095,9 @@
                 <span>${formatTime(session.lastSeenAtUnixMs)}</span>
               </div>
               <div class="footer-note">created ${formatTime(session.createdAtUnixMs)}</div>
+              <div class="inline-actions" style="margin-top: 10px;">
+                <button class="chip-button" type="button" data-session-inspect="${escapeHtml(session.sessionId || "")}">查看详情</button>
+              </div>
             </article>
           `).join("")
         : `<div class="empty">没有可见的 operator session。</div>`;
@@ -1178,6 +1202,9 @@
       const sessionsPromise = streamSupportsRpc()
         ? callWorkbenchRpc("session.list", {})
         : fetchJson("/api/gateway/identity/sessions");
+      const configPromise = streamSupportsRpc()
+        ? callWorkbenchRpc("config.get", {})
+        : fetchJson("/api/gateway/identity/workspace");
       const responses = await Promise.allSettled([
         fetchJson("/api/gateway/identity/status"),
         fetchJson("/api/gateway/connectors/status"),
@@ -1191,10 +1218,11 @@
         fetchJson("/api/gateway/ingress/events?limit=8"),
         fetchJson("/api/gateway/agent-cards/invocations"),
         sessionsPromise,
-        logsPromise
+        logsPromise,
+        configPromise
       ]);
 
-      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, sessions, workbenchLogs] = responses.map((item) =>
+      const [identityStatus, connectorStatus, tasks, approvals, pairings, ingressStatus, nodes, cards, skills, ingress, invocations, sessions, workbenchLogs, configSnapshot] = responses.map((item) =>
         item.status === "fulfilled" ? item.value : null
       );
       state.ingressStatus = ingressStatus || null;
@@ -1215,6 +1243,7 @@
       renderInvocations(invocations || []);
       renderSessions(sessions || []);
       renderWorkbenchLogs(workbenchLogs || { events: state.workbenchLogs });
+      renderConfigSnapshot(configSnapshot?.workspace || configSnapshot || null);
       updateRefreshStamp(`最后刷新：${new Date().toLocaleString("zh-CN", { hour12: false })}`);
     }
 
@@ -1386,6 +1415,7 @@
               body: JSON.stringify(payload)
             });
         applyWorkspaceToForm(response.workspace || null);
+        renderConfigSnapshot(response.workspace || null);
         setNotice("workspace-notice", "success", `工作区已更新，actor = ${response.actor || state.operatorName}`);
         await refreshDashboard();
       } catch (error) {
@@ -1546,6 +1576,30 @@
       }
     }
 
+    async function handleSessionInspect(sessionId) {
+      if (!sessionId) {
+        setNotice("session-inspect-notice", "error", "缺少 sessionId。");
+        return;
+      }
+      try {
+        const response = streamSupportsRpc()
+          ? await callWorkbenchRpc("session.inspect", { sessionId })
+          : { session: state.sessions.find((item) => item.sessionId === sessionId) || null };
+        const session = response?.session || null;
+        if (!session) {
+          setNotice("session-inspect-notice", "error", `没有找到 session ${sessionId}。`);
+          return;
+        }
+        setNotice(
+          "session-inspect-notice",
+          session.revoked ? "warn" : "success",
+          `operator=${session.operatorName || "operator"} · session=${session.sessionId}\nstatus=${session.revoked ? "revoked" : "active"} · created=${formatTime(session.createdAtUnixMs)} · lastSeen=${formatTime(session.lastSeenAtUnixMs)}`
+        );
+      } catch (error) {
+        setNotice("session-inspect-notice", "error", `session 详情读取失败：${error.message}`);
+      }
+    }
+
     async function handleApprovalAction(action, approvalId) {
       const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
       const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
@@ -1621,6 +1675,11 @@
         if (inspectTarget) {
           handleNativeSkillInspect(inspectTarget.dataset.nativeSkillInspect);
         }
+      });
+      $("session-list").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-session-inspect]");
+        if (!target) return;
+        handleSessionInspect(target.dataset.sessionInspect);
       });
     }
 
