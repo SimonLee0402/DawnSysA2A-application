@@ -45,6 +45,7 @@ struct NodeConfig {
     gateway_ws_url: String,
     node_id: String,
     node_name: String,
+    node_profile: String,
     capabilities: Vec<String>,
     claim_token: Option<String>,
     allow_shell: bool,
@@ -549,6 +550,20 @@ fn dispatch_command_future<'a>(
     envelope: GatewayCommandEnvelope,
 ) -> Pin<Box<dyn Future<Output = CommandResultEnvelope> + 'a>> {
     let command_type = envelope.command_type.clone();
+    if !is_command_allowed_for_runtime_profile(&config.node_profile, &command_type) {
+        return Box::pin(async move {
+            CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(format!(
+                    "runtime profile `{}` does not allow command type `{}`",
+                    config.node_profile, command_type
+                )),
+            }
+        });
+    }
     match command_type.as_str() {
         "echo" => Box::pin(async move {
             CommandResultEnvelope {
@@ -566,6 +581,7 @@ fn dispatch_command_future<'a>(
                 status: "succeeded",
                 result: Some(json!({
                     "nodeId": config.node_id,
+                    "nodeProfile": config.node_profile,
                     "capabilities": config.capabilities,
                     "allowShell": config.allow_shell
                 })),
@@ -580,6 +596,7 @@ fn dispatch_command_future<'a>(
                 result: Some(json!({
                     "nodeId": config.node_id,
                     "nodeName": config.node_name,
+                    "nodeProfile": config.node_profile,
                     "observedAtUnixMs": unix_timestamp_ms()
                 })),
                 error: None,
@@ -11497,6 +11514,12 @@ async fn launch_browser_url(url: &str) -> anyhow::Result<&'static str> {
 
 fn load_config() -> NodeConfig {
     let profile = profile::load_profile_or_default();
+    let node_profile = env::var("DAWN_NODE_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .or_else(|| profile.node_profile.clone())
+        .unwrap_or_else(|| "desktop".to_string());
     let node_id = env::var("DAWN_NODE_ID")
         .ok()
         .or_else(|| profile.node_id.clone())
@@ -11519,7 +11542,7 @@ fn load_config() -> NodeConfig {
         .filter(|value| !value.is_empty())
         .or_else(|| profile.claim_token.clone());
     let allow_shell = resolve_allow_shell(&profile);
-    let capabilities = resolve_node_capabilities(&profile, allow_shell);
+    let capabilities = resolve_node_capabilities(&profile, allow_shell, &node_profile);
     let enforce_trusted_rollout = env::var("DAWN_NODE_ENFORCE_TRUSTED_ROLLOUT")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
@@ -11540,6 +11563,7 @@ fn load_config() -> NodeConfig {
         gateway_ws_url,
         node_id,
         node_name,
+        node_profile,
         capabilities,
         claim_token,
         allow_shell,
@@ -11678,6 +11702,21 @@ fn parse_capability_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn headless_default_capabilities() -> Vec<String> {
+    vec![
+        "echo".to_string(),
+        "list_capabilities".to_string(),
+        "agent_ping".to_string(),
+        "headless_status".to_string(),
+        "headless_observe".to_string(),
+        "system_info".to_string(),
+        "list_directory".to_string(),
+        "read_file_preview".to_string(),
+        "stat_path".to_string(),
+        "process_snapshot".to_string(),
+    ]
+}
+
 fn resolve_allow_shell(profile: &profile::DawnCliProfile) -> bool {
     env::var("DAWN_NODE_ALLOW_SHELL")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -11689,7 +11728,18 @@ fn resolve_allow_shell(profile: &profile::DawnCliProfile) -> bool {
         })
 }
 
-fn resolve_node_capabilities(profile: &profile::DawnCliProfile, allow_shell: bool) -> Vec<String> {
+fn default_capabilities_for_profile(profile_name: &str) -> Vec<String> {
+    match profile_name {
+        "headless" => headless_default_capabilities(),
+        _ => default_capabilities(),
+    }
+}
+
+fn resolve_node_capabilities(
+    profile: &profile::DawnCliProfile,
+    allow_shell: bool,
+    node_profile: &str,
+) -> Vec<String> {
     let capabilities = env::var("DAWN_NODE_CAPABILITIES")
         .map(|raw| parse_capability_list(&raw))
         .ok()
@@ -11700,11 +11750,15 @@ fn resolve_node_capabilities(profile: &profile::DawnCliProfile, allow_shell: boo
                 Some(profile.requested_capabilities.clone())
             }
         })
-        .unwrap_or_else(default_capabilities);
-    normalize_capabilities(capabilities, allow_shell)
+        .unwrap_or_else(|| default_capabilities_for_profile(node_profile));
+    normalize_capabilities(capabilities, allow_shell, node_profile)
 }
 
-fn normalize_capabilities(mut capabilities: Vec<String>, allow_shell: bool) -> Vec<String> {
+fn normalize_capabilities(
+    mut capabilities: Vec<String>,
+    allow_shell: bool,
+    node_profile: &str,
+) -> Vec<String> {
     if allow_shell {
         if !capabilities.iter().any(|value| value == "shell_exec") {
             capabilities.push("shell_exec".to_string());
@@ -11712,9 +11766,32 @@ fn normalize_capabilities(mut capabilities: Vec<String>, allow_shell: bool) -> V
     } else {
         capabilities.retain(|value| value != "shell_exec");
     }
+    if node_profile == "headless" {
+        let allowed = headless_default_capabilities();
+        capabilities.retain(|value| allowed.iter().any(|allowed_value| allowed_value == value));
+    }
     capabilities.sort();
     capabilities.dedup();
     capabilities
+}
+
+fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str) -> bool {
+    if node_profile != "headless" {
+        return true;
+    }
+    matches!(
+        command_type,
+        "echo"
+            | "list_capabilities"
+            | "agent_ping"
+            | "headless_status"
+            | "headless_observe"
+            | "system_info"
+            | "list_directory"
+            | "read_file_preview"
+            | "stat_path"
+            | "process_snapshot"
+    )
 }
 
 fn load_signing_seed(node_id: &str) -> ([u8; 32], bool) {
@@ -12080,6 +12157,7 @@ mod tests {
                 .to_string(),
             node_id: "node-test".to_string(),
             node_name: "Node Test".to_string(),
+            node_profile: "desktop".to_string(),
             capabilities: vec!["agent_ping".to_string()],
             claim_token: None,
             allow_shell: false,
@@ -13366,7 +13444,7 @@ mod tests {
             ..Default::default()
         };
 
-        let capabilities = resolve_node_capabilities(&profile, false);
+        let capabilities = resolve_node_capabilities(&profile, false, "desktop");
 
         assert!(
             capabilities
@@ -13375,5 +13453,49 @@ mod tests {
         );
         assert!(capabilities.iter().any(|value| value == "system_info"));
         assert!(!capabilities.iter().any(|value| value == "shell_exec"));
+    }
+
+    #[test]
+    fn resolves_headless_defaults_when_profile_requests_none() {
+        let profile = profile::DawnCliProfile {
+            node_profile: Some("headless".to_string()),
+            ..Default::default()
+        };
+
+        let capabilities = resolve_node_capabilities(&profile, false, "headless");
+
+        assert!(capabilities.iter().any(|value| value == "headless_status"));
+        assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(capabilities.iter().any(|value| value == "process_snapshot"));
+        assert!(!capabilities.iter().any(|value| value == "browser_start"));
+        assert!(!capabilities.iter().any(|value| value == "desktop_notification"));
+    }
+
+    #[tokio::test]
+    async fn headless_runtime_rejects_interactive_commands() {
+        let mut config = base_config();
+        config.node_profile = "headless".to_string();
+        config.capabilities = headless_default_capabilities();
+        let mut runtime_state = NodeRuntimeState::default();
+
+        let response = dispatch_command_future(
+            &config,
+            &mut runtime_state,
+            GatewayCommandEnvelope {
+                command_id: "cmd-headless-browser-open".to_string(),
+                command_type: "browser_open".to_string(),
+                payload: json!({"url": "https://example.com"}),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status, "failed");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("runtime profile `headless` does not allow command type `browser_open`")
+        );
     }
 }
