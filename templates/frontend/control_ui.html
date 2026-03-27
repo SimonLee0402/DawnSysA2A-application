@@ -932,6 +932,7 @@
                   ? `<div class="inline-actions">
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_status">状态探查</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_observe">只读观察</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_audit_snapshot">快速巡检</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="process_snapshot">进程快照</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="list_directory">列目录</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="directory_tree_preview">目录树</button>
@@ -1712,10 +1713,13 @@
         const remote = response?.remote || null;
         const streamItems = Array.isArray(stream?.items) ? stream.items : [];
         const latestStreamItem = streamItems.length ? streamItems[streamItems.length - 1] : null;
-        const latestMessage = result?.latestMessageText
+        const latestMessage = result?.displayText
+          || result?.latestMessageText
           || result?.latestMessage?.parts?.find((part) => part.kind === "text")?.text
           || result?.summary
           || "";
+        const displaySource = result?.displaySource ? `\ndisplay.source=${result.displaySource}` : "";
+        const displayLabel = result?.displayLabel ? `\ndisplay.label=${result.displayLabel}` : "";
         const updateCount = Array.isArray(response?.updates) ? response.updates.length : 0;
         const artifactNames = Array.isArray(response?.artifacts) && response.artifacts.length
           ? response.artifacts.map((item) => item.name).filter(Boolean).join(", ")
@@ -1751,7 +1755,7 @@
         setNotice(
           "task-inspect-notice",
           stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
-          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${latestLabel}${latestUpdate}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${artifactPreview}${resultLabels}${remoteSummary}${streamSummary}`
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${displaySource}${displayLabel}${latestLabel}${latestUpdate}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${artifactPreview}${resultLabels}${remoteSummary}${streamSummary}`
         );
       } catch (error) {
         setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);
@@ -1789,6 +1793,15 @@
         if (limit === null) return;
         const parsed = Number(limit);
         payload.limit = Number.isFinite(parsed) && parsed > 0 ? parsed : 8;
+      } else if (commandType === "headless_audit_snapshot") {
+        const path = window.prompt("输入巡检根路径", "D:\\Agent2Agent应用");
+        if (path === null) return;
+        const logPath = window.prompt("可选：输入要附带查看尾部的日志文件路径（留空跳过）", "");
+        if (logPath === null) return;
+        payload.path = path;
+        if (logPath.trim()) {
+          payload.tailPath = logPath.trim();
+        }
       } else if (commandType === "list_directory" || commandType === "stat_path" || commandType === "read_file_preview" || commandType === "tail_file_preview") {
         const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
         if (path === null) return;
@@ -1836,6 +1849,8 @@
           : (result?.summary || "");
         const headline = commandType === "process_snapshot"
           ? `processes=${Number(result?.count || result?.processSnapshot?.count || 0)}`
+            : commandType === "headless_audit_snapshot"
+              ? `processes=${Number(result?.summary?.processCount || result?.processSnapshot?.count || 0)} · tree=${Number(result?.summary?.directoryTree?.entryCount || result?.directoryTree?.count || 0)}${result?.tailPreview ? " · tail=on" : ""}`
             : commandType === "list_directory"
               ? `entries=${Number(result?.count || result?.directory?.count || 0)}`
             : commandType === "directory_tree_preview"

@@ -588,6 +588,7 @@ async fn node_observe_inner(
         command_type,
         "headless_status"
             | "headless_observe"
+            | "headless_audit_snapshot"
             | "system_info"
             | "process_snapshot"
             | "list_directory"

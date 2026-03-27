@@ -2192,8 +2192,8 @@ fn runtime_policy_payload(node_profile: &str, requested_capabilities: &[String])
             "mode": "read_only_observe",
             "interactiveCommandsBlocked": true,
             "blockedClasses": ["desktop_interaction", "managed_browser", "shell_exec"],
-            "entrypoints": ["headless_status", "headless_observe"],
-                    "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "directory_tree_preview", "read_file_preview", "tail_file_preview", "read_file_range", "stat_path", "find_paths", "grep_files"],
+            "entrypoints": ["headless_status", "headless_observe", "headless_audit_snapshot"],
+                    "recommendedCommands": ["system_info", "process_snapshot", "headless_audit_snapshot", "list_directory", "directory_tree_preview", "read_file_preview", "tail_file_preview", "read_file_range", "stat_path", "find_paths", "grep_files"],
             "requestedCapabilities": requested_capabilities,
         }),
         _ => json!({
@@ -2232,9 +2232,11 @@ fn print_node_profile_summary(profile: &DawnCliProfile) -> anyhow::Result<()> {
     );
     println!("Runtime policy: {}", runtime_policy_summary(node_profile));
     if node_profile == "headless" {
-        println!("Headless entrypoints: headless_status, headless_observe");
         println!(
-            "Headless tools: process_snapshot, list_directory, directory_tree_preview, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
+            "Headless entrypoints: headless_status, headless_observe, headless_audit_snapshot"
+        );
+        println!(
+            "Headless tools: process_snapshot, headless_audit_snapshot, list_directory, directory_tree_preview, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
         );
         println!("Tip: run `dawn-node node status` to inspect the headless runtime preset.");
     }
@@ -3584,9 +3586,11 @@ fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Res
     );
     println!("Runtime policy: {}", runtime_policy_summary(node_profile));
     if node_profile == "headless" {
-        println!("Headless entrypoints: headless_status, headless_observe");
         println!(
-            "Headless tools: process_snapshot, list_directory, directory_tree_preview, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
+            "Headless entrypoints: headless_status, headless_observe, headless_audit_snapshot"
+        );
+        println!(
+            "Headless tools: process_snapshot, headless_audit_snapshot, list_directory, directory_tree_preview, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
         );
     }
     Ok(())
@@ -7279,6 +7283,7 @@ fn default_requested_capabilities_for_profile(
             "echo".to_string(),
             "headless_status".to_string(),
             "headless_observe".to_string(),
+            "headless_audit_snapshot".to_string(),
             "list_capabilities".to_string(),
             "list_directory".to_string(),
             "directory_tree_preview".to_string(),
@@ -7295,6 +7300,7 @@ fn default_requested_capabilities_for_profile(
             "agent_ping".to_string(),
             "headless_status".to_string(),
             "headless_observe".to_string(),
+            "headless_audit_snapshot".to_string(),
             "browser_start".to_string(),
             "browser_profiles".to_string(),
             "browser_profile_inspect".to_string(),
@@ -7752,6 +7758,11 @@ mod tests {
         assert!(
             capabilities
                 .iter()
+                .any(|value| value == "headless_audit_snapshot")
+        );
+        assert!(
+            capabilities
+                .iter()
                 .any(|value| value == "directory_tree_preview")
         );
         assert!(capabilities.iter().any(|value| value == "grep_files"));
@@ -7791,8 +7802,14 @@ mod tests {
 
         assert!(capabilities.iter().any(|value| value == "headless_status"));
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "headless_audit_snapshot")
+        );
         assert!(preview.contains("headless_status"));
         assert!(preview.contains("headless_observe"));
+        assert!(preview.contains("headless_audit_snapshot"));
     }
 
     #[test]
@@ -7817,11 +7834,25 @@ mod tests {
                 .any(|value| value == "headless_observe")
         );
         assert!(
+            policy["entrypoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "headless_audit_snapshot")
+        );
+        assert!(
             policy["recommendedCommands"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|value| value == "directory_tree_preview")
+        );
+        assert!(
+            policy["recommendedCommands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "headless_audit_snapshot")
         );
         assert!(
             policy["recommendedCommands"]

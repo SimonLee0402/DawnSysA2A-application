@@ -84,6 +84,10 @@ pub struct A2aTaskResult {
     pub status: TaskStatus,
     pub complete: bool,
     pub updated_at_unix_ms: u128,
+    pub display_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
+    pub display_text: String,
     pub last_event_type: Option<String>,
     pub latest_update_type: Option<String>,
     pub latest_update_detail: Option<String>,
@@ -1344,13 +1348,20 @@ fn build_task_result(
     updates: &[A2aTaskUpdate],
     stream: &A2aTaskStream,
 ) -> A2aTaskResult {
-    let latest_message = messages.last().cloned();
+    let latest_display_message = messages
+        .iter()
+        .rev()
+        .find(|message| message.label.as_deref() != Some("instruction"))
+        .cloned();
+    let latest_message = latest_display_message
+        .clone()
+        .or_else(|| messages.last().cloned());
     let complete = matches!(task.status, TaskStatus::Completed | TaskStatus::Failed);
     let latest_update = updates.last();
-    let latest_message_label = latest_message
+    let latest_message_label = latest_display_message
         .as_ref()
         .and_then(|message| message.label.clone());
-    let latest_message_text = latest_message.as_ref().and_then(|message| {
+    let latest_message_text = latest_display_message.as_ref().and_then(|message| {
         message.parts.iter().find_map(|part| match part {
             A2aPart::Text { text } => Some(text.clone()),
             A2aPart::Data { .. } => None,
@@ -1365,19 +1376,33 @@ fn build_task_result(
             }
         })
     });
-    let summary = latest_message_text
-        .clone()
-        .unwrap_or_else(|| task.last_update_reason.clone());
     let primary_artifact_name = artifacts.first().map(|artifact| artifact.name.clone());
     let primary_artifact_mime_type = artifacts.first().map(|artifact| artifact.mime_type.clone());
     let primary_artifact_preview = artifacts
         .first()
         .and_then(summarize_primary_artifact_preview);
+    let summary = latest_message_text
+        .clone()
+        .or_else(|| primary_artifact_preview.clone())
+        .or_else(|| latest_update.map(|update| update.detail.clone()))
+        .unwrap_or_else(|| task.last_update_reason.clone());
+    let (display_source, display_label, display_text) = build_task_result_display_payload(
+        &summary,
+        latest_message_label.clone(),
+        latest_message_text.clone(),
+        latest_update,
+        primary_artifact_name.clone(),
+        primary_artifact_preview.clone(),
+        last_event_type.clone(),
+    );
     A2aTaskResult {
         summary,
         status: task.status,
         complete,
         updated_at_unix_ms: task.updated_at_unix_ms,
+        display_source,
+        display_label,
+        display_text,
         last_event_type,
         latest_update_type: latest_update.map(|update| update.event_type.clone()),
         latest_update_detail: latest_update.map(|update| update.detail.clone()),
@@ -1410,6 +1435,34 @@ fn build_task_result(
         stream_summary: stream.summary.clone(),
         latest_stream_item: stream.items.last().cloned(),
     }
+}
+
+fn build_task_result_display_payload(
+    summary: &str,
+    latest_message_label: Option<String>,
+    latest_message_text: Option<String>,
+    latest_update: Option<&A2aTaskUpdate>,
+    primary_artifact_name: Option<String>,
+    primary_artifact_preview: Option<String>,
+    last_event_type: Option<String>,
+) -> (String, Option<String>, String) {
+    if let Some(text) = latest_message_text.filter(|value| !value.trim().is_empty()) {
+        return ("message".to_string(), latest_message_label, text);
+    }
+
+    if let Some(preview) = primary_artifact_preview.filter(|value| !value.trim().is_empty()) {
+        return ("artifact".to_string(), primary_artifact_name, preview);
+    }
+
+    if let Some(update) = latest_update.filter(|value| !value.detail.trim().is_empty()) {
+        return (
+            "update".to_string(),
+            Some(update.event_type.clone()),
+            update.detail.clone(),
+        );
+    }
+
+    ("summary".to_string(), last_event_type, summary.to_string())
 }
 
 fn summarize_primary_artifact_preview(artifact: &A2aArtifact) -> Option<String> {
@@ -1499,17 +1552,20 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use crate::agent_cards::{RemoteAgentInvocationRecord, RemoteInvocationStatus};
 
     use super::{
-        A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
-        TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
-        build_task_result, build_task_state, build_task_stream, build_task_updates,
-        classify_task_stream_event, extract_text_from_value, parse_orchestration_plan,
-        parse_wasm_instruction, resolve_json_templates, resolve_template_string,
-        summarize_remote_status,
+        A2aArtifact, A2aMessage, A2aMessageRole, A2aPart, A2aTaskStream, A2aTaskStreamItem,
+        A2aTaskStreamSummary, A2aTaskUpdate, OrchestrationStep, StoredTask, TaskEventRecord,
+        TaskStatus, TemplateContext, WasmInstructionBinding, build_task_artifacts,
+        build_task_messages, build_task_result, build_task_state, build_task_stream,
+        build_task_updates, classify_task_stream_event, extract_text_from_value,
+        parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
+        resolve_template_string, summarize_remote_status,
     };
     use uuid::Uuid;
 
@@ -1775,6 +1831,9 @@ mod tests {
         assert_eq!(result.status, TaskStatus::Completed);
         assert!(result.complete);
         assert_eq!(result.updated_at_unix_ms, 2);
+        assert_eq!(result.display_source, "message");
+        assert_eq!(result.display_label.as_deref(), Some("task_completed"));
+        assert_eq!(result.display_text, "All done");
         assert_eq!(result.latest_update_type.as_deref(), Some("task_completed"));
         assert_eq!(result.latest_update_detail.as_deref(), Some("All done"));
         assert_eq!(
@@ -1832,6 +1891,74 @@ mod tests {
                 .map(|item| item.event_type.as_str()),
             Some("task_completed")
         );
+    }
+
+    #[test]
+    fn task_result_display_payload_falls_back_to_artifact_preview() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "artifact-demo".to_string(),
+            instruction: "Inspect generated artifact".to_string(),
+            status: TaskStatus::Completed,
+            linked_payment_id: None,
+            last_update_reason: "artifact ready".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 4,
+        };
+        let messages = vec![A2aMessage {
+            role: A2aMessageRole::User,
+            parts: vec![A2aPart::Text {
+                text: task.instruction.clone(),
+            }],
+            label: Some("instruction".to_string()),
+        }];
+        let artifacts = vec![A2aArtifact {
+            name: "report.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            parts: vec![A2aPart::Text {
+                text: "artifact preview body".to_string(),
+            }],
+        }];
+        let updates = vec![A2aTaskUpdate {
+            event_type: "task_completed".to_string(),
+            detail: "artifact ready".to_string(),
+            created_at_unix_ms: 4,
+            terminal: true,
+        }];
+        let stream = A2aTaskStream {
+            after: 0,
+            cursor: 1,
+            next_cursor: 1,
+            has_more: false,
+            returned_count: 1,
+            available_count: 1,
+            complete: true,
+            summary: A2aTaskStreamSummary {
+                total_items: 1,
+                terminal_items: 1,
+                latest_kind: Some("result".to_string()),
+                latest_phase: Some("completed".to_string()),
+                latest_event_type: Some("task_completed".to_string()),
+                kind_counts: BTreeMap::from([(String::from("result"), 1usize)]),
+            },
+            items: vec![A2aTaskStreamItem {
+                sequence: 1,
+                kind: "result".to_string(),
+                phase: "completed".to_string(),
+                event_type: "task_completed".to_string(),
+                detail: "artifact ready".to_string(),
+                summary: "artifact ready".to_string(),
+                created_at_unix_ms: 4,
+                terminal: true,
+            }],
+        };
+
+        let result = build_task_result(&task, &messages, &artifacts, &updates, &stream);
+
+        assert_eq!(result.display_source, "artifact");
+        assert_eq!(result.display_label.as_deref(), Some("report.txt"));
+        assert_eq!(result.display_text, "artifact preview body");
     }
 
     #[test]

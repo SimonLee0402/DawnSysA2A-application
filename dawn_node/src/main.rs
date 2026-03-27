@@ -604,6 +604,9 @@ fn dispatch_command_future<'a>(
         }),
         "headless_status" => Box::pin(execute_headless_status_command(config, envelope)),
         "headless_observe" => Box::pin(execute_headless_observe_command(config, envelope)),
+        "headless_audit_snapshot" => {
+            Box::pin(execute_headless_audit_snapshot_command(config, envelope))
+        }
         "system_info" => Box::pin(execute_system_info_command(config, envelope)),
         "list_directory" => Box::pin(execute_list_directory_command(envelope)),
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
@@ -993,28 +996,13 @@ async fn execute_directory_tree_preview_command(
         .unwrap_or(".");
     let max_depth = payload_usize(&envelope.payload, "maxDepth", 2, 5);
     let limit = payload_usize(&envelope.payload, "limit", 40, 200);
-    let root = PathBuf::from(path);
-    let display_path = root.display().to_string();
 
-    match build_directory_tree_preview(&root, max_depth, limit) {
-        Ok((entries, truncated, file_count, directory_count)) => CommandResultEnvelope {
+    match build_directory_tree_preview_result(path, max_depth, limit) {
+        Ok(result) => CommandResultEnvelope {
             message_type: "command_result",
             command_id: envelope.command_id,
             status: "succeeded",
-            result: Some(json!({
-                "path": display_path,
-                "entries": entries,
-                "count": entries.len(),
-                "truncated": truncated,
-                "summary": {
-                    "rootPath": display_path,
-                    "entryCount": entries.len(),
-                    "fileCount": file_count,
-                    "directoryCount": directory_count,
-                    "maxDepth": max_depth,
-                    "truncated": truncated
-                }
-            })),
+            result: Some(result),
             error: None,
         },
         Err(error) => CommandResultEnvelope {
@@ -1024,10 +1012,35 @@ async fn execute_directory_tree_preview_command(
             result: None,
             error: Some(format!(
                 "failed to build directory tree preview '{}': {error}",
-                display_path
+                path
             )),
         },
     }
+}
+
+fn build_directory_tree_preview_result(
+    path: &str,
+    max_depth: usize,
+    limit: usize,
+) -> anyhow::Result<Value> {
+    let root = PathBuf::from(path);
+    let display_path = root.display().to_string();
+    let (entries, truncated, file_count, directory_count) =
+        build_directory_tree_preview(&root, max_depth, limit)?;
+    Ok(json!({
+        "path": display_path,
+        "entries": entries,
+        "count": entries.len(),
+        "truncated": truncated,
+        "summary": {
+            "rootPath": display_path,
+            "entryCount": entries.len(),
+            "fileCount": file_count,
+            "directoryCount": directory_count,
+            "maxDepth": max_depth,
+            "truncated": truncated
+        }
+    }))
 }
 
 fn build_directory_tree_preview(
@@ -1185,34 +1198,39 @@ async fn execute_tail_file_preview_command(
     };
 
     let max_bytes = payload_usize(&envelope.payload, "maxBytes", 4096, 65_536);
-    match tokio::fs::read(path).await {
-        Ok(bytes) => {
-            let preview_start = bytes.len().saturating_sub(max_bytes);
-            let preview_bytes = &bytes[preview_start..];
-            let preview = String::from_utf8_lossy(preview_bytes).to_string();
-            CommandResultEnvelope {
-                message_type: "command_result",
-                command_id: envelope.command_id,
-                status: "succeeded",
-                result: Some(json!({
-                    "path": path,
-                    "sizeBytes": bytes.len(),
-                    "preview": preview,
-                    "previewBytes": preview_bytes.len(),
-                    "tailStartByte": preview_start,
-                    "truncated": preview_start > 0
-                })),
-                error: None,
-            }
-        }
+    match build_tail_file_preview_result(path, max_bytes).await {
+        Ok(result) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(result),
+            error: None,
+        },
         Err(error) => CommandResultEnvelope {
             message_type: "command_result",
             command_id: envelope.command_id,
             status: "failed",
             result: None,
-            error: Some(format!("failed to read file '{}': {error}", path)),
+            error: Some(error.to_string()),
         },
     }
+}
+
+async fn build_tail_file_preview_result(path: &str, max_bytes: usize) -> anyhow::Result<Value> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to read file '{}': {error}", path))?;
+    let preview_start = bytes.len().saturating_sub(max_bytes);
+    let preview_bytes = &bytes[preview_start..];
+    let preview = String::from_utf8_lossy(preview_bytes).to_string();
+    Ok(json!({
+        "path": path,
+        "sizeBytes": bytes.len(),
+        "preview": preview,
+        "previewBytes": preview_bytes.len(),
+        "tailStartByte": preview_start,
+        "truncated": preview_start > 0
+    }))
 }
 
 async fn execute_read_file_range_command(
@@ -1703,6 +1721,7 @@ async fn execute_headless_status_command(
             json!([
                 "headless_status",
                 "headless_observe",
+                "headless_audit_snapshot",
                 "system_info",
                 "process_snapshot",
                 "directory_tree_preview",
@@ -1721,7 +1740,7 @@ async fn execute_headless_status_command(
                 "mode": "read_only_observe",
                 "requestedCapabilities": config.capabilities,
                 "interactiveCommandsBlocked": true,
-                "recommendedCommand": "headless_observe"
+                "recommendedCommand": "headless_audit_snapshot"
             }),
         );
     }
@@ -1800,6 +1819,95 @@ async fn execute_headless_observe_command(
     }
 }
 
+async fn execute_headless_audit_snapshot_command(
+    config: &NodeConfig,
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let process_limit = payload_usize(&envelope.payload, "processLimit", 8, 100);
+    let directory_path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+    let tree_depth = payload_usize(&envelope.payload, "treeDepth", 2, 5);
+    let tree_limit = payload_usize(&envelope.payload, "treeLimit", 30, 200);
+    let tail_bytes = payload_usize(&envelope.payload, "tailBytes", 2048, 65_536);
+    let tail_path = envelope
+        .payload
+        .get("tailPath")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string);
+
+    let process_snapshot = match build_process_snapshot_result(process_limit) {
+        Ok(result) => result,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let directory_tree =
+        match build_directory_tree_preview_result(directory_path, tree_depth, tree_limit) {
+            Ok(result) => result,
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+
+    let tail_preview = match tail_path.as_deref() {
+        Some(path) => match build_tail_file_preview_result(path, tail_bytes).await {
+            Ok(result) => Some(result),
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        },
+        None => None,
+    };
+
+    let summary = summarize_headless_audit_snapshot(
+        &process_snapshot,
+        &directory_tree,
+        tail_preview.as_ref(),
+        directory_path,
+    );
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "runtimeProfile": "headless",
+            "runtimePolicy": headless_runtime_policy(),
+            "summary": summary,
+            "system": build_system_info_result(config),
+            "processSnapshot": process_snapshot,
+            "directoryTree": directory_tree,
+            "tailPreview": tail_preview,
+            "observedAtUnixMs": unix_timestamp_ms()
+        })),
+        error: None,
+    }
+}
+
 fn headless_runtime_policy() -> Value {
     json!({
         "mode": "read_only_observe",
@@ -1815,6 +1923,7 @@ fn headless_runtime_policy() -> Value {
         "recommendedCommands": [
             "headless_status",
             "headless_observe",
+            "headless_audit_snapshot",
             "system_info",
             "process_snapshot",
             "directory_tree_preview",
@@ -1825,6 +1934,64 @@ fn headless_runtime_policy() -> Value {
             "stat_path",
             "find_paths",
             "grep_files"
+        ]
+    })
+}
+
+fn summarize_headless_audit_snapshot(
+    process_snapshot: &Value,
+    directory_tree: &Value,
+    tail_preview: Option<&Value>,
+    audit_root: &str,
+) -> Value {
+    let top_processes = process_snapshot
+        .get("processes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(3)
+                .map(headless_process_label)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let tree_summary = directory_tree
+        .get("summary")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let tail_path = tail_preview
+        .and_then(|value| value.get("path"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let tail_bytes = tail_preview
+        .and_then(|value| value.get("previewBytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    json!({
+        "mode": "read_only_observe",
+        "preset": "audit_snapshot",
+        "auditRoot": audit_root,
+        "processCount": process_snapshot.get("count").and_then(Value::as_u64).unwrap_or(0),
+        "topProcesses": top_processes,
+        "directoryTree": {
+            "entryCount": tree_summary.get("entryCount").and_then(Value::as_u64).unwrap_or(0),
+            "directoryCount": tree_summary.get("directoryCount").and_then(Value::as_u64).unwrap_or(0),
+            "fileCount": tree_summary.get("fileCount").and_then(Value::as_u64).unwrap_or(0),
+            "maxDepth": tree_summary.get("maxDepth").and_then(Value::as_u64).unwrap_or(0),
+            "truncated": tree_summary.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+        },
+        "tailPreview": {
+            "path": tail_path,
+            "previewBytes": tail_bytes,
+            "enabled": tail_preview.is_some()
+        },
+        "recommendedNextCommands": [
+            "tail_file_preview",
+            "read_file_range",
+            "grep_files",
+            "stat_path",
+            "find_paths"
         ]
     })
 }
@@ -12278,6 +12445,7 @@ fn default_capabilities() -> Vec<String> {
         "agent_ping".to_string(),
         "headless_status".to_string(),
         "headless_observe".to_string(),
+        "headless_audit_snapshot".to_string(),
         "browser_start".to_string(),
         "browser_profiles".to_string(),
         "browser_profile_inspect".to_string(),
@@ -12378,6 +12546,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "agent_ping".to_string(),
         "headless_status".to_string(),
         "headless_observe".to_string(),
+        "headless_audit_snapshot".to_string(),
         "system_info".to_string(),
         "list_directory".to_string(),
         "directory_tree_preview".to_string(),
@@ -12460,6 +12629,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "agent_ping"
             | "headless_status"
             | "headless_observe"
+            | "headless_audit_snapshot"
             | "system_info"
             | "directory_tree_preview"
             | "list_directory"
@@ -13061,7 +13231,10 @@ mod tests {
         assert_eq!(result["runtimeProfile"], "headless");
         assert_eq!(result["interactiveDesktop"], false);
         assert_eq!(result["runtimePolicy"]["mode"], "read_only_observe");
-        assert_eq!(result["summary"]["recommendedCommand"], "headless_observe");
+        assert_eq!(
+            result["summary"]["recommendedCommand"],
+            "headless_audit_snapshot"
+        );
     }
 
     #[tokio::test]
@@ -13090,6 +13263,49 @@ mod tests {
         assert_eq!(result["summary"]["mode"], "read_only_observe");
         assert_eq!(result["summary"]["directoryPath"], ".");
         assert!(result["summary"].get("topProcess").is_some());
+    }
+
+    #[tokio::test]
+    async fn headless_audit_snapshot_command_returns_tree_and_tail_views() {
+        let config = base_config();
+        let temp_dir =
+            std::env::temp_dir().join(format!("dawn-node-headless-audit-{}", unix_timestamp_ms()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let log_path = temp_dir.join("audit.log");
+        fs::write(&log_path, "alpha\nbeta\ngamma\ndelta").unwrap();
+
+        let response = execute_headless_audit_snapshot_command(
+            &config,
+            GatewayCommandEnvelope {
+                command_id: "cmd-headless-audit".to_string(),
+                command_type: "headless_audit_snapshot".to_string(),
+                payload: json!({
+                    "path": temp_dir.display().to_string(),
+                    "tailPath": log_path.display().to_string(),
+                    "processLimit": 4,
+                    "treeDepth": 2,
+                    "treeLimit": 20,
+                    "tailBytes": 8
+                }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["runtimeProfile"], "headless");
+        assert_eq!(result["summary"]["preset"], "audit_snapshot");
+        assert_eq!(result["summary"]["tailPreview"]["enabled"], true);
+        assert!(result.get("directoryTree").is_some());
+        assert!(result.get("tailPreview").is_some());
+        assert!(
+            result["tailPreview"]["preview"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("delta")
+        );
+
+        fs::remove_dir_all(temp_dir).ok();
     }
 
     #[tokio::test]
@@ -13882,6 +14098,11 @@ mod tests {
         let capabilities = default_capabilities();
         assert!(capabilities.iter().any(|value| value == "headless_status"));
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "headless_audit_snapshot")
+        );
         assert!(capabilities.iter().any(|value| value == "browser_start"));
         assert!(capabilities.iter().any(|value| value == "browser_profiles"));
         assert!(
@@ -14326,6 +14547,11 @@ mod tests {
 
         assert!(capabilities.iter().any(|value| value == "headless_status"));
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "headless_audit_snapshot")
+        );
         assert!(capabilities.iter().any(|value| value == "process_snapshot"));
         assert!(!capabilities.iter().any(|value| value == "browser_start"));
         assert!(
