@@ -1355,13 +1355,18 @@ fn normalize_ingress_instruction(text: &str) -> String {
 
 fn normalize_ingress_command_text(platform: &str, text: &str) -> String {
     let mut normalized = normalize_fullwidth_command_prefix(text.trim());
+    let mut stripped_prefix = false;
     for _ in 0..4 {
         let trimmed = normalized.trim_start();
         if let Some(rest) = strip_leading_chat_command_prefix(platform, trimmed) {
+            stripped_prefix = true;
             normalized = normalize_fullwidth_command_prefix(rest.trim_start());
             continue;
         }
         break;
+    }
+    if stripped_prefix && normalized.trim().is_empty() {
+        return "/help".to_string();
     }
     let trimmed = normalized.trim();
     if !trimmed.starts_with('/') && !trimmed.starts_with('#') {
@@ -1404,8 +1409,10 @@ fn strip_leading_at_mention(text: &str) -> Option<&str> {
     if first != '@' && first != '＠' {
         return None;
     }
-    let boundary = trimmed.find(char::is_whitespace)?;
-    Some(&trimmed[boundary..])
+    if let Some(boundary) = trimmed.find(char::is_whitespace) {
+        return Some(&trimmed[boundary..]);
+    }
+    Some("")
 }
 
 fn strip_leading_tag_mention(text: &str) -> Option<&str> {
@@ -3912,6 +3919,18 @@ mod tests {
         assert_eq!(
             normalize_ingress_command_text("wecom", "使用技能 echo-skill"),
             "/skill echo-skill"
+        );
+        assert_eq!(normalize_ingress_command_text("feishu", "@Helios"), "/help");
+        assert_eq!(
+            normalize_ingress_command_text(
+                "wechat_official_account",
+                "<at user_id=\"ou_x\">机器人</at>"
+            ),
+            "/help"
+        );
+        assert_eq!(
+            normalize_ingress_command_text("qq", "<@!botid>"),
+            "/help"
         );
     }
 

@@ -739,6 +739,7 @@ fn summarize_channel_status(
         "idle"
     };
     let capability_profile = channel_capability_profile(platform);
+    let setup_hint = identity::setup_target_hint("chat", platform);
     let next_action_hint = channel_next_action_hint(
         platform,
         is_default,
@@ -760,6 +761,7 @@ fn summarize_channel_status(
         "dmPolicies": dm_policies.into_iter().collect::<Vec<_>>(),
         "latestUpdatedAtUnixMs": if latest_updated_at_unix_ms == 0 { None::<u128> } else { Some(latest_updated_at_unix_ms) },
         "capabilityProfile": capability_profile,
+        "setupHint": setup_hint,
         "nextActionHint": next_action_hint,
     })
 }

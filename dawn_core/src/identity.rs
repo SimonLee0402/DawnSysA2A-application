@@ -1620,6 +1620,19 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
     }
 }
 
+pub(crate) fn setup_target_hint(surface: &str, target: &str) -> Option<Value> {
+    let profile = setup_target_profile(surface, target)?;
+    Some(json!({
+        "surface": profile.surface,
+        "target": profile.target,
+        "label": profile.label,
+        "integrationMode": profile.integration_mode,
+        "endpoint": profile.endpoint,
+        "note": profile.note,
+        "envHints": profile.env_hints,
+    }))
+}
+
 fn capture_identity_environment_readiness() -> IdentityEnvironmentReadiness {
     IdentityEnvironmentReadiness {
         public_base_url: public_base_url(),

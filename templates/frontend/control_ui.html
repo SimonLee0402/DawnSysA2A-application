@@ -852,6 +852,7 @@
           const isDefault = defaultModels.has(entry.key) || defaultChats.has(entry.key);
           const channel = entry.kind === "chat" ? channelMap.get(entry.key) : null;
           const profile = channel?.capabilityProfile || null;
+          const setupHint = channel?.setupHint || null;
           const channelHint = channel?.nextActionHint || profile?.commandHint || "";
           return {
             ...entry,
@@ -859,6 +860,7 @@
             isDefault,
             channel,
             profile,
+            setupHint,
             channelHint,
             stateLabel: ready ? "live" : isDefault ? "default-only" : "available"
           };
@@ -876,6 +878,7 @@
                 <span>${escapeHtml(entry.label)}</span>
                 <div class="connector-meta">${escapeHtml(entry.kind)} · ${escapeHtml(entry.integrationMode)} · ${escapeHtml(entry.stateLabel)}${entry.channel ? ` · paired ${Number(entry.channel.pairedCount || 0)} · pending ${Number(entry.channel.pendingCount || 0)}` : ""}${entry.profile ? ` · ${escapeHtml(entry.profile.consistencyTier || "unknown")} · ${escapeHtml(entry.profile.nativeActionTier || "text")}` : ""}${entry.profile?.supportsPlatformCommands ? " · platform-commands" : entry.profile?.supportsSlash ? " · slash" : ""}</div>
                 ${entry.kind === "chat" && entry.channelHint ? `<div class="connector-meta">${escapeHtml(entry.channelHint)}</div>` : ""}
+                ${entry.kind === "chat" && !entry.ready && entry.setupHint ? `<div class="connector-meta">${escapeHtml(entry.setupHint.label || entry.label)} · ${escapeHtml((entry.setupHint.envHints || []).join(" / "))}${entry.setupHint.endpoint ? ` · ${escapeHtml(entry.setupHint.endpoint)}` : ""}</div>` : ""}
               </div>
               <div class="connector-led ${entry.ready ? "ready" : entry.isDefault ? "warn" : ""}"></div>
             </div>
