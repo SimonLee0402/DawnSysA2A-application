@@ -506,6 +506,7 @@
             <div>
               <h3 style="margin-bottom: 12px;">Nodes</h3>
               <div class="list" id="node-list"></div>
+              <div class="notice" id="node-observe-notice" style="margin-top: 12px;">headless 节点可直接在这里执行只读探查。</div>
             </div>
             <div>
               <h3 style="margin-bottom: 12px;">Pending Approvals</h3>
@@ -927,6 +928,12 @@
                 </div>
                 <div class="footer-note">${escapeHtml(node.capabilityPreview || (node.capabilities || []).slice(0, 5).join(", ") || "no declared capabilities")}</div>
                 <div class="footer-note">${escapeHtml(node.runtimePolicySummary || "")}</div>
+                ${String(node.runtimeMode || "").startsWith("headless")
+                  ? `<div class="inline-actions">
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_status">状态探查</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_observe">只读观察</button>
+                    </div>`
+                  : ""}
               </article>
             `).join("")
         : `<div class="empty">还没有节点记录。先在 CLI 执行 <code>dawn-node node claim</code> 或 <code>dawn-node run</code>。</div>`;
@@ -1688,9 +1695,9 @@
         const response = streamSupportsRpc()
           ? await callWorkbenchRpc("task.inspect", { taskId })
           : await fetchJson(`/api/a2a/task/${encodeURIComponent(taskId)}`);
-        const stream = streamSupportsRpc()
+        const stream = response?.stream || (streamSupportsRpc()
           ? await callWorkbenchRpc("task.stream", { taskId, after: 0 })
-          : response?.stream || null;
+          : null);
         const stateInfo = response?.state || {};
         const result = response?.result || {};
         const remote = response?.remote || null;
@@ -1707,7 +1714,7 @@
           : "";
         const latestStreamSummary = latestStreamItem?.summary || latestStreamItem?.detail || "";
         const streamSummary = stream
-          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${stream?.summary?.totalItems ? ` · visible=${Number(stream.summary.totalItems)}` : ""}${stream?.summary?.terminalItems ? ` · terminal=${Number(stream.summary.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
+          ? `\nstream=${Number(stream.cursor || 0)} items · complete=${Boolean(stream.complete)}${typeof stream?.summary?.totalItems === "number" ? ` · visible=${Number(stream.summary.totalItems)}` : ""}${typeof stream?.summary?.terminalItems === "number" ? ` · terminal=${Number(stream.summary.terminalItems)}` : ""}${latestStreamLabel ? ` · latest=${latestStreamLabel}` : ""}${stream?.summary?.kindCounts ? `\nstream.kinds=${Object.entries(stream.summary.kindCounts).map(([kind, count]) => `${kind}:${count}`).join(", ")}` : ""}${latestStreamSummary ? `\nstream.summary=${latestStreamSummary}` : ""}`
           : "";
         setNotice(
           "task-inspect-notice",
@@ -1732,6 +1739,36 @@
         await refreshDashboard();
       } catch (error) {
         alert(`Approval action failed: ${error.message}`);
+      }
+    }
+
+    async function handleNodeObserve(nodeId, commandType) {
+      if (!state.sessionToken) {
+        setNotice("node-observe-notice", "error", "先创建或保存一个 session token。");
+        return;
+      }
+      if (!streamSupportsRpc()) {
+        setNotice("node-observe-notice", "error", "当前工作台 websocket 不可用，无法直接探查节点。");
+        return;
+      }
+      try {
+        const response = await callWorkbenchRpc("node.observe", {
+          sessionToken: state.sessionToken,
+          nodeId,
+          commandType
+        });
+        const command = response?.command || {};
+        const result = command?.result || {};
+        const summary = result?.summary && typeof result.summary === "object"
+          ? JSON.stringify(result.summary)
+          : (result?.summary || "");
+        setNotice(
+          "node-observe-notice",
+          command?.status === "failed" ? "error" : "success",
+          `node=${nodeId}\ncommand=${commandType} · status=${command?.status || "unknown"}${response?.delivery ? ` · delivery=${response.delivery}` : ""}${summary ? `\nsummary=${summary}` : ""}`
+        );
+      } catch (error) {
+        setNotice("node-observe-notice", "error", `节点探查失败：${error.message}`);
       }
     }
 
@@ -1809,6 +1846,11 @@
         const target = event.target.closest("[data-task-inspect]");
         if (!target) return;
         handleTaskInspect(target.dataset.taskInspect);
+      });
+      $("node-list").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-node-observe]");
+        if (!target) return;
+        handleNodeObserve(target.dataset.nodeObserve, target.dataset.nodeCommand);
       });
     }
 

@@ -16,13 +16,14 @@ use axum::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::{
     a2a::{self, Task},
     agent_cards::{self, InvokeAgentCardRequest},
     app_state::{AppState, ChatChannelIdentityRecord, ChatChannelIdentityStatus, NodeRecord},
-    chat_ingress, identity, skill_registry,
+    chat_ingress, control_plane, identity, skill_registry,
 };
 
 const CONTROL_UI_HTML: &str = include_str!("../../templates/frontend/control_ui.html");
@@ -143,6 +144,14 @@ struct WorkbenchNodeStatusRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchNodeObserveRequest {
+    session_token: String,
+    node_id: String,
+    command_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchConfigApplyRequest {
     session_token: String,
     tenant_id: String,
@@ -196,6 +205,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "config.get",
                     "channel.status",
                     "node.status",
+                    "node.observe",
                     "config.apply",
                     "logs.tail",
                     "session.list",
@@ -323,6 +333,10 @@ async fn handle_workbench_rpc(
         "node.status" => {
             let _params: WorkbenchNodeStatusRequest = parse_rpc_params(request.params)?;
             node_status_inner(state).await
+        }
+        "node.observe" => {
+            let params: WorkbenchNodeObserveRequest = parse_rpc_params(request.params)?;
+            node_observe_inner(state, params).await
         }
         "config.apply" => {
             let params: WorkbenchConfigApplyRequest = parse_rpc_params(request.params)?;
@@ -553,6 +567,37 @@ async fn node_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
     }))
 }
 
+async fn node_observe_inner(
+    state: Arc<AppState>,
+    request: WorkbenchNodeObserveRequest,
+) -> anyhow::Result<Value> {
+    let actor = identity::resolve_session_by_token(&state, &request.session_token).await?;
+    let node_id = request.node_id.trim();
+    if node_id.is_empty() {
+        anyhow::bail!("nodeId is required");
+    }
+    let command_type = request.command_type.trim();
+    if !matches!(command_type, "headless_status" | "headless_observe") {
+        anyhow::bail!("unsupported node observe command: {command_type}");
+    }
+    let (command, delivery) = control_plane::dispatch_gateway_command(
+        &state,
+        node_id,
+        command_type.to_string(),
+        json!({
+            "source": "control_ui",
+            "actor": actor.operator_name.clone(),
+        }),
+    )
+    .await?;
+    let command = wait_for_node_command_result(&state, command.command_id, 40).await?;
+    Ok(json!({
+        "command": command,
+        "delivery": delivery,
+        "actor": actor.operator_name,
+    }))
+}
+
 fn workbench_node_status(node: NodeRecord) -> Value {
     let is_headless = node
         .capabilities
@@ -590,6 +635,31 @@ fn workbench_node_status(node: NodeRecord) -> Value {
         "runtimePolicySummary": runtime_policy_summary,
         "capabilityPreview": capability_preview,
     })
+}
+
+async fn wait_for_node_command_result(
+    state: &Arc<AppState>,
+    command_id: Uuid,
+    attempts: usize,
+) -> anyhow::Result<crate::app_state::NodeCommandRecord> {
+    let attempts = attempts.max(1);
+    for _ in 0..attempts {
+        let command = state
+            .get_node_command(command_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("node command not found: {command_id}"))?;
+        match command.status {
+            crate::app_state::NodeCommandStatus::Queued
+            | crate::app_state::NodeCommandStatus::Dispatched => {
+                sleep(Duration::from_millis(100)).await;
+            }
+            _ => return Ok(command),
+        }
+    }
+    state
+        .get_node_command(command_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("node command not found: {command_id}"))
 }
 
 fn summarize_channel_status(
@@ -738,6 +808,7 @@ async fn inspect_task_inner(
         "state": detail.state,
         "result": detail.result,
         "remote": detail.remote,
+        "stream": detail.stream,
         "messages": detail.messages,
         "artifacts": detail.artifacts,
         "updates": detail.updates,
@@ -824,6 +895,7 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("config.get"));
         assert!(CONTROL_UI_HTML.contains("channel.status"));
         assert!(CONTROL_UI_HTML.contains("node.status"));
+        assert!(CONTROL_UI_HTML.contains("node.observe"));
         assert!(CONTROL_UI_HTML.contains("config.apply"));
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));
