@@ -3933,6 +3933,23 @@ async fn handle_ingress(args: IngressArgs) -> anyhow::Result<()> {
                         "{platform}\tsecret={configured}\tdmPolicy={policy}\tallowlist={allowlist_count}\tpendingPairings={pending_pairings}"
                     );
                 }
+                println!("feishu\tsecret=n/a\tmode=webhook\ttextIngress=true");
+                for (platform, key) in [
+                    ("dingtalk", "dingtalkCallbackTokenConfigured"),
+                    ("wecom", "wecomCallbackTokenConfigured"),
+                    (
+                        "wechat_official_account",
+                        "wechatOfficialAccountTokenConfigured",
+                    ),
+                    ("qq", "qqBotCallbackSecretConfigured"),
+                ] {
+                    let configured = value_at_path(&response, &[key])
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    println!(
+                        "{platform}\tsecret={configured}\tmode=webhook\ttextIngress=true"
+                    );
+                }
             }
             Ok(())
         }

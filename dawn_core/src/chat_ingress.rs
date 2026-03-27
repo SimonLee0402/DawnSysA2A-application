@@ -936,8 +936,11 @@ async fn ingest_message(
     )
     .await?;
 
-    let command_task = if let Some(command) = parse_ingress_command(&record.text) {
-        match execute_ingress_command(state.clone(), platform, &record, command, current_mode).await? {
+    let normalized_command_text = normalize_ingress_command_text(platform, &record.text);
+    let command_task = if let Some(command) = parse_ingress_command(&normalized_command_text) {
+        match execute_ingress_command(state.clone(), platform, &record, command, current_mode)
+            .await?
+        {
             IngressCommandResult::Reply(reply) => {
                 if let Err(error) =
                     dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
@@ -1350,8 +1353,69 @@ fn normalize_ingress_instruction(text: &str) -> String {
     trimmed.to_string()
 }
 
+fn normalize_ingress_command_text(platform: &str, text: &str) -> String {
+    let mut normalized = normalize_fullwidth_command_prefix(text.trim());
+    for _ in 0..4 {
+        let trimmed = normalized.trim_start();
+        if let Some(rest) = strip_leading_chat_command_prefix(platform, trimmed) {
+            normalized = normalize_fullwidth_command_prefix(rest.trim_start());
+            continue;
+        }
+        break;
+    }
+    normalized.trim().to_string()
+}
+
+fn normalize_fullwidth_command_prefix(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix('／') {
+        return format!("/{rest}");
+    }
+    if let Some(rest) = text.strip_prefix('＃') {
+        return format!("#{rest}");
+    }
+    text.to_string()
+}
+
+fn strip_leading_chat_command_prefix<'a>(platform: &str, text: &'a str) -> Option<&'a str> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = strip_leading_qq_mention(trimmed) {
+        return Some(rest);
+    }
+    if let Some(rest) = strip_leading_at_mention(trimmed) {
+        return Some(rest);
+    }
+    if matches!(platform, "feishu" | "dingtalk" | "wechat_official_account" | "qq") {
+        if let Some(rest) = strip_leading_tag_mention(trimmed) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn strip_leading_at_mention(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let first = trimmed.chars().next()?;
+    if first != '@' && first != '＠' {
+        return None;
+    }
+    let boundary = trimmed.find(char::is_whitespace)?;
+    Some(&trimmed[boundary..])
+}
+
+fn strip_leading_tag_mention(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let close_tag = "</at>";
+    if !lower.starts_with("<at") {
+        return None;
+    }
+    let close_index = lower.find(close_tag)?;
+    Some(&trimmed[close_index + close_tag.len()..])
+}
+
 fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
-    let trimmed = text.trim();
+    let canonical = normalize_fullwidth_command_prefix(text.trim());
+    let trimmed = canonical.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -1397,7 +1461,8 @@ fn parse_ingress_command(text: &str) -> Option<IngressCommand> {
 }
 
 fn parse_mode_command(text: &str) -> Option<IngressCommand> {
-    let trimmed = text.trim();
+    let canonical = normalize_fullwidth_command_prefix(text.trim());
+    let trimmed = canonical.trim();
     if trimmed.is_empty() || !trimmed.starts_with('#') {
         return None;
     }
@@ -3719,6 +3784,34 @@ mod tests {
             parse_ingress_command("/skills find travel"),
             Some(IngressCommand::Skills { query: Some(query) }) if query == "travel"
         ));
+        assert!(matches!(
+            parse_ingress_command("／help"),
+            Some(IngressCommand::Help)
+        ));
+        assert!(matches!(
+            parse_ingress_command("＃observe"),
+            Some(IngressCommand::ModeSet { mode: ChatAutomationMode::Observe })
+        ));
+    }
+
+    #[test]
+    fn normalizes_platform_specific_command_prefixes() {
+        assert_eq!(
+            normalize_ingress_command_text("feishu", "@Helios ／help"),
+            "/help"
+        );
+        assert_eq!(
+            normalize_ingress_command_text("dingtalk", "＠机器人 ＃assist"),
+            "#assist"
+        );
+        assert_eq!(
+            normalize_ingress_command_text("qq", "<@!botid> ／skills search echo"),
+            "/skills search echo"
+        );
+        assert_eq!(
+            normalize_ingress_command_text("wechat_official_account", "<at user_id=\"ou_x\">机器人</at> /status"),
+            "/status"
+        );
     }
 
     #[test]

@@ -511,6 +511,20 @@ async fn channel_status_inner(state: Arc<AppState>) -> anyhow::Result<Value> {
     for platform in &workspace.default_chat_platforms {
         identities_by_platform.entry(platform.clone()).or_default();
     }
+    for platform in [
+        "telegram",
+        "signal",
+        "bluebubbles",
+        "feishu",
+        "dingtalk",
+        "wecom",
+        "wechat_official_account",
+        "qq",
+    ] {
+        identities_by_platform
+            .entry(platform.to_string())
+            .or_default();
+    }
 
     let channels = identities_by_platform
         .into_iter()
@@ -724,6 +738,7 @@ fn summarize_channel_status(
     } else {
         "idle"
     };
+    let capability_profile = channel_capability_profile(platform);
 
     json!({
         "platform": platform,
@@ -736,6 +751,27 @@ fn summarize_channel_status(
         "blockedCount": blocked_count,
         "dmPolicies": dm_policies.into_iter().collect::<Vec<_>>(),
         "latestUpdatedAtUnixMs": if latest_updated_at_unix_ms == 0 { None::<u128> } else { Some(latest_updated_at_unix_ms) },
+        "capabilityProfile": capability_profile,
+    })
+}
+
+fn channel_capability_profile(platform: &str) -> Value {
+    let (supports_ingress, supports_slash, supports_default_model_reply, supports_platform_commands, native_action_tier, consistency_tier) =
+        match platform {
+            "signal" | "bluebubbles" => (true, true, true, false, "advanced", "advanced"),
+            "telegram" => (true, true, true, true, "text", "standard"),
+            "feishu" | "dingtalk" | "wechat_official_account" | "qq" | "wecom" => {
+                (true, true, true, false, "text", "minimum")
+            }
+            _ => (false, false, false, false, "send_only", "outbound_only"),
+        };
+    json!({
+        "supportsIngress": supports_ingress,
+        "supportsSlash": supports_slash,
+        "supportsDefaultModelReply": supports_default_model_reply,
+        "supportsPlatformCommands": supports_platform_commands,
+        "nativeActionTier": native_action_tier,
+        "consistencyTier": consistency_tier,
     })
 }
 

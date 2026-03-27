@@ -851,11 +851,13 @@
           const ready = !!configured[entry.key];
           const isDefault = defaultModels.has(entry.key) || defaultChats.has(entry.key);
           const channel = entry.kind === "chat" ? channelMap.get(entry.key) : null;
+          const profile = channel?.capabilityProfile || null;
           return {
             ...entry,
             ready,
             isDefault,
             channel,
+            profile,
             stateLabel: ready ? "live" : isDefault ? "default-only" : "available"
           };
         })
@@ -870,7 +872,7 @@
             <div class="connector-pill">
               <div class="connector-copy">
                 <span>${escapeHtml(entry.label)}</span>
-                <div class="connector-meta">${escapeHtml(entry.kind)} · ${escapeHtml(entry.integrationMode)} · ${escapeHtml(entry.stateLabel)}${entry.channel ? ` · paired ${Number(entry.channel.pairedCount || 0)} · pending ${Number(entry.channel.pendingCount || 0)}` : ""}</div>
+                <div class="connector-meta">${escapeHtml(entry.kind)} · ${escapeHtml(entry.integrationMode)} · ${escapeHtml(entry.stateLabel)}${entry.channel ? ` · paired ${Number(entry.channel.pairedCount || 0)} · pending ${Number(entry.channel.pendingCount || 0)}` : ""}${entry.profile ? ` · ${escapeHtml(entry.profile.consistencyTier || "unknown")} · ${escapeHtml(entry.profile.nativeActionTier || "text")}` : ""}${entry.profile?.supportsPlatformCommands ? " · platform-commands" : entry.profile?.supportsSlash ? " · slash" : ""}</div>
               </div>
               <div class="connector-led ${entry.ready ? "ready" : entry.isDefault ? "warn" : ""}"></div>
             </div>
@@ -904,7 +906,10 @@
         )
         .map((channel) => channel.platform)
         .join(", ");
-      $("channel-footer").textContent = `paired channels ${Number(summary.pairedChannelCount || 0)}/${Number(summary.channelCount || channels.length)} · pending pairings ${Number(summary.pendingPairingCount || 0)} · defaults ${Number(summary.defaultChannelCount || 0)}${highlighted ? ` · ${highlighted}` : defaultOnly ? ` · default-only ${defaultOnly}` : ""}`;
+      const minimumReady = channels.filter((channel) => channel.capabilityProfile?.consistencyTier === "minimum").length;
+      const standardReady = channels.filter((channel) => channel.capabilityProfile?.consistencyTier === "standard").length;
+      const advancedReady = channels.filter((channel) => channel.capabilityProfile?.consistencyTier === "advanced").length;
+      $("channel-footer").textContent = `paired channels ${Number(summary.pairedChannelCount || 0)}/${Number(summary.channelCount || channels.length)} · pending pairings ${Number(summary.pendingPairingCount || 0)} · defaults ${Number(summary.defaultChannelCount || 0)} · tiers minimum=${minimumReady} standard=${standardReady} advanced=${advancedReady}${highlighted ? ` · ${highlighted}` : defaultOnly ? ` · default-only ${defaultOnly}` : ""}`;
     }
 
     function renderNodes(nodes) {
