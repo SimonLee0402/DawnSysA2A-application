@@ -39,6 +39,8 @@ pub struct Task {
 pub struct TaskResponse {
     pub task: StoredTask,
     pub sandbox_status: String,
+    pub messages: Vec<A2aMessage>,
+    pub artifacts: Vec<A2aArtifact>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +48,40 @@ pub struct TaskResponse {
 pub struct TaskDetailResponse {
     pub task: StoredTask,
     pub events: Vec<TaskEventRecord>,
+    pub messages: Vec<A2aMessage>,
+    pub artifacts: Vec<A2aArtifact>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum A2aMessageRole {
+    User,
+    Agent,
+    System,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum A2aPart {
+    Text { text: String },
+    Data { data: Value },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aMessage {
+    pub role: A2aMessageRole,
+    pub parts: Vec<A2aPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aArtifact {
+    pub name: String,
+    pub mime_type: String,
+    pub parts: Vec<A2aPart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +168,14 @@ async fn get_task(
         .map_err(internal_error)?
         .ok_or_else(|| not_found("task not found"))?;
     let events = state.task_events(task_id).await.map_err(internal_error)?;
-    Ok(Json(TaskDetailResponse { task, events }))
+    let messages = build_task_messages(&task, &events);
+    let artifacts = build_task_artifacts(&task, &events);
+    Ok(Json(TaskDetailResponse {
+        task,
+        events,
+        messages,
+        artifacts,
+    }))
 }
 
 async fn get_task_events(
@@ -316,9 +359,15 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
 
     let task = state.get_task(task_id).await?.unwrap_or(stored_task);
 
+    let events = state.task_events(task_id).await?;
+    let messages = build_task_messages(&task, &events);
+    let artifacts = build_task_artifacts(&task, &events);
+
     Ok(TaskResponse {
         task,
         sandbox_status,
+        messages,
+        artifacts,
     })
 }
 
@@ -822,6 +871,49 @@ fn summarize_value(value: &Value) -> String {
     }
 }
 
+fn build_task_messages(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2aMessage> {
+    let mut messages = vec![A2aMessage {
+        role: A2aMessageRole::User,
+        parts: vec![A2aPart::Text {
+            text: task.instruction.clone(),
+        }],
+        label: Some("instruction".to_string()),
+    }];
+
+    messages.extend(events.iter().map(task_event_to_message));
+    messages
+}
+
+fn task_event_to_message(event: &TaskEventRecord) -> A2aMessage {
+    A2aMessage {
+        role: if event.event_type.contains("failed") {
+            A2aMessageRole::System
+        } else {
+            A2aMessageRole::Agent
+        },
+        parts: vec![A2aPart::Text {
+            text: event.detail.clone(),
+        }],
+        label: Some(event.event_type.clone()),
+    }
+}
+
+fn build_task_artifacts(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2aArtifact> {
+    vec![A2aArtifact {
+        name: "task-summary".to_string(),
+        mime_type: "application/json".to_string(),
+        parts: vec![A2aPart::Data {
+            data: json!({
+                "taskId": task.task_id,
+                "status": task.status,
+                "lastUpdateReason": task.last_update_reason,
+                "eventCount": events.len(),
+                "updatedAtUnixMs": task.updated_at_unix_ms,
+            }),
+        }],
+    }]
+}
+
 fn default_value_payload() -> Value {
     json!({})
 }
@@ -891,9 +983,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        OrchestrationStep, TemplateContext, WasmInstructionBinding, extract_text_from_value,
-        parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
-        resolve_template_string,
+        A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
+        TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
+        extract_text_from_value, parse_orchestration_plan, parse_wasm_instruction,
+        resolve_json_templates, resolve_template_string,
     };
     use uuid::Uuid;
 
@@ -1032,6 +1125,80 @@ mod tests {
                 function_name: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_a2a_messages_from_task_and_events() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "demo".to_string(),
+            instruction: "Summarize the system status".to_string(),
+            status: TaskStatus::Completed,
+            linked_payment_id: None,
+            last_update_reason: "completed".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        };
+        let events = vec![
+            TaskEventRecord {
+                event_type: "task_accepted".to_string(),
+                detail: "gateway accepted the task".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 1,
+            },
+            TaskEventRecord {
+                event_type: "skill_execution_failed".to_string(),
+                detail: "sandbox denied shell_exec".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 2,
+            },
+        ];
+
+        let messages = build_task_messages(&task, &events);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, A2aMessageRole::User);
+        assert_eq!(
+            messages[0].parts,
+            vec![A2aPart::Text {
+                text: "Summarize the system status".to_string()
+            }]
+        );
+        assert_eq!(messages[1].role, A2aMessageRole::Agent);
+        assert_eq!(messages[2].role, A2aMessageRole::System);
+    }
+
+    #[test]
+    fn builds_task_summary_artifact() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "demo".to_string(),
+            instruction: "Summarize the system status".to_string(),
+            status: TaskStatus::Completed,
+            linked_payment_id: None,
+            last_update_reason: "completed".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        };
+        let events = vec![TaskEventRecord {
+            event_type: "task_accepted".to_string(),
+            detail: "gateway accepted the task".to_string(),
+            task_id: task.task_id,
+            created_at_unix_ms: 1,
+        }];
+
+        let artifacts = build_task_artifacts(&task, &events);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "task-summary");
+        assert_eq!(artifacts[0].mime_type, "application/json");
+        match &artifacts[0].parts[0] {
+            A2aPart::Data { data } => {
+                assert_eq!(data["status"], json!("completed"));
+                assert_eq!(data["eventCount"], json!(1));
+            }
+            other => panic!("expected data artifact part, got {other:?}"),
+        }
     }
 }
 
