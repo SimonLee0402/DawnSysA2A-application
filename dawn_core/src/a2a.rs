@@ -85,6 +85,8 @@ pub struct A2aTaskResult {
     pub complete: bool,
     pub updated_at_unix_ms: u128,
     pub last_event_type: Option<String>,
+    pub latest_update_type: Option<String>,
+    pub latest_update_detail: Option<String>,
     pub latest_message_label: Option<String>,
     pub latest_message_text: Option<String>,
     pub latest_message: Option<A2aMessage>,
@@ -1317,6 +1319,7 @@ fn build_task_result(
 ) -> A2aTaskResult {
     let latest_message = messages.last().cloned();
     let complete = matches!(task.status, TaskStatus::Completed | TaskStatus::Failed);
+    let latest_update = updates.last();
     let latest_message_label = latest_message
         .as_ref()
         .and_then(|message| message.label.clone());
@@ -1346,6 +1349,8 @@ fn build_task_result(
         complete,
         updated_at_unix_ms: task.updated_at_unix_ms,
         last_event_type,
+        latest_update_type: latest_update.map(|update| update.event_type.clone()),
+        latest_update_detail: latest_update.map(|update| update.detail.clone()),
         latest_message_label,
         latest_message_text,
         latest_message,
@@ -1714,6 +1719,8 @@ mod tests {
         assert_eq!(result.status, TaskStatus::Completed);
         assert!(result.complete);
         assert_eq!(result.updated_at_unix_ms, 2);
+        assert_eq!(result.latest_update_type.as_deref(), Some("task_completed"));
+        assert_eq!(result.latest_update_detail.as_deref(), Some("All done"));
         assert_eq!(
             result.latest_message_label.as_deref(),
             Some("task_completed")

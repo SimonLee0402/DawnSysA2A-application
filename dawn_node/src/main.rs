@@ -609,6 +609,7 @@ fn dispatch_command_future<'a>(
         "read_file_preview" => Box::pin(execute_read_file_preview_command(envelope)),
         "stat_path" => Box::pin(execute_stat_path_command(envelope)),
         "find_paths" => Box::pin(execute_find_paths_command(envelope)),
+        "grep_files" => Box::pin(execute_grep_files_command(envelope)),
         "process_snapshot" => Box::pin(execute_process_snapshot_command(envelope)),
         "browser_start" => Box::pin(execute_browser_start_command(runtime_state, envelope)),
         "browser_profiles" => Box::pin(execute_browser_profiles_command(runtime_state, envelope)),
@@ -1193,6 +1194,199 @@ async fn execute_find_paths_command(envelope: GatewayCommandEnvelope) -> Command
     }
 }
 
+async fn execute_grep_files_command(envelope: GatewayCommandEnvelope) -> CommandResultEnvelope {
+    let root = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+    let Some(query) = envelope
+        .payload
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some("grep_files requires payload.query".to_string()),
+        };
+    };
+    let limit = payload_usize(&envelope.payload, "limit", 20, 200);
+    let max_depth = payload_usize(&envelope.payload, "maxDepth", 4, 12);
+    let max_bytes = payload_usize(&envelope.payload, "maxBytes", 16_384, 262_144);
+    let case_sensitive = envelope
+        .payload
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let root_path = PathBuf::from(root);
+    let display_root = root_path.display().to_string();
+    let query_cmp = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
+    let mut pending = VecDeque::from([(root_path.clone(), 0usize)]);
+    let mut matches = Vec::new();
+    let mut searched_directories = 0usize;
+    let mut searched_files = 0usize;
+    let mut skipped_directories = 0usize;
+    let mut skipped_files = 0usize;
+    let mut truncated = false;
+
+    while let Some((current_path, depth)) = pending.pop_front() {
+        let mut read_dir = match tokio::fs::read_dir(&current_path).await {
+            Ok(read_dir) => read_dir,
+            Err(_) => {
+                skipped_directories += 1;
+                continue;
+            }
+        };
+        searched_directories += 1;
+
+        loop {
+            let Some(entry) = (match read_dir.next_entry().await {
+                Ok(value) => value,
+                Err(_) => {
+                    skipped_directories += 1;
+                    break;
+                }
+            }) else {
+                break;
+            };
+
+            let entry_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => Some(metadata),
+                Err(_) => None,
+            };
+            let is_dir = metadata.as_ref().is_some_and(|item| item.is_dir());
+            let is_file = metadata.as_ref().is_some_and(|item| item.is_file());
+
+            if is_dir && depth < max_depth {
+                pending.push_back((entry_path.clone(), depth + 1));
+            }
+
+            if !is_file {
+                continue;
+            }
+
+            searched_files += 1;
+            let bytes = match tokio::fs::read(&entry_path).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    skipped_files += 1;
+                    continue;
+                }
+            };
+
+            let preview_len = bytes.len().min(max_bytes);
+            let text = String::from_utf8_lossy(&bytes[..preview_len]).to_string();
+            let text_cmp = if case_sensitive {
+                text.clone()
+            } else {
+                text.to_lowercase()
+            };
+            if !text_cmp.contains(&query_cmp) {
+                continue;
+            }
+
+            let preview = build_match_preview(&text, query, case_sensitive, 120);
+            matches.push(json!({
+                "name": name,
+                "path": entry_path.display().to_string(),
+                "depth": depth + 1,
+                "preview": preview,
+                "previewBytes": preview_len,
+                "truncated": bytes.len() > max_bytes,
+                "len": metadata.as_ref().map(|item| item.len()),
+                "modifiedAtUnixMs": metadata
+                    .as_ref()
+                    .and_then(|item| item.modified().ok())
+                    .map(system_time_to_unix_ms)
+            }));
+            if matches.len() >= limit {
+                truncated = true;
+                break;
+            }
+        }
+
+        if truncated {
+            break;
+        }
+    }
+
+    let first_match = matches
+        .first()
+        .and_then(|item| item.get("path"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "path": display_root.clone(),
+            "query": query,
+            "limit": limit,
+            "maxDepth": max_depth,
+            "maxBytes": max_bytes,
+            "caseSensitive": case_sensitive,
+            "matches": matches,
+            "count": matches.len(),
+            "searchedDirectories": searched_directories,
+            "searchedFiles": searched_files,
+            "skippedDirectories": skipped_directories,
+            "skippedFiles": skipped_files,
+            "truncated": truncated,
+            "summary": {
+                "query": query,
+                "searchRoot": display_root,
+                "matchCount": matches.len(),
+                "searchedDirectories": searched_directories,
+                "searchedFiles": searched_files,
+                "skippedDirectories": skipped_directories,
+                "skippedFiles": skipped_files,
+                "truncated": truncated,
+                "firstMatch": first_match
+            }
+        })),
+        error: None,
+    }
+}
+
+fn build_match_preview(text: &str, query: &str, case_sensitive: bool, max_chars: usize) -> String {
+    let query_cmp = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
+    let line = text
+        .lines()
+        .find(|line| {
+            if case_sensitive {
+                line.contains(query)
+            } else {
+                line.to_lowercase().contains(&query_cmp)
+            }
+        })
+        .unwrap_or(text);
+    let flattened = line.replace('\r', " ").trim().to_string();
+    let preview = flattened.chars().take(max_chars).collect::<String>();
+    if flattened.chars().count() > max_chars {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
 async fn execute_process_snapshot_command(
     envelope: GatewayCommandEnvelope,
 ) -> CommandResultEnvelope {
@@ -1273,7 +1467,8 @@ async fn execute_headless_status_command(
                 "list_directory",
                 "read_file_preview",
                 "stat_path",
-                "find_paths"
+                "find_paths",
+                "grep_files"
             ]),
         );
         object.insert(
@@ -1381,7 +1576,8 @@ fn headless_runtime_policy() -> Value {
             "list_directory",
             "read_file_preview",
             "stat_path",
-            "find_paths"
+            "find_paths",
+            "grep_files"
         ]
     })
 }
@@ -1417,7 +1613,8 @@ fn summarize_headless_observation(
             "read_file_preview",
             "stat_path",
             "list_directory",
-            "find_paths"
+            "find_paths",
+            "grep_files"
         ]
     })
 }
@@ -11908,6 +12105,7 @@ fn default_capabilities() -> Vec<String> {
         "read_file_preview".to_string(),
         "stat_path".to_string(),
         "find_paths".to_string(),
+        "grep_files".to_string(),
         "process_snapshot".to_string(),
     ]
 }
@@ -11932,6 +12130,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "read_file_preview".to_string(),
         "stat_path".to_string(),
         "find_paths".to_string(),
+        "grep_files".to_string(),
         "process_snapshot".to_string(),
     ]
 }
@@ -12010,6 +12209,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "read_file_preview"
             | "stat_path"
             | "find_paths"
+            | "grep_files"
             | "process_snapshot"
     )
 }
@@ -12717,6 +12917,44 @@ mod tests {
         assert_eq!(result["count"], 2);
         assert_eq!(result["summary"]["matchCount"], 2);
         assert!(result["summary"]["firstMatch"].as_str().is_some());
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn grep_files_command_returns_matches_with_preview() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dawn-node-grep-files-{}", unix_timestamp_ms()));
+        let nested_dir = temp_dir.join("nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(temp_dir.join("alpha.txt"), "hello world\nsecond line").unwrap();
+        fs::write(nested_dir.join("report.txt"), "TODO: investigate issue").unwrap();
+        fs::write(nested_dir.join("ignore.bin"), "binary").unwrap();
+
+        let response = execute_grep_files_command(GatewayCommandEnvelope {
+            command_id: "cmd-grep-files".to_string(),
+            command_type: "grep_files".to_string(),
+            payload: json!({
+                "path": temp_dir.display().to_string(),
+                "query": "todo",
+                "limit": 10,
+                "maxDepth": 4,
+                "caseSensitive": false
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["query"], "todo");
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["summary"]["matchCount"], 1);
+        assert!(
+            result["matches"][0]["preview"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("TODO")
+        );
 
         fs::remove_dir_all(temp_dir).ok();
     }

@@ -937,6 +937,7 @@
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="stat_path">文件信息</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="read_file_preview">文件预览</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="find_paths">查找路径</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="grep_files">文本搜索</button>
                     </div>`
                   : ""}
               </article>
@@ -1719,6 +1720,9 @@
         const resultLabels = Array.isArray(result?.messageLabels) && result.messageLabels.length
           ? `\nlabels=${result.messageLabels.join(", ")}`
           : "";
+        const latestUpdate = result?.latestUpdateType
+          ? `\nlatest.update=${result.latestUpdateType}${result.latestUpdateDetail ? ` · ${String(result.latestUpdateDetail).slice(0, 120)}` : ""}`
+          : "";
         const latestLabel = result?.latestMessageLabel
           ? `\nlatest.label=${result.latestMessageLabel}`
           : "";
@@ -1741,7 +1745,7 @@
         setNotice(
           "task-inspect-notice",
           stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
-          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${latestLabel}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${resultLabels}${remoteSummary}${streamSummary}`
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${latestLabel}${latestUpdate}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${artifactMimes}${resultLabels}${remoteSummary}${streamSummary}`
         );
       } catch (error) {
         setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);
@@ -1790,6 +1794,13 @@
         if (query === null) return;
         payload.path = path;
         payload.query = query;
+      } else if (commandType === "grep_files") {
+        const path = window.prompt("输入搜索根目录", "D:\\Agent2Agent应用");
+        if (path === null) return;
+        const query = window.prompt("输入要搜索的文本关键字", "TODO");
+        if (query === null) return;
+        payload.path = path;
+        payload.query = query;
       }
       try {
         const response = await callWorkbenchRpc("node.observe", {
@@ -1813,6 +1824,8 @@
                 ? `bytes=${Number(result?.previewBytes || 0)}/${Number(result?.sizeBytes || 0)}${result?.truncated ? " · truncated" : ""}`
               : commandType === "find_paths"
                 ? `matches=${Number(result?.count || 0)} · searched=${Number(result?.searchedDirectories || 0)}${result?.truncated ? " · truncated" : ""}`
+              : commandType === "grep_files"
+                ? `matches=${Number(result?.count || 0)} · files=${Number(result?.searchedFiles || 0)}${result?.truncated ? " · truncated" : ""}`
             : "";
         setNotice(
           "node-observe-notice",
