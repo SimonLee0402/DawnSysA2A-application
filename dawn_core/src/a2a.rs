@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -46,6 +46,7 @@ pub struct TaskResponse {
     pub result: A2aTaskResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<A2aRemoteStatus>,
+    pub stream: A2aTaskStream,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
     pub updates: Vec<A2aTaskUpdate>,
@@ -60,6 +61,7 @@ pub struct TaskDetailResponse {
     pub result: A2aTaskResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<A2aRemoteStatus>,
+    pub stream: A2aTaskStream,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
     pub updates: Vec<A2aTaskUpdate>,
@@ -90,6 +92,24 @@ pub struct A2aTaskResult {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct A2aTaskUpdate {
+    pub event_type: String,
+    pub detail: String,
+    pub created_at_unix_ms: u128,
+    pub terminal: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskStream {
+    pub cursor: usize,
+    pub complete: bool,
+    pub items: Vec<A2aTaskStreamItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskStreamItem {
+    pub sequence: usize,
     pub event_type: String,
     pub detail: String,
     pub created_at_unix_ms: u128,
@@ -210,6 +230,12 @@ enum OrchestrationStep {
     },
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TaskStreamQuery {
+    after: Option<usize>,
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status))
@@ -217,6 +243,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/tasks", get(list_tasks))
         .route("/task/:task_id", get(get_task))
         .route("/task/:task_id/events", get(get_task_events))
+        .route("/task/:task_id/stream", get(get_task_stream))
 }
 
 async fn status() -> &'static str {
@@ -254,6 +281,20 @@ async fn get_task_events(
     Ok(Json(
         state.task_events(task_id).await.map_err(internal_error)?,
     ))
+}
+
+async fn get_task_stream(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<Uuid>,
+    Query(query): Query<TaskStreamQuery>,
+) -> Result<Json<A2aTaskStream>, (StatusCode, Json<Value>)> {
+    let task = state
+        .get_task(task_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("task not found"))?;
+    let events = state.task_events(task_id).await.map_err(internal_error)?;
+    Ok(Json(build_task_stream(&task, &events, query.after)))
 }
 
 async fn create_task(
@@ -427,6 +468,7 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let result = build_task_result(&task, &messages, &artifacts);
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
+    let stream = build_task_stream(&task, &events, None);
 
     Ok(TaskResponse {
         task,
@@ -434,6 +476,7 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
         state: state_envelope,
         result,
         remote,
+        stream,
         messages,
         artifacts,
         updates,
@@ -452,12 +495,14 @@ pub async fn get_task_detail(state: Arc<AppState>, task_id: Uuid) -> anyhow::Res
     let result = build_task_result(&task, &messages, &artifacts);
     let updates = build_task_updates(&events);
     let remote = build_remote_status(&state, task_id).await?;
+    let stream = build_task_stream(&task, &events, None);
     Ok(TaskDetailResponse {
         task,
         events,
         state: state_envelope,
         result,
         remote,
+        stream,
         messages,
         artifacts,
         updates,
@@ -1045,6 +1090,41 @@ fn build_task_updates(events: &[TaskEventRecord]) -> Vec<A2aTaskUpdate> {
         .collect()
 }
 
+fn build_task_stream(
+    task: &StoredTask,
+    events: &[TaskEventRecord],
+    after: Option<usize>,
+) -> A2aTaskStream {
+    let after = after.unwrap_or(0);
+    let items = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let sequence = index + 1;
+            if sequence <= after {
+                return None;
+            }
+            let normalized = event.event_type.to_ascii_lowercase();
+            let terminal = normalized.contains("completed")
+                || normalized.contains("failed")
+                || normalized.contains("rejected")
+                || normalized.contains("revoked");
+            Some(A2aTaskStreamItem {
+                sequence,
+                event_type: event.event_type.clone(),
+                detail: event.detail.clone(),
+                created_at_unix_ms: event.created_at_unix_ms,
+                terminal,
+            })
+        })
+        .collect::<Vec<_>>();
+    A2aTaskStream {
+        cursor: events.len(),
+        complete: matches!(task.status, TaskStatus::Completed | TaskStatus::Failed),
+        items,
+    }
+}
+
 async fn build_remote_status(
     state: &Arc<AppState>,
     task_id: Uuid,
@@ -1238,7 +1318,7 @@ mod tests {
     use super::{
         A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
         TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
-        build_task_result, build_task_state, build_task_updates, extract_text_from_value,
+        build_task_result, build_task_state, build_task_stream, build_task_updates, extract_text_from_value,
         parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
         resolve_template_string, summarize_remote_status,
     };
@@ -1580,6 +1660,50 @@ mod tests {
         assert_eq!(updates[1].event_type, "task_completed");
         assert!(updates[1].terminal);
         assert_eq!(updates[1].created_at_unix_ms, 9);
+    }
+
+    #[test]
+    fn builds_incremental_task_stream_after_cursor() {
+        let task = StoredTask {
+            task_id: Uuid::nil(),
+            parent_task_id: None,
+            name: "demo".to_string(),
+            instruction: "Summarize the system status".to_string(),
+            status: TaskStatus::Running,
+            linked_payment_id: None,
+            last_update_reason: "running".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 9,
+        };
+        let events = vec![
+            TaskEventRecord {
+                event_type: "task_accepted".to_string(),
+                detail: "Accepted".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 1,
+            },
+            TaskEventRecord {
+                event_type: "task_started".to_string(),
+                detail: "Started".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 5,
+            },
+            TaskEventRecord {
+                event_type: "task_progress".to_string(),
+                detail: "Halfway there".to_string(),
+                task_id: task.task_id,
+                created_at_unix_ms: 9,
+            },
+        ];
+
+        let stream = build_task_stream(&task, &events, Some(1));
+        assert_eq!(stream.cursor, 3);
+        assert!(!stream.complete);
+        assert_eq!(stream.items.len(), 2);
+        assert_eq!(stream.items[0].sequence, 2);
+        assert_eq!(stream.items[0].event_type, "task_started");
+        assert_eq!(stream.items[1].sequence, 3);
+        assert_eq!(stream.items[1].detail, "Halfway there");
     }
 }
 
