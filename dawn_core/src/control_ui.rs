@@ -650,6 +650,7 @@ async fn inspect_task_inner(
         "task": detail.task,
         "state": detail.state,
         "result": detail.result,
+        "remote": detail.remote,
         "messages": detail.messages,
         "artifacts": detail.artifacts,
         "updates": detail.updates,

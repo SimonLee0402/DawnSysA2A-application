@@ -1685,13 +1685,17 @@
           : await fetchJson(`/api/a2a/task/${encodeURIComponent(taskId)}`);
         const stateInfo = response?.state || {};
         const result = response?.result || {};
+        const remote = response?.remote || null;
         const latestMessage = result?.latestMessage?.parts?.find((part) => part.kind === "text")?.text || result?.summary || "";
         const updateCount = Array.isArray(response?.updates) ? response.updates.length : 0;
         const artifactNames = Array.isArray(response?.artifacts) ? response.artifacts.map((item) => item.name).filter(Boolean).join(", ") : "";
+        const remoteSummary = remote
+          ? `\nremote=${remote.stateLabel || "unknown"} · invocations=${Number(remote.totalInvocations || 0)}${remote.latestInvocation?.cardId ? ` · latest=${remote.latestInvocation.cardId}` : ""}`
+          : "";
         setNotice(
           "task-inspect-notice",
           stateInfo.terminal ? (stateInfo.status === "failed" ? "error" : "success") : "warn",
-          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${artifactNames ? `\nartifacts=${artifactNames}` : ""}`
+          `task=${response?.task?.taskId || taskId}\nstatus=${stateInfo.status || "unknown"} · phase=${stateInfo.phase || "unknown"} · updates=${updateCount}\nsummary=${latestMessage || "<none>"}${artifactNames ? `\nartifacts=${artifactNames}` : ""}${remoteSummary}`
         );
       } catch (error) {
         setNotice("task-inspect-notice", "error", `task 详情读取失败：${error.message}`);

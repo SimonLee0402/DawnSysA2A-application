@@ -13,7 +13,10 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    agent_cards::{self, InvokeAgentCardRequest, RemoteSettlementRequest},
+    agent_cards::{
+        self, InvokeAgentCardRequest, RemoteAgentInvocationRecord, RemoteInvocationStatus,
+        RemoteSettlementRequest,
+    },
     ap2::{self, PaymentRequest},
     app_state::{
         AppState, NodeCommandRecord, NodeCommandStatus, OrchestrationRunRecord,
@@ -41,6 +44,8 @@ pub struct TaskResponse {
     pub sandbox_status: String,
     pub state: A2aTaskState,
     pub result: A2aTaskResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<A2aRemoteStatus>,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
     pub updates: Vec<A2aTaskUpdate>,
@@ -53,6 +58,8 @@ pub struct TaskDetailResponse {
     pub events: Vec<TaskEventRecord>,
     pub state: A2aTaskState,
     pub result: A2aTaskResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<A2aRemoteStatus>,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
     pub updates: Vec<A2aTaskUpdate>,
@@ -87,6 +94,33 @@ pub struct A2aTaskUpdate {
     pub detail: String,
     pub created_at_unix_ms: u128,
     pub terminal: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aRemoteStatus {
+    pub state_label: String,
+    pub total_invocations: usize,
+    pub dispatched_count: usize,
+    pub running_count: usize,
+    pub completed_count: usize,
+    pub failed_count: usize,
+    pub latest_updated_at_unix_ms: u128,
+    pub latest_invocation: Option<A2aRemoteInvocation>,
+    pub invocations: Vec<A2aRemoteInvocation>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aRemoteInvocation {
+    pub invocation_id: Uuid,
+    pub card_id: String,
+    pub remote_agent_url: String,
+    pub remote_task_id: Option<String>,
+    pub status: RemoteInvocationStatus,
+    pub error: Option<String>,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -392,12 +426,14 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let artifacts = build_task_artifacts(&task, &events);
     let result = build_task_result(&task, &messages, &artifacts);
     let updates = build_task_updates(&events);
+    let remote = build_remote_status(&state, task_id).await?;
 
     Ok(TaskResponse {
         task,
         sandbox_status,
         state: state_envelope,
         result,
+        remote,
         messages,
         artifacts,
         updates,
@@ -415,11 +451,13 @@ pub async fn get_task_detail(state: Arc<AppState>, task_id: Uuid) -> anyhow::Res
     let artifacts = build_task_artifacts(&task, &events);
     let result = build_task_result(&task, &messages, &artifacts);
     let updates = build_task_updates(&events);
+    let remote = build_remote_status(&state, task_id).await?;
     Ok(TaskDetailResponse {
         task,
         events,
         state: state_envelope,
         result,
+        remote,
         messages,
         artifacts,
         updates,
@@ -1007,6 +1045,87 @@ fn build_task_updates(events: &[TaskEventRecord]) -> Vec<A2aTaskUpdate> {
         .collect()
 }
 
+async fn build_remote_status(
+    state: &Arc<AppState>,
+    task_id: Uuid,
+) -> anyhow::Result<Option<A2aRemoteStatus>> {
+    let invocations = agent_cards::list_remote_invocations(state, None, Some(task_id)).await?;
+    Ok(summarize_remote_status(invocations))
+}
+
+fn summarize_remote_status(
+    mut invocations: Vec<RemoteAgentInvocationRecord>,
+) -> Option<A2aRemoteStatus> {
+    if invocations.is_empty() {
+        return None;
+    }
+    invocations.sort_by(|left, right| {
+        right
+            .updated_at_unix_ms
+            .cmp(&left.updated_at_unix_ms)
+            .then_with(|| right.created_at_unix_ms.cmp(&left.created_at_unix_ms))
+    });
+    let latest_updated_at_unix_ms = invocations
+        .iter()
+        .map(|invocation| invocation.updated_at_unix_ms)
+        .max()
+        .unwrap_or(0);
+    let dispatched_count = invocations
+        .iter()
+        .filter(|invocation| invocation.status == RemoteInvocationStatus::Dispatched)
+        .count();
+    let running_count = invocations
+        .iter()
+        .filter(|invocation| invocation.status == RemoteInvocationStatus::Running)
+        .count();
+    let completed_count = invocations
+        .iter()
+        .filter(|invocation| invocation.status == RemoteInvocationStatus::Completed)
+        .count();
+    let failed_count = invocations
+        .iter()
+        .filter(|invocation| invocation.status == RemoteInvocationStatus::Failed)
+        .count();
+    let state_label = if failed_count > 0 {
+        "failed"
+    } else if running_count > 0 {
+        "running"
+    } else if dispatched_count > 0 {
+        "dispatched"
+    } else {
+        "completed"
+    };
+    let latest_invocation = invocations.first().cloned().map(remote_invocation_to_a2a);
+    let invocations = invocations
+        .into_iter()
+        .map(remote_invocation_to_a2a)
+        .collect::<Vec<_>>();
+    Some(A2aRemoteStatus {
+        state_label: state_label.to_string(),
+        total_invocations: invocations.len(),
+        dispatched_count,
+        running_count,
+        completed_count,
+        failed_count,
+        latest_updated_at_unix_ms,
+        latest_invocation,
+        invocations,
+    })
+}
+
+fn remote_invocation_to_a2a(invocation: RemoteAgentInvocationRecord) -> A2aRemoteInvocation {
+    A2aRemoteInvocation {
+        invocation_id: invocation.invocation_id,
+        card_id: invocation.card_id,
+        remote_agent_url: invocation.remote_agent_url,
+        remote_task_id: invocation.remote_task_id,
+        status: invocation.status,
+        error: invocation.error,
+        created_at_unix_ms: invocation.created_at_unix_ms,
+        updated_at_unix_ms: invocation.updated_at_unix_ms,
+    }
+}
+
 fn build_task_result(
     task: &StoredTask,
     messages: &[A2aMessage],
@@ -1114,12 +1233,14 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 mod tests {
     use serde_json::json;
 
+    use crate::agent_cards::{RemoteAgentInvocationRecord, RemoteInvocationStatus};
+
     use super::{
         A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
         TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
         build_task_result, build_task_state, build_task_updates, extract_text_from_value,
         parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
-        resolve_template_string,
+        resolve_template_string, summarize_remote_status,
     };
     use uuid::Uuid;
 
@@ -1386,6 +1507,52 @@ mod tests {
         assert_eq!(result.last_event_type.as_deref(), Some("task_completed"));
         assert_eq!(result.artifact_names, vec!["task-summary".to_string()]);
         assert!(result.latest_message.is_some());
+    }
+
+    #[test]
+    fn summarizes_remote_invocations_into_a2a_remote_status() {
+        let latest = 1_700_000_000_000u128;
+        let remote = summarize_remote_status(vec![
+            RemoteAgentInvocationRecord {
+                invocation_id: Uuid::new_v4(),
+                card_id: "travel-agent".to_string(),
+                remote_agent_url: "https://agent.example.com/a2a".to_string(),
+                local_task_id: Some(Uuid::new_v4()),
+                remote_task_id: Some("remote-002".to_string()),
+                request: json!({"instruction":"book hotel"}),
+                response: Some(json!({"status":"running"})),
+                status: RemoteInvocationStatus::Running,
+                error: None,
+                created_at_unix_ms: latest.saturating_sub(10),
+                updated_at_unix_ms: latest,
+            },
+            RemoteAgentInvocationRecord {
+                invocation_id: Uuid::new_v4(),
+                card_id: "travel-agent".to_string(),
+                remote_agent_url: "https://agent.example.com/a2a".to_string(),
+                local_task_id: Some(Uuid::new_v4()),
+                remote_task_id: Some("remote-001".to_string()),
+                request: json!({"instruction":"quote"}),
+                response: Some(json!({"status":"completed"})),
+                status: RemoteInvocationStatus::Completed,
+                error: None,
+                created_at_unix_ms: latest.saturating_sub(100),
+                updated_at_unix_ms: latest.saturating_sub(50),
+            },
+        ])
+        .expect("remote summary should be present");
+
+        assert_eq!(remote.state_label, "running");
+        assert_eq!(remote.total_invocations, 2);
+        assert_eq!(remote.running_count, 1);
+        assert_eq!(remote.completed_count, 1);
+        assert_eq!(
+            remote
+                .latest_invocation
+                .as_ref()
+                .and_then(|item| item.remote_task_id.as_deref()),
+            Some("remote-002")
+        );
     }
 
     #[test]

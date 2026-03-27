@@ -3809,7 +3809,7 @@ async fn get_remote_settlement_by_quote_id(
     row.map(row_to_remote_settlement).transpose()
 }
 
-async fn list_remote_invocations(
+pub(crate) async fn list_remote_invocations(
     state: &AppState,
     card_id: Option<&str>,
     local_task_id: Option<Uuid>,
