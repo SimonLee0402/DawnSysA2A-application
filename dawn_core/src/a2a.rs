@@ -43,6 +43,7 @@ pub struct TaskResponse {
     pub result: A2aTaskResult,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
+    pub updates: Vec<A2aTaskUpdate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +55,7 @@ pub struct TaskDetailResponse {
     pub result: A2aTaskResult,
     pub messages: Vec<A2aMessage>,
     pub artifacts: Vec<A2aArtifact>,
+    pub updates: Vec<A2aTaskUpdate>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -70,8 +72,21 @@ pub struct A2aTaskState {
 #[serde(rename_all = "camelCase")]
 pub struct A2aTaskResult {
     pub summary: String,
+    pub status: TaskStatus,
+    pub complete: bool,
+    pub updated_at_unix_ms: u128,
+    pub last_event_type: Option<String>,
     pub latest_message: Option<A2aMessage>,
     pub artifact_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskUpdate {
+    pub event_type: String,
+    pub detail: String,
+    pub created_at_unix_ms: u128,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +209,7 @@ async fn get_task(
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
     let result = build_task_result(&task, &messages, &artifacts);
+    let updates = build_task_updates(&events);
     Ok(Json(TaskDetailResponse {
         task,
         events,
@@ -201,6 +217,7 @@ async fn get_task(
         result,
         messages,
         artifacts,
+        updates,
     }))
 }
 
@@ -390,6 +407,7 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
     let messages = build_task_messages(&task, &events);
     let artifacts = build_task_artifacts(&task, &events);
     let result = build_task_result(&task, &messages, &artifacts);
+    let updates = build_task_updates(&events);
 
     Ok(TaskResponse {
         task,
@@ -398,6 +416,7 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
         result,
         messages,
         artifacts,
+        updates,
     })
 }
 
@@ -963,12 +982,41 @@ fn build_task_artifacts(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2
     }]
 }
 
+fn build_task_updates(events: &[TaskEventRecord]) -> Vec<A2aTaskUpdate> {
+    events
+        .iter()
+        .map(|event| {
+            let normalized = event.event_type.to_ascii_lowercase();
+            let terminal = normalized.contains("completed")
+                || normalized.contains("failed")
+                || normalized.contains("rejected")
+                || normalized.contains("revoked");
+            A2aTaskUpdate {
+                event_type: event.event_type.clone(),
+                detail: event.detail.clone(),
+                created_at_unix_ms: event.created_at_unix_ms,
+                terminal,
+            }
+        })
+        .collect()
+}
+
 fn build_task_result(
     task: &StoredTask,
     messages: &[A2aMessage],
     artifacts: &[A2aArtifact],
 ) -> A2aTaskResult {
     let latest_message = messages.last().cloned();
+    let complete = matches!(task.status, TaskStatus::Completed | TaskStatus::Failed);
+    let last_event_type = messages.iter().rev().find_map(|message| {
+        message.label.as_ref().and_then(|label| {
+            if label == "instruction" {
+                None
+            } else {
+                Some(label.clone())
+            }
+        })
+    });
     let summary = latest_message
         .as_ref()
         .and_then(|message| {
@@ -980,6 +1028,10 @@ fn build_task_result(
         .unwrap_or_else(|| task.last_update_reason.clone());
     A2aTaskResult {
         summary,
+        status: task.status,
+        complete,
+        updated_at_unix_ms: task.updated_at_unix_ms,
+        last_event_type,
         latest_message,
         artifact_names: artifacts
             .iter()
@@ -1059,8 +1111,9 @@ mod tests {
     use super::{
         A2aMessageRole, A2aPart, OrchestrationStep, StoredTask, TaskEventRecord, TaskStatus,
         TemplateContext, WasmInstructionBinding, build_task_artifacts, build_task_messages,
-        build_task_result, build_task_state, extract_text_from_value, parse_orchestration_plan,
-        parse_wasm_instruction, resolve_json_templates, resolve_template_string,
+        build_task_result, build_task_state, build_task_updates, extract_text_from_value,
+        parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
+        resolve_template_string,
     };
     use uuid::Uuid;
 
@@ -1321,8 +1374,39 @@ mod tests {
         let result = build_task_result(&task, &messages, &artifacts);
 
         assert_eq!(result.summary, "All done");
+        assert_eq!(result.status, TaskStatus::Completed);
+        assert!(result.complete);
+        assert_eq!(result.updated_at_unix_ms, 2);
+        assert_eq!(result.last_event_type.as_deref(), Some("task_completed"));
         assert_eq!(result.artifact_names, vec!["task-summary".to_string()]);
         assert!(result.latest_message.is_some());
+    }
+
+    #[test]
+    fn builds_task_updates_from_events() {
+        let task_id = Uuid::nil();
+        let events = vec![
+            TaskEventRecord {
+                event_type: "task_started".to_string(),
+                detail: "Running".to_string(),
+                task_id,
+                created_at_unix_ms: 5,
+            },
+            TaskEventRecord {
+                event_type: "task_completed".to_string(),
+                detail: "Done".to_string(),
+                task_id,
+                created_at_unix_ms: 9,
+            },
+        ];
+
+        let updates = build_task_updates(&events);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].event_type, "task_started");
+        assert!(!updates[0].terminal);
+        assert_eq!(updates[1].event_type, "task_completed");
+        assert!(updates[1].terminal);
+        assert_eq!(updates[1].created_at_unix_ms, 9);
     }
 }
 

@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     a2a::{self, Task},
@@ -106,6 +107,14 @@ struct WorkbenchSessionInspectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkbenchSessionRevokeRequest {
+    session_token: String,
+    session_id: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkbenchConfigGetRequest {}
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +174,7 @@ async fn handle_workbench_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     "logs.tail",
                     "session.list",
                     "session.inspect",
+                    "session.revoke",
                     "task.create",
                     "delegate.invoke",
                     "ping"
@@ -293,6 +303,10 @@ async fn handle_workbench_rpc(
         "session.inspect" => {
             let params: WorkbenchSessionInspectRequest = parse_rpc_params(request.params)?;
             inspect_session_inner(state, params).await
+        }
+        "session.revoke" => {
+            let params: WorkbenchSessionRevokeRequest = parse_rpc_params(request.params)?;
+            revoke_session_inner(state, params).await
         }
         "task.create" => {
             let params: WorkbenchTaskRequest = parse_rpc_params(request.params)?;
@@ -461,6 +475,25 @@ async fn inspect_session_inner(
     }))
 }
 
+async fn revoke_session_inner(
+    state: Arc<AppState>,
+    request: WorkbenchSessionRevokeRequest,
+) -> anyhow::Result<Value> {
+    let actor = identity::resolve_session_by_token(&state, &request.session_token).await?;
+    let session_id = Uuid::parse_str(request.session_id.trim()).context("sessionId must be a valid UUID")?;
+    let reason = request
+        .reason
+        .unwrap_or_else(|| format!("revoked from workbench by {}", actor.operator_name));
+    let session =
+        identity::revoke_operator_session_by_id(&state, session_id, &actor.operator_name, &reason)
+            .await?;
+    Ok(json!({
+        "session": session,
+        "actor": actor.operator_name,
+        "reason": reason,
+    }))
+}
+
 async fn create_task_inner(
     state: Arc<AppState>,
     request: WorkbenchTaskRequest,
@@ -545,5 +578,6 @@ mod tests {
         assert!(CONTROL_UI_HTML.contains("logs.tail"));
         assert!(CONTROL_UI_HTML.contains("session.list"));
         assert!(CONTROL_UI_HTML.contains("session.inspect"));
+        assert!(CONTROL_UI_HTML.contains("session.revoke"));
     }
 }

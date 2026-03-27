@@ -1097,6 +1097,7 @@
               <div class="footer-note">created ${formatTime(session.createdAtUnixMs)}</div>
               <div class="inline-actions" style="margin-top: 10px;">
                 <button class="chip-button" type="button" data-session-inspect="${escapeHtml(session.sessionId || "")}">查看详情</button>
+                ${session.revoked ? "" : `<button class="chip-button" type="button" data-session-revoke="${escapeHtml(session.sessionId || "")}">撤销 session</button>`}
               </div>
             </article>
           `).join("")
@@ -1600,6 +1601,39 @@
       }
     }
 
+    async function handleSessionRevoke(sessionId) {
+      if (!state.sessionToken) {
+        setNotice("session-inspect-notice", "error", "先创建或保存一个 session token。");
+        return;
+      }
+      if (!sessionId) {
+        setNotice("session-inspect-notice", "error", "缺少 sessionId。");
+        return;
+      }
+      if (!streamSupportsRpc()) {
+        setNotice("session-inspect-notice", "error", "当前工作台 websocket 不可用，无法撤销 session。");
+        return;
+      }
+      const reason = window.prompt("撤销 session 的原因", "revoked from workbench");
+      if (reason === null) return;
+      try {
+        const response = await callWorkbenchRpc("session.revoke", {
+          sessionToken: state.sessionToken,
+          sessionId,
+          reason
+        });
+        const session = response?.session || null;
+        setNotice(
+          "session-inspect-notice",
+          "warn",
+          `session=${session?.sessionId || sessionId} 已撤销 · actor=${response?.actor || state.operatorName || "operator"}`
+        );
+        await refreshDashboard();
+      } catch (error) {
+        setNotice("session-inspect-notice", "error", `session 撤销失败：${error.message}`);
+      }
+    }
+
     async function handleApprovalAction(action, approvalId) {
       const actor = state.operatorName || $("operator-name").value.trim() || "console-operator";
       const reason = window.prompt(`${action === "approve" ? "Approve" : "Reject"} reason`, action === "approve" ? "approved from control ui" : "rejected from control ui");
@@ -1677,6 +1711,11 @@
         }
       });
       $("session-list").addEventListener("click", (event) => {
+        const revokeTarget = event.target.closest("[data-session-revoke]");
+        if (revokeTarget) {
+          handleSessionRevoke(revokeTarget.dataset.sessionRevoke);
+          return;
+        }
         const target = event.target.closest("[data-session-inspect]");
         if (!target) return;
         handleSessionInspect(target.dataset.sessionInspect);

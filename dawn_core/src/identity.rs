@@ -2951,6 +2951,40 @@ pub(crate) async fn list_operator_session_records(
         .collect()
 }
 
+pub(crate) async fn revoke_operator_session_by_id(
+    state: &Arc<AppState>,
+    session_id: Uuid,
+    actor: &str,
+    reason: &str,
+) -> anyhow::Result<OperatorSessionRecord> {
+    let now = unix_timestamp_ms();
+    let updated = sqlx::query(
+        r#"
+        UPDATE operator_sessions
+        SET revoked = 1, updated_at_unix_ms = ?2
+        WHERE session_id = ?1
+        "#,
+    )
+    .bind(session_id.to_string())
+    .bind(now as i64)
+    .execute(state.pool())
+    .await
+    .with_context(|| format!("failed to revoke operator session {session_id}"))?;
+    if updated.rows_affected() == 0 {
+        anyhow::bail!("operator session not found");
+    }
+    let session = get_operator_session(state, session_id)
+        .await?
+        .ok_or_else(|| anyhow!("operator session disappeared after revoke"))?;
+    state.emit_console_event(
+        "identity",
+        Some(session.session_id.to_string()),
+        Some("session_revoked".to_string()),
+        format!("operator session revoked by {actor} · {reason}"),
+    );
+    Ok(session)
+}
+
 async fn get_operator_session(
     state: &Arc<AppState>,
     session_id: Uuid,
