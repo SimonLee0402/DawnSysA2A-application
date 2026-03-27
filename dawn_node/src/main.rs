@@ -613,6 +613,7 @@ fn dispatch_command_future<'a>(
         "find_paths" => Box::pin(execute_find_paths_command(envelope)),
         "grep_files" => Box::pin(execute_grep_files_command(envelope)),
         "process_snapshot" => Box::pin(execute_process_snapshot_command(envelope)),
+        "directory_tree_preview" => Box::pin(execute_directory_tree_preview_command(envelope)),
         "browser_start" => Box::pin(execute_browser_start_command(runtime_state, envelope)),
         "browser_profiles" => Box::pin(execute_browser_profiles_command(runtime_state, envelope)),
         "browser_profile_inspect" => Box::pin(execute_browser_profile_inspect_command(
@@ -979,6 +980,143 @@ async fn execute_list_directory_command(envelope: GatewayCommandEnvelope) -> Com
         })),
         error: None,
     }
+}
+
+async fn execute_directory_tree_preview_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let path = envelope
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(".");
+    let max_depth = payload_usize(&envelope.payload, "maxDepth", 2, 5);
+    let limit = payload_usize(&envelope.payload, "limit", 40, 200);
+    let root = PathBuf::from(path);
+    let display_path = root.display().to_string();
+
+    match build_directory_tree_preview(&root, max_depth, limit) {
+        Ok((entries, truncated, file_count, directory_count)) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "path": display_path,
+                "entries": entries,
+                "count": entries.len(),
+                "truncated": truncated,
+                "summary": {
+                    "rootPath": display_path,
+                    "entryCount": entries.len(),
+                    "fileCount": file_count,
+                    "directoryCount": directory_count,
+                    "maxDepth": max_depth,
+                    "truncated": truncated
+                }
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(format!(
+                "failed to build directory tree preview '{}': {error}",
+                display_path
+            )),
+        },
+    }
+}
+
+fn build_directory_tree_preview(
+    root: &PathBuf,
+    max_depth: usize,
+    limit: usize,
+) -> anyhow::Result<(Vec<Value>, bool, usize, usize)> {
+    fn visit(
+        path: &std::path::Path,
+        root: &std::path::Path,
+        depth: usize,
+        max_depth: usize,
+        limit: usize,
+        entries: &mut Vec<Value>,
+        truncated: &mut bool,
+        file_count: &mut usize,
+        directory_count: &mut usize,
+    ) -> anyhow::Result<()> {
+        if *truncated || depth > max_depth {
+            return Ok(());
+        }
+        let mut children = std::fs::read_dir(path)?
+            .filter_map(|entry| entry.ok())
+            .collect::<Vec<_>>();
+        children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+
+        for entry in children {
+            if entries.len() >= limit {
+                *truncated = true;
+                break;
+            }
+            let entry_path = entry.path();
+            let metadata = entry.metadata()?;
+            let is_dir = metadata.is_dir();
+            let relative_path = entry_path
+                .strip_prefix(root)
+                .unwrap_or(&entry_path)
+                .display()
+                .to_string();
+            if is_dir {
+                *directory_count += 1;
+            } else if metadata.is_file() {
+                *file_count += 1;
+            }
+            entries.push(json!({
+                "name": entry.file_name().to_string_lossy().to_string(),
+                "path": entry_path.display().to_string(),
+                "relativePath": relative_path,
+                "depth": depth,
+                "isDir": is_dir,
+                "isFile": metadata.is_file(),
+                "len": metadata.len()
+            }));
+            if is_dir && depth < max_depth {
+                visit(
+                    &entry_path,
+                    root,
+                    depth + 1,
+                    max_depth,
+                    limit,
+                    entries,
+                    truncated,
+                    file_count,
+                    directory_count,
+                )?;
+                if *truncated {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    let mut file_count = 0usize;
+    let mut directory_count = 0usize;
+    visit(
+        root,
+        root,
+        1,
+        max_depth,
+        limit,
+        &mut entries,
+        &mut truncated,
+        &mut file_count,
+        &mut directory_count,
+    )?;
+    Ok((entries, truncated, file_count, directory_count))
 }
 
 async fn execute_read_file_preview_command(
@@ -1567,6 +1705,7 @@ async fn execute_headless_status_command(
                 "headless_observe",
                 "system_info",
                 "process_snapshot",
+                "directory_tree_preview",
                 "list_directory",
                 "read_file_preview",
                 "tail_file_preview",
@@ -1678,6 +1817,7 @@ fn headless_runtime_policy() -> Value {
             "headless_observe",
             "system_info",
             "process_snapshot",
+            "directory_tree_preview",
             "list_directory",
             "read_file_preview",
             "tail_file_preview",
@@ -1722,6 +1862,7 @@ fn summarize_headless_observation(
             "read_file_range",
             "stat_path",
             "list_directory",
+            "directory_tree_preview",
             "find_paths",
             "grep_files"
         ]
@@ -12211,6 +12352,7 @@ fn default_capabilities() -> Vec<String> {
         "desktop_accessibility_set_value".to_string(),
         "system_info".to_string(),
         "list_directory".to_string(),
+        "directory_tree_preview".to_string(),
         "read_file_preview".to_string(),
         "tail_file_preview".to_string(),
         "read_file_range".to_string(),
@@ -12238,6 +12380,7 @@ fn headless_default_capabilities() -> Vec<String> {
         "headless_observe".to_string(),
         "system_info".to_string(),
         "list_directory".to_string(),
+        "directory_tree_preview".to_string(),
         "read_file_preview".to_string(),
         "tail_file_preview".to_string(),
         "read_file_range".to_string(),
@@ -12318,6 +12461,7 @@ fn is_command_allowed_for_runtime_profile(node_profile: &str, command_type: &str
             | "headless_status"
             | "headless_observe"
             | "system_info"
+            | "directory_tree_preview"
             | "list_directory"
             | "read_file_preview"
             | "tail_file_preview"
@@ -13060,6 +13204,51 @@ mod tests {
             entries
                 .iter()
                 .any(|entry| entry["name"] == "alpha.txt" && entry["isFile"] == true)
+        );
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn directory_tree_preview_command_returns_nested_entries() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("dawn-node-tree-dir-{}", unix_timestamp_ms()));
+        let nested_dir = temp_dir.join("nested");
+        let deep_dir = nested_dir.join("deep");
+        fs::create_dir_all(&deep_dir).unwrap();
+        fs::write(temp_dir.join("root.txt"), "root").unwrap();
+        fs::write(deep_dir.join("leaf.txt"), "leaf").unwrap();
+
+        let response = execute_directory_tree_preview_command(GatewayCommandEnvelope {
+            command_id: "cmd-tree-dir".to_string(),
+            command_type: "directory_tree_preview".to_string(),
+            payload: json!({
+                "path": temp_dir.display().to_string(),
+                "maxDepth": 3,
+                "limit": 20
+            }),
+        })
+        .await;
+
+        assert_eq!(response.status, "succeeded");
+        let result = response.result.unwrap();
+        assert_eq!(result["summary"]["directoryCount"], 2);
+        assert_eq!(result["summary"]["fileCount"], 2);
+        let entries = result["entries"].as_array().cloned().unwrap_or_default();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["relativePath"] == "nested")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["relativePath"] == "nested\\deep")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["relativePath"] == "nested\\deep\\leaf.txt")
         );
 
         fs::remove_dir_all(temp_dir).ok();

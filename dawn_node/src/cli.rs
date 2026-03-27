@@ -2193,7 +2193,7 @@ fn runtime_policy_payload(node_profile: &str, requested_capabilities: &[String])
             "interactiveCommandsBlocked": true,
             "blockedClasses": ["desktop_interaction", "managed_browser", "shell_exec"],
             "entrypoints": ["headless_status", "headless_observe"],
-                    "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "read_file_preview", "tail_file_preview", "read_file_range", "stat_path", "find_paths", "grep_files"],
+                    "recommendedCommands": ["system_info", "process_snapshot", "list_directory", "directory_tree_preview", "read_file_preview", "tail_file_preview", "read_file_range", "stat_path", "find_paths", "grep_files"],
             "requestedCapabilities": requested_capabilities,
         }),
         _ => json!({
@@ -2234,7 +2234,7 @@ fn print_node_profile_summary(profile: &DawnCliProfile) -> anyhow::Result<()> {
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
         println!(
-            "Headless tools: process_snapshot, list_directory, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
+            "Headless tools: process_snapshot, list_directory, directory_tree_preview, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
         );
         println!("Tip: run `dawn-node node status` to inspect the headless runtime preset.");
     }
@@ -3586,7 +3586,7 @@ fn print_node_status(profile: &DawnCliProfile, json_output: bool) -> anyhow::Res
     if node_profile == "headless" {
         println!("Headless entrypoints: headless_status, headless_observe");
         println!(
-            "Headless tools: process_snapshot, list_directory, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
+            "Headless tools: process_snapshot, list_directory, directory_tree_preview, read_file_preview, tail_file_preview, read_file_range, stat_path, find_paths, grep_files"
         );
     }
     Ok(())
@@ -7281,6 +7281,7 @@ fn default_requested_capabilities_for_profile(
             "headless_observe".to_string(),
             "list_capabilities".to_string(),
             "list_directory".to_string(),
+            "directory_tree_preview".to_string(),
             "find_paths".to_string(),
             "grep_files".to_string(),
             "process_snapshot".to_string(),
@@ -7369,6 +7370,7 @@ fn default_requested_capabilities_for_profile(
             "echo".to_string(),
             "list_capabilities".to_string(),
             "list_directory".to_string(),
+            "directory_tree_preview".to_string(),
             "find_paths".to_string(),
             "grep_files".to_string(),
             "process_snapshot".to_string(),
@@ -7747,6 +7749,11 @@ mod tests {
         let capabilities = default_requested_capabilities_for_profile("headless", false);
         assert!(capabilities.iter().any(|value| value == "headless_status"));
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "directory_tree_preview")
+        );
         assert!(capabilities.iter().any(|value| value == "grep_files"));
         assert!(
             capabilities
@@ -7808,6 +7815,13 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|value| value == "headless_observe")
+        );
+        assert!(
+            policy["recommendedCommands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "directory_tree_preview")
         );
         assert!(
             policy["recommendedCommands"]

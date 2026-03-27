@@ -100,6 +100,10 @@ pub struct A2aTaskResult {
     pub artifact_count: usize,
     pub update_count: usize,
     pub stream_cursor: usize,
+    pub stream_next_cursor: usize,
+    pub stream_has_more: bool,
+    pub stream_returned_count: usize,
+    pub stream_available_count: usize,
     pub stream_summary: A2aTaskStreamSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_stream_item: Option<A2aTaskStreamItem>,
@@ -1399,6 +1403,10 @@ fn build_task_result(
         artifact_count: artifacts.len(),
         update_count: updates.len(),
         stream_cursor: stream.cursor,
+        stream_next_cursor: stream.next_cursor,
+        stream_has_more: stream.has_more,
+        stream_returned_count: stream.returned_count,
+        stream_available_count: stream.available_count,
         stream_summary: stream.summary.clone(),
         latest_stream_item: stream.items.last().cloned(),
     }
@@ -1811,6 +1819,10 @@ mod tests {
         assert_eq!(result.artifact_count, 1);
         assert_eq!(result.update_count, 1);
         assert_eq!(result.stream_cursor, 1);
+        assert_eq!(result.stream_next_cursor, 1);
+        assert!(!result.stream_has_more);
+        assert_eq!(result.stream_returned_count, 1);
+        assert_eq!(result.stream_available_count, 1);
         assert_eq!(result.stream_summary.total_items, 1);
         assert_eq!(result.stream_summary.latest_kind.as_deref(), Some("result"));
         assert_eq!(

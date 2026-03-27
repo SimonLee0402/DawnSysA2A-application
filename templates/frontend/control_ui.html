@@ -934,6 +934,7 @@
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="headless_observe">只读观察</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="process_snapshot">进程快照</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="list_directory">列目录</button>
+                      <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="directory_tree_preview">目录树</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="stat_path">文件信息</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="read_file_preview">文件预览</button>
                       <button class="chip-button" type="button" data-node-observe="${escapeHtml(node.nodeId || "")}" data-node-command="tail_file_preview">日志尾部</button>
@@ -1792,6 +1793,13 @@
         const path = window.prompt("输入要查看的路径", "D:\\Agent2Agent应用");
         if (path === null) return;
         payload.path = path;
+      } else if (commandType === "directory_tree_preview") {
+        const path = window.prompt("输入目录树根路径", "D:\\Agent2Agent应用");
+        if (path === null) return;
+        const maxDepth = window.prompt("输入最大深度", "2");
+        if (maxDepth === null) return;
+        payload.path = path;
+        payload.maxDepth = Number.isFinite(Number(maxDepth)) ? Number(maxDepth) : 2;
       } else if (commandType === "read_file_range") {
         const path = window.prompt("输入要查看的文件路径", "D:\\Agent2Agent应用\\README.md");
         if (path === null) return;
@@ -1828,8 +1836,10 @@
           : (result?.summary || "");
         const headline = commandType === "process_snapshot"
           ? `processes=${Number(result?.count || result?.processSnapshot?.count || 0)}`
-          : commandType === "list_directory"
-            ? `entries=${Number(result?.count || result?.directory?.count || 0)}`
+            : commandType === "list_directory"
+              ? `entries=${Number(result?.count || result?.directory?.count || 0)}`
+            : commandType === "directory_tree_preview"
+              ? `entries=${Number(result?.count || 0)} · dirs=${Number(result?.summary?.directoryCount || 0)} · files=${Number(result?.summary?.fileCount || 0)}${result?.truncated ? " · truncated" : ""}`
             : commandType === "stat_path"
               ? `isDir=${Boolean(result?.isDir)} · isFile=${Boolean(result?.isFile)} · bytes=${Number(result?.len || 0)}`
               : commandType === "read_file_preview"

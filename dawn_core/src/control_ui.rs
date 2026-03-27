@@ -591,6 +591,7 @@ async fn node_observe_inner(
             | "system_info"
             | "process_snapshot"
             | "list_directory"
+            | "directory_tree_preview"
             | "stat_path"
             | "read_file_preview"
             | "tail_file_preview"
