@@ -1323,8 +1323,11 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             region: "global",
             integration_mode: "live_local_openai_compatible",
             endpoint: "/api/gateway/connectors/model/ollama/respond",
-            note: "Local Ollama OpenAI-compatible path.",
-            env_hints: vec!["OLLAMA_CHAT_URL or OLLAMA_BASE_URL"],
+            note: "Local Ollama chat path. Optionally set OLLAMA_DEFAULT_MODEL to pin Gemma4 or another local model.",
+            env_hints: vec![
+                "OLLAMA_CHAT_URL or OLLAMA_BASE_URL",
+                "optional: OLLAMA_DEFAULT_MODEL",
+            ],
             env_requirement_groups: vec![vec!["OLLAMA_CHAT_URL"], vec!["OLLAMA_BASE_URL"]],
         }),
         ("chat", "telegram") => Some(SetupTargetProfile {

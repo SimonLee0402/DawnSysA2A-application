@@ -1207,8 +1207,10 @@ This gives the gateway restart-safe task, payment, node, command, and orchestrat
 
 - Optional base URL override: `OLLAMA_BASE_URL`
 - Optional full endpoint override: `OLLAMA_CHAT_URL`
+- Optional default model override: `OLLAMA_DEFAULT_MODEL`
 - Default live endpoint used by the gateway: `POST http://127.0.0.1:11434/api/chat`
-- Default model: `llama3.1`
+- Default model: `OLLAMA_DEFAULT_MODEL` if set, otherwise `llama3.1`
+- Example local Gemma4 model name: `gemma4-e2b-local`
 - Ollama is treated as a local live connector rather than an API-key connector
 
 ### Telegram

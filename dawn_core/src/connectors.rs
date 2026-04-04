@@ -2051,7 +2051,13 @@ async fn execute_ollama_response(
         model,
         instructions,
     } = request;
-    let model = model.unwrap_or_else(|| "llama3.1".to_string());
+    let model = model
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            resolve_first_present_env(&["OLLAMA_DEFAULT_MODEL"])
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "llama3.1".to_string());
     let base_url = std::env::var("OLLAMA_BASE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
         .trim_end_matches('/')
