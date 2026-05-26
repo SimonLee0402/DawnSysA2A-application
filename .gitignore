@@ -146,3 +146,6 @@ config.ini # If it contains secrets
 
 # Rust
 target/
+
+# Local developer toolchains
+.tools/

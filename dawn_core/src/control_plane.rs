@@ -716,7 +716,10 @@ async fn requeue_dispatched_commands_for_node(state: &Arc<AppState>, node_id: &s
     let commands = match state.list_node_commands(Some(node_id)).await {
         Ok(commands) => commands,
         Err(error) => {
-            error!(?error, "Failed to list node commands for reconnect recovery on {node_id}");
+            error!(
+                ?error,
+                "Failed to list node commands for reconnect recovery on {node_id}"
+            );
             return;
         }
     };
@@ -730,14 +733,15 @@ async fn requeue_dispatched_commands_for_node(state: &Arc<AppState>, node_id: &s
                 command.command_id,
                 NodeCommandStatus::Queued,
                 None,
-                Some("node session disconnected before command completion; queued for retry".into()),
+                Some(
+                    "node session disconnected before command completion; queued for retry".into(),
+                ),
             )
             .await
         {
             error!(
                 ?error,
-                "Failed to requeue in-flight command {} for {node_id}",
-                command.command_id
+                "Failed to requeue in-flight command {} for {node_id}", command.command_id
             );
         }
     }

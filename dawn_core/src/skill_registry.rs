@@ -40,7 +40,12 @@ const NATIVE_BUILTIN_SKILLS: &[NativeBuiltinSkillSpec] = &[
         version: "native",
         display_name: "Agent Card Discoverer",
         description: "Dawn native skill for discovering, validating, and operationalizing A2A Agent Cards through the local marketplace, federated catalogs, and operator workflows.",
-        capabilities: &["a2a", "agent_cards", "marketplace_search", "native_workflow"],
+        capabilities: &[
+            "a2a",
+            "agent_cards",
+            "marketplace_search",
+            "native_workflow",
+        ],
         artifact_relative_path: "../workflow/native_skills/agent-card-discoverer/SKILL.md",
     },
     NativeBuiltinSkillSpec {
@@ -48,8 +53,86 @@ const NATIVE_BUILTIN_SKILLS: &[NativeBuiltinSkillSpec] = &[
         version: "native",
         display_name: "Bayesian Skill Set",
         description: "Dawn native skill for uncertainty-aware planning, evidence fusion, and safe next-step selection across #chat/#observe/#assist/#autopilot workflows.",
-        capabilities: &["bayesian_planning", "decision_support", "safety_modes", "native_workflow"],
+        capabilities: &[
+            "bayesian_planning",
+            "decision_support",
+            "safety_modes",
+            "native_workflow",
+        ],
         artifact_relative_path: "../workflow/native_skills/bayesian-skill-set/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "dawn-orchestrator",
+        version: "native",
+        display_name: "Dawn Orchestrator",
+        description: "Dawn native skill for turning user or operator intent into tasks, subtask delegation, workflow execution, and result stitching across the local gateway.",
+        capabilities: &[
+            "task_orchestration",
+            "delegation",
+            "workflow_execution",
+            "native_workflow",
+        ],
+        artifact_relative_path: "../workflow/native_skills/dawn-orchestrator/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "dawn-chat-bridge",
+        version: "native",
+        display_name: "Dawn Chat Bridge",
+        description: "Dawn native skill for normalizing inbound chat commands and routing replies across supported messaging channels.",
+        capabilities: &[
+            "chat_ingress",
+            "chat_dispatch",
+            "multi_channel",
+            "native_workflow",
+        ],
+        artifact_relative_path: "../workflow/native_skills/dawn-chat-bridge/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "dawn-model-router",
+        version: "native",
+        display_name: "Dawn Model Router",
+        description: "Dawn native skill for selecting, routing, and operating cloud or local models through unified connectors, including Ollama-hosted local models.",
+        capabilities: &[
+            "model_routing",
+            "connector_ops",
+            "local_models",
+            "native_workflow",
+        ],
+        artifact_relative_path: "../workflow/native_skills/dawn-model-router/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "dawn-node-operator",
+        version: "native",
+        display_name: "Dawn Node Operator",
+        description: "Dawn native skill for operating the local Dawn node, health checks, rollout handoff, and workspace execution on the desktop machine.",
+        capabilities: &["node_ops", "health_checks", "rollout", "native_workflow"],
+        artifact_relative_path: "../workflow/native_skills/dawn-node-operator/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "dawn-approval-guard",
+        version: "native",
+        display_name: "Dawn Approval Guard",
+        description: "Dawn native skill for human-in-the-loop approvals, AP2 authorization, and guarded execution of sensitive actions.",
+        capabilities: &[
+            "approval_center",
+            "payment_authorization",
+            "guardrails",
+            "native_workflow",
+        ],
+        artifact_relative_path: "../workflow/native_skills/dawn-approval-guard/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
+        skill_id: "dawn-marketplace-operator",
+        version: "native",
+        display_name: "Dawn Marketplace Operator",
+        description: "Dawn native skill for publishing, searching, installing, and federating agent cards and signed skills across Dawn gateways.",
+        capabilities: &[
+            "marketplace",
+            "skill_distribution",
+            "agent_cards",
+            "federation",
+        ],
+        artifact_relative_path: "../workflow/native_skills/dawn-marketplace-operator/SKILL.md",
     },
 ];
 
@@ -966,6 +1049,24 @@ pub fn native_builtin_skill_usage(skill_id: &str) -> Option<String> {
         "bayesian-skill-set" => Some(
             "这是 Dawn 的原生技能 `Bayesian Skill Set`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天/WorkBench: `#chat` / `#observe` / `#assist` / `#autopilot`\n- /app Command Studio: 用它来切档、观察和规划下一步\n- CLI: 结合 `dawn.cmd doctor --deep`、`dawn.cmd status` 和现有对话链做不确定性收敛\n\n它的职责是做不确定场景下的分级决策和下一步规划，而不是执行 Wasm。".to_string(),
         ),
+        "dawn-orchestrator" => Some(
+            "这是 Dawn 的原生技能 `Dawn Orchestrator`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天: `/task`、`/delegate`、`/status`\n- /app: Command Studio 和任务工作台\n- A2A: 由网关把用户意图转成任务、子任务和委托链路\n\n它的职责是做任务编排和执行落地，而不是执行 Wasm。".to_string(),
+        ),
+        "dawn-chat-bridge" => Some(
+            "这是 Dawn 的原生技能 `Dawn Chat Bridge`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天平台: Telegram、Slack、Discord、Signal、飞书、钉钉、企微、QQ Bot\n- 命令入口: `/help`、`/skills`、`/status`\n- 网关: 统一接收入站消息并把结果回写到原通道\n\n它的职责是做多通道消息归一化和回传，而不是执行 Wasm。".to_string(),
+        ),
+        "dawn-model-router" => Some(
+            "这是 Dawn 的原生技能 `Dawn Model Router`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天: `/model`\n- CLI: `dawn.ps1 connectors status`、`dawn.ps1 models test ollama`\n- 工作流: `model_connector` 步骤统一接入云模型和本地模型\n\n它的职责是做模型路由和连接器落点控制，而不是执行 Wasm。".to_string(),
+        ),
+        "dawn-node-operator" => Some(
+            "这是 Dawn 的原生技能 `Dawn Node Operator`，默认可用，不需要安装。\n\n本机使用方式：\n- CLI: `dawn.ps1 status`、`dawn-node setup`、`dawn.cmd doctor --deep`\n- /console: 查看节点状态、工作区和 rollout 执行面\n- 本机: 负责把桌面节点持续挂到 Dawn 网关\n\n它的职责是做本地节点运行与检查，而不是执行 Wasm。".to_string(),
+        ),
+        "dawn-approval-guard" => Some(
+            "这是 Dawn 的原生技能 `Dawn Approval Guard`，默认可用，不需要安装。\n\n本机使用方式：\n- /app 与 /console: Approval Center\n- 关键动作: 审批、授权、敏感操作门禁\n- AP2: 配合授权链路做人在环确认\n\n它的职责是做审批和高风险动作治理，而不是执行 Wasm。".to_string(),
+        ),
+        "dawn-marketplace-operator" => Some(
+            "这是 Dawn 的原生技能 `Dawn Marketplace Operator`，默认可用，不需要安装。\n\n本机使用方式：\n- CLI: `dawn.cmd agents search <关键词> --federated`、`dawn-node skills install`\n- /app: Marketplace 和 Agent Cards 面板\n- 联邦目录: 搜索、导入、安装与发布技能和 Agent\n\n它的职责是做 Dawn 能力分发和市场运营，而不是执行 Wasm。".to_string(),
+        ),
         _ => None,
     }
 }
@@ -1006,10 +1107,9 @@ fn native_builtin_skill(
     skill_id: &str,
     version: Option<&str>,
 ) -> anyhow::Result<Option<SkillRecord>> {
-    let Some(spec) = NATIVE_BUILTIN_SKILLS
-        .iter()
-        .find(|spec| spec.skill_id == skill_id && version.is_none_or(|value| value == spec.version))
-    else {
+    let Some(spec) = NATIVE_BUILTIN_SKILLS.iter().find(|spec| {
+        spec.skill_id == skill_id && version.is_none_or(|value| value == spec.version)
+    }) else {
         return Ok(None);
     };
     native_builtin_skill_record(spec).map(Some)
@@ -1017,10 +1117,18 @@ fn native_builtin_skill(
 
 fn native_builtin_skill_record(spec: &NativeBuiltinSkillSpec) -> anyhow::Result<SkillRecord> {
     let artifact_path = native_builtin_skill_path(spec);
-    let artifact_bytes = std::fs::read(&artifact_path)
-        .with_context(|| format!("failed to read native builtin skill file {}", artifact_path.display()))?;
-    let metadata = std::fs::metadata(&artifact_path)
-        .with_context(|| format!("failed to stat native builtin skill file {}", artifact_path.display()))?;
+    let artifact_bytes = std::fs::read(&artifact_path).with_context(|| {
+        format!(
+            "failed to read native builtin skill file {}",
+            artifact_path.display()
+        )
+    })?;
+    let metadata = std::fs::metadata(&artifact_path).with_context(|| {
+        format!(
+            "failed to stat native builtin skill file {}",
+            artifact_path.display()
+        )
+    })?;
     let updated_at_unix_ms = metadata
         .modified()
         .ok()
@@ -1033,7 +1141,11 @@ fn native_builtin_skill_record(spec: &NativeBuiltinSkillSpec) -> anyhow::Result<
         display_name: spec.display_name.to_string(),
         description: Some(spec.description.to_string()),
         entry_function: "native_entry".to_string(),
-        capabilities: spec.capabilities.iter().map(|value| value.to_string()).collect(),
+        capabilities: spec
+            .capabilities
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
         artifact_path: artifact_path.display().to_string(),
         artifact_sha256: hex::encode(Sha256::digest(&artifact_bytes)),
         source_kind: NATIVE_BUILTIN_SOURCE_KIND.to_string(),
@@ -1202,10 +1314,9 @@ mod tests {
     use wasmtime::Engine;
 
     use super::{
-        NATIVE_BUILTIN_SOURCE_KIND, RegisterSignedSkillRequest,
-        SKILL_PUBLISHER_ISSUER_DID_PREFIX, SignedSkillDocument, SignedSkillEnvelope,
-        SkillPublisherTrustRootUpsertRequest, current_distribution,
-        native_builtin_skill_usage, register_signed_skill_inner,
+        NATIVE_BUILTIN_SOURCE_KIND, RegisterSignedSkillRequest, SKILL_PUBLISHER_ISSUER_DID_PREFIX,
+        SignedSkillDocument, SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest,
+        current_distribution, native_builtin_skill_usage, register_signed_skill_inner,
         skill_publisher_issuer_did_from_public_key_hex, upsert_skill_publisher_trust_root_inner,
         validate_skill_segment,
     };
@@ -1313,16 +1424,34 @@ mod tests {
     async fn distribution_includes_native_builtin_skills() {
         let (state, db_path) = test_state().await.unwrap();
         let distribution = current_distribution(&state).await.unwrap();
-        assert!(distribution
-            .skills
-            .iter()
-            .any(|skill| skill.skill_id == "agent-card-discoverer"
-                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
-        assert!(distribution
-            .skills
-            .iter()
-            .any(|skill| skill.skill_id == "bayesian-skill-set"
-                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
+        assert!(
+            distribution
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "agent-card-discoverer"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
+        assert!(
+            distribution
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "bayesian-skill-set"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
+        assert!(
+            distribution
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "dawn-orchestrator"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
+        assert!(
+            distribution
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "dawn-model-router"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
         drop(state);
         fs::remove_file(db_path).ok();
     }
@@ -1331,5 +1460,11 @@ mod tests {
     fn native_builtin_skill_usage_is_available() {
         assert!(native_builtin_skill_usage("agent-card-discoverer").is_some());
         assert!(native_builtin_skill_usage("bayesian-skill-set").is_some());
+        assert!(native_builtin_skill_usage("dawn-orchestrator").is_some());
+        assert!(native_builtin_skill_usage("dawn-chat-bridge").is_some());
+        assert!(native_builtin_skill_usage("dawn-model-router").is_some());
+        assert!(native_builtin_skill_usage("dawn-node-operator").is_some());
+        assert!(native_builtin_skill_usage("dawn-approval-guard").is_some());
+        assert!(native_builtin_skill_usage("dawn-marketplace-operator").is_some());
     }
 }

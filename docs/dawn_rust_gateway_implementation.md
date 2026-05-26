@@ -310,7 +310,7 @@ Control Center:
 
 - `GET /console` serves a live dashboard for inbound chat, tasks, nodes, settlements, and agent cards.
 - the dashboard now includes an `Approval Center` feed for pending node-command and AP2 approvals.
-- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_profiles`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_notification`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
+- the dashboard now includes a `Node Command Console` for dispatching attested node capabilities such as `system_info`, `process_snapshot`, `list_directory`, `read_file_preview`, `stat_path`, `browser_start`, `browser_profiles`, `browser_status`, `browser_stop`, `browser_navigate`, `browser_new_tab`, `browser_new_window`, `browser_extract`, `browser_click`, `browser_back`, `browser_forward`, `browser_reload`, `browser_focus`, `browser_close`, `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_pdf`, `browser_console_messages`, `browser_network_requests`, `browser_trace`, `browser_trace_export`, `browser_errors`, `browser_cookies`, `browser_storage`, `browser_storage_set`, `browser_set_headers`, `browser_set_offline`, `browser_set_geolocation`, `browser_emulate_device`, `browser_evaluate`, `browser_wait_for`, `browser_handle_dialog`, `browser_press_key`, `browser_type`, `browser_upload`, `browser_download`, `browser_form_fill`, `browser_form_submit`, `browser_open`, `browser_search`, `desktop_open`, `desktop_notification`, `desktop_clipboard_set`, `desktop_type_text`, `desktop_key_press`, `desktop_windows_list`, `desktop_window_focus`, `desktop_wait_for_window`, `desktop_focus_app`, `desktop_launch_and_focus`, `desktop_mouse_position`, `desktop_mouse_move`, `desktop_mouse_click`, `desktop_screen_info`, `desktop_snapshot`, `desktop_screenshot`, and `desktop_accessibility_snapshot` through the existing control-plane API.
 - the current console visual direction is a liquid-glass operations deck rather than a plain admin table, and it now includes command template chips plus a full command-detail inspector for recent node results.
 - the console now has a unified right-side liquid-glass detail drawer so operators can inspect and act on approvals, node commands, and settlements without leaving the dashboard.
 - the same control surface now also exposes remote invocations, quote-ledger rounds, and per-node rollout fabric state, all routed into the same detail drawer and operator action loop.
@@ -367,6 +367,7 @@ Identity And Onboarding:
 - the desktop CLI now exposes a top-level `dawn-node setup` flow that bootstraps an operator session, lets the user choose default model providers and chat platforms, stages connector secrets locally, installs selected skills, and optionally issues a first local node claim in one pass
 - guided setup now defaults to a simpler OpenClaw-style path: it auto-suggests workspace identity values, avoids prompting for tenant/project/region unless `--advanced` is used, and a first interactive `dawn-node` run will auto-launch setup when no local CLI session is present
 - the interactive setup menus now prioritize the lowest-friction paths: `OpenAI`, `Anthropic Claude`, and `Google Gemini` are shown with explicit `API key` labels, `Telegram Bot` is shown with an explicit `bot token` label, and the selector accepts natural aliases such as `claude`, `gemini`, and `google-chat`
+- local desktop control is now exposed through the same attested node-command path from the CLI with `dawn-node node-command dispatch --type <command> --payload '{...}'`; this keeps CLI-originated desktop actions on the same approval, audit, and capability checks used by every chat ingress surface.
 - the desktop CLI now also exposes `dawn-node channels pairings list|approve|reject`, so Signal and BlueBubbles inbound pairing decisions can be resolved from the local workstation without dropping into raw HTTP calls
 - `dawn-node channels send signal|bluebubbles` now supports richer native actions: Signal can stage attachments, reactions, receipts, per-account routing, and group-management actions, while BlueBubbles can stage attachments, reactions, typing, mark-read / mark-unread, edit, unsend, reply threading, message effects, participant management, and group rename actions from the same CLI surface instead of forcing raw JSON calls
 - the desktop CLI now also exposes `dawn-node ingress status`, which prints ingress callback readiness together with Signal/BlueBubbles DM policy, allowlist counts, and pending-pairing counts
@@ -969,8 +970,11 @@ Supported node command types in the sample Rust node:
 - `desktop_wait_for_window`
 - `desktop_focus_app`
 - `desktop_launch_and_focus`
+- `desktop_mouse_position`
 - `desktop_mouse_move`
 - `desktop_mouse_click`
+- `desktop_screen_info`
+- `desktop_snapshot`
 - `desktop_screenshot`
 - `desktop_ocr`
 - `desktop_accessibility_query`
@@ -1059,8 +1063,11 @@ Device-facing node behavior:
 - `desktop_wait_for_window` polls until a visible desktop window matching title, handle, or process name appears, then returns the matched window summary.
 - `desktop_focus_app` focuses the first visible window for a named process such as `notepad`.
 - `desktop_launch_and_focus` launches a target application and then waits until a matching window becomes focusable, which is safer than firing keyboard input immediately after launch.
+- `desktop_mouse_position` reads the current host pointer location in screen coordinates.
 - `desktop_mouse_move` moves the host pointer to explicit screen coordinates.
 - `desktop_mouse_click` sends left, right, or middle click input and can optionally move to a target coordinate first.
+- `desktop_screen_info` returns monitor bounds, working areas, and virtual desktop geometry so coordinate plans can account for DPI and multi-screen layout.
+- `desktop_snapshot` collects the current pointer position, screen info, foreground window, and a bounded visible-window list; it can also capture a screenshot when `includeScreenshot` is true.
 - `desktop_screenshot` captures the full desktop, or an explicit rectangular region, into a PNG file on the host machine.
 - `desktop_ocr` runs local OCR over an existing image file or a captured desktop region; the current implementation uses a local `tesseract` CLI backend when it is installed on the host.
 - `desktop_accessibility_query` searches a focused window's accessibility tree for nodes matching `name`, `automationId`, `className`, and `controlType`, then ranks candidates with `matchMode`, `preferVisible`, and `preferEnabled` before returning bounded match metadata.
@@ -1218,6 +1225,8 @@ This gives the gateway restart-safe task, payment, node, command, and orchestrat
 - Environment variable: `TELEGRAM_BOT_TOKEN`
 - Live endpoint used by the gateway: `POST https://api.telegram.org/bot{token}/sendMessage`
 - If the token is missing, the connector returns `mode = dry_run`
+
+All chat software keeps the same control boundaries. Current outbound chat connectors include Telegram, Slack, Discord, Mattermost, Microsoft Teams, WhatsApp, LINE, Matrix, Google Chat, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and QQ. Inbound chat ingress currently covers Telegram, Signal, BlueBubbles, Feishu, DingTalk, WeCom, WeChat Official Account, and QQ; each ingress-created task continues through the same A2A, policy, approval, and attested node-command pipeline as local CLI dispatch.
 
 ### Global chat webhook connectors
 

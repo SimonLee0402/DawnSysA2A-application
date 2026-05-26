@@ -1,51 +1,116 @@
 # DawnSys A2A Application
 
-一个面向本地节点、自动化编排、多模型连接器和多通道消息接入的 Rust A2A 网关系统。
+一个面向本地节点、Agent 编排、多模型接入、多聊天通道接入和人机协同审批的 Dawn 运行时系统。
 
-当前仓库的运行时主线是 `dawn_core + dawn_node`。旧的 Django / Vue 启动说明已经不再代表项目现状。
+当前仓库的真实运行主线是 `dawn_core + dawn_node`。它不是旧版 Django / Vue 工程的包装层，而是一套以 Rust 为核心的本地优先自动化执行系统。
 
-## 项目定位
+## DawnSys 是什么
 
-DawnSys 用于把以下能力放到一个统一的自动化系统里：
+DawnSys 要解决的不是单点的模型调用问题，而是把一整条自动化链路收敛到同一个运行时里：
 
-- A2A 任务接入、编排与执行
-- 本地节点注册、心跳、命令下发与结果回传
-- 多模型连接器统一调用
-- 多聊天平台的入站事件接收与出站消息分发
-- Agent Card 发布、导入、发现与远程调用
-- Wasm 技能注册、签名分发与激活
-- AP2 支付授权与审批流
-- 面向操作员和终端用户的 Web 控制界面
+- 从聊天入口、Web 工作台或控制台接收任务
+- 把任务转换成可执行的 A2A / 本地工作流
+- 根据任务类型路由到云模型、本地模型、原生技能、Wasm 技能或远程 Agent
+- 在关键步骤上插入审批、授权、支付或人工确认
+- 把结果回写到聊天通道、工作台、控制台和可审计事件流
 
-## 当前能力
+换句话说，DawnSys 更像一个本地优先的 Agent Automation Runtime，而不只是一个模型网关。
 
-- Rust 网关服务基于 Axum，状态持久化使用 SQLx + SQLite。
-- `dawn_node` 可作为本地桌面节点接入网关，通过 WebSocket 接收命令并回传执行结果。
-- 模型连接器同时覆盖云端与本地路径，支持 `OpenAI`、`Anthropic`、`Google`、`DeepSeek`、`Qwen`、`Zhipu`、`Moonshot`、`Doubao`、`Ollama` 等。
-- 聊天连接器和入站接入覆盖 `Telegram`、`Slack`、`Discord`、`Signal`、`Feishu`、`DingTalk`、`WeCom`、`微信公众号`、`QQ Bot` 等。
-- 系统提供 `/.well-known/agent-card.json`、Agent Card 注册表、Marketplace、Approval Center、Control Center 和终端用户工作台。
-- 本地模型可以通过 Ollama 直接挂入自动化流程，Gemma4 已支持作为默认本地模型接入。
+## 系统优势
 
-## 主要目录
+- 统一运行时
+  聊天接入、任务编排、模型连接器、技能系统、Agent Card、审批和 Marketplace 在同一套状态与控制平面里运行，不需要把链路拆散到多套系统。
+- 本地优先
+  `dawn_node` 可以直接驻留在本机，承接桌面环境、工作区文件、节点状态和本地模型，让自动化真正落到本地执行，而不是只停留在云端推理。
+- 云端与本地模型同构
+  系统把 OpenAI、Anthropic、Google、DeepSeek、Qwen、Zhipu、Moonshot、Doubao、Ollama 等统一到一个连接器层；Gemma4 这类本地模型也能直接进入同一条编排链路。
+- 原生 Agent 能力可组合
+  Dawn 不只支持安装 Wasm 技能，也支持原生内置 skills，把系统级能力直接做成可见、可调用、可运营的 Agent 技能。
+- 人在环治理
+  对高风险动作、授权链路和 AP2 支付场景，可以在流程中插入审批、签名和确认，而不是把所有动作都交给自动化盲执行。
+- 双视角界面
+  `/app` 面向终端用户和任务工作台，`/console` 面向操作员与治理层。系统不是单 UI，而是同时服务执行层和运营层。
+- 可扩展分发
+  Agent Card、Marketplace、签名技能分发和联邦目录已经在运行时内建，意味着这套系统天然支持跨节点、跨网关的能力流转。
+
+## 运行架构
+
+```mermaid
+flowchart LR
+    A["Chat Channels / Web UI"] --> B["Ingress And Command Layer"]
+    B --> C["Dawn Gateway (dawn_core)"]
+    C --> D["Task Orchestration"]
+    D --> E["Model Connectors"]
+    D --> F["Native Agent Skills"]
+    D --> G["Signed Wasm Skills"]
+    D --> H["Remote Agent Cards"]
+    D --> I["Local Node (dawn_node)"]
+    D --> J["Approval / AP2"]
+    C --> K["Marketplace / Registry / Control Plane"]
+```
+
+### 关键组件
 
 - `dawn_core/`
-  Rust 网关服务，包含 A2A、AP2、连接器、控制平面、审批中心、市场、Agent Card 与技能注册。
+  Rust 网关主进程，负责 A2A、任务编排、连接器、控制平面、Marketplace、Agent Card、审批与技能注册。
 - `dawn_node/`
-  本地节点 CLI 与节点运行时。
+  本地节点运行时，负责把 Dawn 拉到桌面环境与本机工作区执行。
 - `workflow/native_skills/`
-  工作区内置技能包。
+  系统原生内置 skills。它们不是 Wasm 包，而是随 Dawn 运行时直接交付的本机能力。
 - `docs/`
-  实现说明、接入说明和专题文档。
-- `templates/`
-  运行期相关模板资源。
+  架构说明、协议说明、Gemma4 接入说明等专题文档。
+
+## 内置 Agent Skills
+
+当前系统内置的 Dawn 原生 skills 会直接出现在技能分发、`/skills` 查询和 Marketplace 中，不需要额外安装：
+
+- `agent-card-discoverer`
+  负责 A2A Agent Card 的发现、筛选、导入与联邦目录运营。
+- `bayesian-skill-set`
+  负责不确定场景下的观察、辅助、分级决策与下一步建议。
+- `dawn-orchestrator`
+  负责把自然语言需求转成任务、子任务、委托链路和执行编排。
+- `dawn-chat-bridge`
+  负责多聊天平台命令归一化、消息入站和结果回写。
+- `dawn-model-router`
+  负责模型选择、连接器路由、本地模型接入和调用落点控制。
+- `dawn-node-operator`
+  负责本地节点运行、健康检查、工作区执行与 rollout 操作。
+- `dawn-approval-guard`
+  负责审批、授权、敏感动作门禁与 AP2 人在环治理。
+- `dawn-marketplace-operator`
+  负责技能与 Agent 的发布、搜索、安装、联邦同步和市场运营。
+
+这些内置 skills 的意义在于：系统级能力不再只是散落在 CLI 命令和后台接口里，而是被提升为可发现、可说明、可运营的 Agent 能力层。
+
+## 核心能力
+
+- A2A 任务接入、委托与执行
+- 本地节点注册、心跳、命令下发与结果回传
+- 多模型连接器统一调用
+- 多聊天平台入站事件接收与出站分发
+- Agent Card 发布、导入、发现与远程调用
+- 原生 skills 与签名 Wasm 技能分发
+- Marketplace 与联邦目录聚合
+- Approval Center、Control Center 和终端用户工作台
+- AP2 支付授权与人工确认链路
+- 本地 Ollama 模型接入，包括 Gemma4
+
+## 典型适用场景
+
+- 把本地部署的 Gemma4 接入到统一自动化系统，承接工作区任务和桌面节点执行
+- 从 Telegram、Slack、Discord、飞书等入口统一收任务，再分发到模型、技能或远程 Agent
+- 搭建一个有审批门禁的本地 Agent 工作台，而不是纯聊天机器人
+- 发布自己的 Agent Card 和技能目录，让其他 Dawn 节点可发现、可接入
+- 在本机保留数据和执行控制权，同时继续使用云模型补充能力
 
 ## 快速启动
 
 ### 依赖
 
-- Rust stable
-- Cargo
 - Windows + PowerShell
+- 普通用户使用 Windows Release 包时不需要 Rust、Cargo、Visual Studio Build Tools 或 `link.exe`
+- 开发者从源码运行或测试时才需要 Rust stable、Cargo，以及 Windows MSVC 构建工具链
 
 ### 直接启动 Dawn
 
@@ -56,6 +121,19 @@ DawnSys 用于把以下能力放到一个统一的自动化系统里：
 ```
 
 这条命令会走 `dawn-node start --app` 路径，自动拉起网关、节点预检查并打开工作台。
+
+发布包应该内置预编译的 `dawn_node.exe` 和 `dawn_core.exe`。如果从源码仓库运行且没有预编译二进制，`dawn.ps1` 默认不会自动调用 `cargo run`，以免普通用户遇到 MSVC `link.exe` 缺失问题。开发者可以显式使用：
+
+```powershell
+.\dawn.ps1 --dev start --app
+```
+
+如果需要在本机从源码运行测试，先加载工作区内的 MSVC Build Tools 环境：
+
+```powershell
+.\Use-DawnBuildTools.ps1
+cargo test --manifest-path dawn_node/Cargo.toml
+```
 
 默认入口：
 
@@ -75,7 +153,7 @@ DawnSys 用于把以下能力放到一个统一的自动化系统里：
 
 ## 本地 Gemma4 接入
 
-你现在这套仓库已经支持通过现有 `ollama` connector 直接使用本地 Gemma4。
+你当前这套仓库已经支持通过现有 `ollama` connector 直接使用本地 Gemma4。
 
 ### 一键接入
 
@@ -104,9 +182,9 @@ DawnSys 用于把以下能力放到一个统一的自动化系统里：
 .\dawn.ps1 models test ollama --input "Respond with exactly: GEMMA4_OK"
 ```
 
-## 工作流接入方式
+## 工作流中的模型接入方式
 
-在编排步骤里继续使用现有 `model_connector` 即可：
+在编排步骤里继续使用现有 `model_connector`：
 
 ```json
 {

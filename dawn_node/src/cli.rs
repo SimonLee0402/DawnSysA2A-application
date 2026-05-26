@@ -229,6 +229,8 @@ struct GatewayStartArgs {
     cwd: Option<String>,
     #[arg(long)]
     release: bool,
+    #[arg(long)]
+    dev: bool,
 }
 
 #[derive(Args)]
@@ -920,8 +922,37 @@ struct NodeCommandOps {
 
 #[derive(Subcommand)]
 enum NodeCommandAction {
+    Dispatch(NodeCommandDispatchArgs),
     Approve(NodeCommandApproveArgs),
     Reject(NodeCommandRejectArgs),
+}
+
+#[derive(Args)]
+struct NodeCommandDispatchArgs {
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    node_id: Option<String>,
+    #[arg(long = "type", visible_alias = "command-type")]
+    command_type: String,
+    #[arg(long)]
+    payload: Option<String>,
+    #[arg(long = "payload-file")]
+    payload_file: Option<String>,
+    #[arg(long)]
+    approve: bool,
+    #[arg(long)]
+    wait: bool,
+    #[arg(long, default_value_t = 30)]
+    timeout_seconds: u64,
+    #[arg(long, default_value_t = 500)]
+    poll_ms: u64,
+    #[arg(long)]
+    actor: Option<String>,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -2255,6 +2286,9 @@ async fn ensure_gateway_running(profile: &DawnCliProfile, release: bool) -> anyh
     command.arg("gateway").arg("start");
     if release {
         command.arg("--release");
+    }
+    if dev_cargo_fallback_enabled() {
+        command.arg("--dev");
     }
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
@@ -4790,20 +4824,52 @@ fn export_secrets(profile: DawnCliProfile, args: SecretsExportArgs) -> anyhow::R
 }
 
 fn start_gateway(profile: DawnCliProfile, args: GatewayStartArgs) -> anyhow::Result<()> {
-    let dawn_core_dir = resolve_dawn_core_dir(args.cwd.as_deref())?;
-    let mut command = StdCommand::new("cargo");
-    command.current_dir(&dawn_core_dir);
-    command.arg("run");
-    if args.release {
-        command.arg("--release");
-    }
+    let dev_mode = args.dev || dev_cargo_fallback_enabled();
+    let mut command = if args.cwd.is_none() {
+        if let Some(dawn_core_exe) = resolve_dawn_core_exe(args.release) {
+            println!("Starting DawnCore executable {}", dawn_core_exe.display());
+            let command = StdCommand::new(dawn_core_exe);
+            command
+        } else if dev_mode {
+            let dawn_core_dir = resolve_dawn_core_dir(None)?;
+            println!(
+                "Starting DawnCore from source in {}",
+                dawn_core_dir.display()
+            );
+            let mut command = StdCommand::new("cargo");
+            command.current_dir(&dawn_core_dir);
+            command.arg("run");
+            if args.release {
+                command.arg("--release");
+            }
+            command
+        } else {
+            bail!(
+                "prebuilt dawn_core.exe was not found; install the Windows Release package or run `dawn-node gateway start --dev` from a developer checkout with Rust MSVC build tools"
+            );
+        }
+    } else if dev_mode {
+        let dawn_core_dir = resolve_dawn_core_dir(args.cwd.as_deref())?;
+        println!(
+            "Starting DawnCore from source in {}",
+            dawn_core_dir.display()
+        );
+        let mut command = StdCommand::new("cargo");
+        command.current_dir(&dawn_core_dir);
+        command.arg("run");
+        if args.release {
+            command.arg("--release");
+        }
+        command
+    } else {
+        bail!("--cwd starts DawnCore from source and requires --dev");
+    };
     for (key, value) in &profile.connector_env {
         command.env(key, value);
     }
     if let Some(gateway) = profile.gateway_base_url.as_deref() {
         command.env("DAWN_PUBLIC_BASE_URL", gateway);
     }
-    println!("Starting DawnCore in {}", dawn_core_dir.display());
     if !profile.connector_env.is_empty() {
         let keys = profile
             .connector_env
@@ -4813,9 +4879,7 @@ fn start_gateway(profile: DawnCliProfile, args: GatewayStartArgs) -> anyhow::Res
             .join(", ");
         println!("Injecting connector env: {keys}");
     }
-    let status = command
-        .status()
-        .with_context(|| format!("failed to start DawnCore in {}", dawn_core_dir.display()))?;
+    let status = command.status().context("failed to start DawnCore")?;
     if !status.success() {
         bail!("DawnCore exited with status {status}");
     }
@@ -6080,6 +6144,109 @@ fn format_node_command_approval_summary(
     )
 }
 
+fn parse_node_command_payload(
+    payload: Option<&str>,
+    payload_file: Option<&str>,
+) -> anyhow::Result<Value> {
+    if payload.is_some() && payload_file.is_some() {
+        bail!("pass either --payload or --payload-file, not both");
+    }
+    let raw = if let Some(path) = payload_file
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        fs::read_to_string(path).with_context(|| format!("failed to read payload file {path}"))?
+    } else {
+        payload
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("{}")
+            .to_string()
+    };
+    serde_json::from_str(&raw).context("node command payload must be valid JSON")
+}
+
+async fn wait_for_node_command(
+    client: &GatewayClient,
+    command_id: &str,
+    timeout_seconds: u64,
+    poll_ms: u64,
+) -> anyhow::Result<Value> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.max(1));
+    let poll_interval = std::time::Duration::from_millis(poll_ms.max(100));
+    loop {
+        let command: Value = client
+            .get_json(&format!(
+                "/api/gateway/control-plane/commands/{}",
+                command_id.trim()
+            ))
+            .await?;
+        let status = string_at_path(&command, &["status"]).unwrap_or_else(|| "unknown".to_string());
+        if matches!(status.as_str(), "succeeded" | "failed") {
+            return Ok(command);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "node command {} did not finish within {} seconds; last status={}",
+                command_id.trim(),
+                timeout_seconds.max(1),
+                status
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+fn format_node_command_dispatch_summary(
+    node_id: &str,
+    command_type: &str,
+    response: &Value,
+) -> String {
+    let command_id = string_at_path(response, &["command", "commandId"])
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let status =
+        string_at_path(response, &["command", "status"]).unwrap_or_else(|| "unknown".to_string());
+    let delivery = string_at_path(response, &["delivery"]).unwrap_or_else(|| "unknown".to_string());
+    let mut summary = format!(
+        "Dispatched node command {}. node={} type={} delivery={} status={}",
+        command_id,
+        node_id.trim(),
+        command_type.trim(),
+        delivery,
+        status
+    );
+    if status == "pending_approval" {
+        summary.push_str(&format!(
+            "\nApproval required: dawn-node node-command approve {}",
+            command_id
+        ));
+    }
+    summary
+}
+
+fn format_node_command_result_summary(command: &Value) -> String {
+    let command_id =
+        string_at_path(command, &["commandId"]).unwrap_or_else(|| "<unknown>".to_string());
+    let status = string_at_path(command, &["status"]).unwrap_or_else(|| "unknown".to_string());
+    let error = string_at_path(command, &["error"]);
+    let result = command.get("result").filter(|value| !value.is_null());
+    let mut summary = format!(
+        "Node command {} finished with status={}",
+        command_id, status
+    );
+    if let Some(error) = error {
+        summary.push_str(&format!(" error={error}"));
+    }
+    if let Some(result) = result {
+        summary.push_str(&format!(
+            "\n{}",
+            serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+        ));
+    }
+    summary
+}
+
 fn decision_past_tense(decision: &str) -> String {
     match decision.trim().to_ascii_lowercase().as_str() {
         "approve" => "Approved".to_string(),
@@ -6108,9 +6275,101 @@ async fn handle_node(args: NodeArgs) -> anyhow::Result<()> {
 async fn handle_node_commands(args: NodeCommandOps) -> anyhow::Result<()> {
     let profile = load_profile_or_default();
     match args.command {
+        NodeCommandAction::Dispatch(args) => dispatch_node_command(args, profile).await,
         NodeCommandAction::Approve(args) => approve_node_command(args, profile).await,
         NodeCommandAction::Reject(args) => reject_node_command(args, profile).await,
     }
+}
+
+async fn dispatch_node_command(
+    args: NodeCommandDispatchArgs,
+    profile: DawnCliProfile,
+) -> anyhow::Result<()> {
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let node_id = args
+        .node_id
+        .clone()
+        .or_else(|| profile.node_id.clone())
+        .unwrap_or_else(|| "node-local".to_string());
+    let payload =
+        parse_node_command_payload(args.payload.as_deref(), args.payload_file.as_deref())?;
+    let dispatch: Value = client
+        .post_json(
+            &format!(
+                "/api/gateway/control-plane/nodes/{}/commands",
+                node_id.trim()
+            ),
+            &json!({
+                "commandType": args.command_type.trim(),
+                "payload": payload,
+            }),
+        )
+        .await?;
+    let command_id = string_at_path(&dispatch, &["command", "commandId"])
+        .ok_or_else(|| anyhow!("gateway response did not include command.commandId"))?;
+
+    let approval = if args.approve {
+        let actor = args
+            .actor
+            .clone()
+            .or_else(|| profile.operator_name.clone())
+            .unwrap_or_else(|| "desktop-operator".to_string());
+        match find_pending_approval_by_reference(&client, "node_command", &command_id).await {
+            Ok(approval) => Some(
+                decide_approval_with_client(
+                    &client,
+                    approval.approval_id.trim(),
+                    "approve",
+                    &actor,
+                    args.reason.as_deref(),
+                    None,
+                    None,
+                )
+                .await?,
+            ),
+            Err(_)
+                if string_at_path(&dispatch, &["command", "status"]).as_deref()
+                    != Some("pending_approval") =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+
+    let final_command = if args.wait {
+        Some(wait_for_node_command(&client, &command_id, args.timeout_seconds, args.poll_ms).await?)
+    } else {
+        None
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "dispatch": dispatch,
+                "approval": approval,
+                "finalCommand": final_command,
+            }))?
+        );
+    } else {
+        println!(
+            "{}",
+            format_node_command_dispatch_summary(&node_id, &args.command_type, &dispatch)
+        );
+        if let Some(approval) = approval.as_ref() {
+            println!(
+                "{}",
+                format_node_command_approval_summary("approve", &command_id, approval)
+            );
+        }
+        if let Some(command) = final_command.as_ref() {
+            println!("{}", format_node_command_result_summary(command));
+        }
+    }
+    Ok(())
 }
 
 async fn approve_node_command(
@@ -7203,6 +7462,65 @@ fn render_secret_block(env: &BTreeMap<String, String>, format: &str) -> anyhow::
     Ok(lines.join("\n"))
 }
 
+fn dev_cargo_fallback_enabled() -> bool {
+    env::var("DAWN_DEV").as_deref() == Ok("1")
+        || env::var("DAWN_ALLOW_CARGO_FALLBACK").as_deref() == Ok("1")
+}
+
+fn resolve_dawn_core_exe(prefer_release: bool) -> Option<PathBuf> {
+    if let Some(path) = env::var_os("DAWN_CORE_EXE").map(PathBuf::from) {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("dawn_core.exe"));
+            candidates.push(exe_dir.join("bin").join("dawn_core.exe"));
+        }
+    }
+    if let Ok(current_dir) = env::current_dir() {
+        candidates.push(current_dir.join("dawn_core.exe"));
+        candidates.push(current_dir.join("bin").join("dawn_core.exe"));
+        candidates.push(current_dir.join("dawn_core").join("dawn_core.exe"));
+        if prefer_release {
+            candidates.push(
+                current_dir
+                    .join("dawn_core")
+                    .join("target")
+                    .join("release")
+                    .join("dawn_core.exe"),
+            );
+            candidates.push(
+                current_dir
+                    .join("dawn_core")
+                    .join("target")
+                    .join("debug")
+                    .join("dawn_core.exe"),
+            );
+        } else {
+            candidates.push(
+                current_dir
+                    .join("dawn_core")
+                    .join("target")
+                    .join("debug")
+                    .join("dawn_core.exe"),
+            );
+            candidates.push(
+                current_dir
+                    .join("dawn_core")
+                    .join("target")
+                    .join("release")
+                    .join("dawn_core.exe"),
+            );
+        }
+    }
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
 fn resolve_dawn_core_dir(override_cwd: Option<&str>) -> anyhow::Result<PathBuf> {
     if let Some(path) = override_cwd {
         let path = PathBuf::from(path);
@@ -7385,8 +7703,11 @@ fn default_requested_capabilities_for_profile(
             "desktop_wait_for_window".to_string(),
             "desktop_focus_app".to_string(),
             "desktop_launch_and_focus".to_string(),
+            "desktop_mouse_position".to_string(),
             "desktop_mouse_move".to_string(),
             "desktop_mouse_click".to_string(),
+            "desktop_screen_info".to_string(),
+            "desktop_snapshot".to_string(),
             "desktop_screenshot".to_string(),
             "desktop_ocr".to_string(),
             "desktop_accessibility_query".to_string(),
@@ -7515,8 +7836,9 @@ mod tests {
         connector_setup_option_label, default_requested_capabilities,
         default_requested_capabilities_for_profile, derive_local_node_trust_root,
         effective_requested_capabilities, extract_text_from_value, find_pending_approval_record,
-        format_payment_approval_summary, ingress_secret_pairs, normalize_connector_target,
-        normalize_ingress_target_name, normalize_node_profile_name, parse_named_selection,
+        format_node_command_dispatch_summary, format_payment_approval_summary,
+        ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
+        normalize_node_profile_name, parse_named_selection, parse_node_command_payload,
         resolve_ap2_mcu_seed_hex, runtime_capability_preview, runtime_mode_label,
         runtime_policy_payload, runtime_policy_summary, sign_ap2_payload, update_values,
     };
@@ -7618,6 +7940,30 @@ mod tests {
             summary,
             "Approved AP2 payment tx-22. approval=approval-22 approvalStatus=approved paymentStatus=authorized"
         );
+    }
+
+    #[test]
+    fn parses_node_command_payload_json() {
+        let payload = parse_node_command_payload(Some(r#"{"x":400,"y":300}"#), None)
+            .expect("payload should parse");
+        assert_eq!(payload["x"], json!(400));
+        assert_eq!(payload["y"], json!(300));
+    }
+
+    #[test]
+    fn formats_node_command_dispatch_summary_with_approval_hint() {
+        let response = json!({
+            "command": {
+                "commandId": "command-1",
+                "status": "pending_approval"
+            },
+            "delivery": "awaiting_approval"
+        });
+
+        let summary =
+            format_node_command_dispatch_summary("node-local", "desktop_mouse_position", &response);
+        assert!(summary.contains("Dispatched node command command-1"));
+        assert!(summary.contains("dawn-node node-command approve command-1"));
     }
 
     #[test]
@@ -7771,6 +8117,17 @@ mod tests {
                 .iter()
                 .any(|value| value == "desktop_notification")
         );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_mouse_position")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_screen_info")
+        );
+        assert!(capabilities.iter().any(|value| value == "desktop_snapshot"));
         assert!(capabilities.iter().any(|value| value == "headless_status"));
         assert!(capabilities.iter().any(|value| value == "headless_observe"));
     }

@@ -1,0 +1,59 @@
+Page,RefDes,MPN,Description,Value_or_Setting,Notes
+Page1,J401,USB4110-GF-A,USB Type-C receptacle,16-pin sink-only,Main charge connector
+Page1,D401,TPD4E05U06DQAR,ESD protection array,4-channel,Protect VBUS/CC lines
+Page1,FB401,BLM18PG600SN1D,Ferrite bead,600 ohm @100 MHz,VBUS EMI suppression
+Page1,U401,BQ25619RTWR,1-cell charger with power path,5V input safe-default 500mA,Main charger
+Page1,L401,DFE252012P-1R0M=P2,Power inductor,1 uH,For BQ25619 SW node
+Page1,C404,Generic 0402 X7R,Ceramic capacitor,47 nF / 16 V,BTST to SW
+Page1,C405,Generic 0603 X5R,Ceramic capacitor,4.7 uF / 10 V,REGN decoupling
+Page1,C406-C408,Generic 0603 X5R,Ceramic capacitor,10 uF / 6.3 V,SYS/BAT bulk
+Page1,R401-R402,Generic 0402 1%,Resistor,5.1 k,Rd on CC1/CC2
+Page1,R403,Generic 0402 1%,Resistor,1 M,Shield bleed
+Page1,C401,Generic 0603 C0G,Ceramic capacitor,1 nF / 2 kV,Shield to chassis ground
+Page1,R404,Generic 0402 1%,Resistor,100 k,PSEL pull-up to REGN
+Page1,R405,Generic 0402 1%,Resistor,100 k,CE pull-down
+Page1,R408-R409,Generic 0402 1%,Resistor,10 k,CHG_INT_N and FG_ALRT_N pull-ups
+Page1,RT1,Generic 0402 1%,Resistor,5.36 k,TS network top resistor
+Page1,RT2,Generic 0402 1%,Resistor,31.1 k,TS network bottom resistor
+Page1,U402,MAX17048G+T10,Fuel gauge,1-cell ModelGauge,Battery-side SOC estimator
+Page1,C420,Generic 0402 X7R,Ceramic capacitor,0.1 uF / 6.3 V,MAX17048 local decoupling
+Page1,U403,TPS628437DRLR,Buck converter,Fixed 1.8 V,+1V8_AON rail
+Page1,L402,DFE201612E-1R0M=P2,Power inductor,1 uH,+1V8_AON buck inductor
+Page1,C430,Generic 0402 X5R,Ceramic capacitor,4.7 uF / 6.3 V,U403 VIN decoupling
+Page1,C431,Generic 0402 X5R,Ceramic capacitor,10 uF / 6.3 V,U403 VOUT bulk
+Page1,C432,Generic 0402 X7R,Ceramic capacitor,100 nF / 6.3 V,U403 high-frequency output decoupling
+Page1,R430,Generic 0402 1%,Resistor,100 k,U403 EN pull-up from SYS_MAIN
+Page1,U404,TPS62841DGR,Buck converter,RSET=8.45k for 1.1 V,+1V1_RTCORE rail
+Page1,L403,DFE201612E-2R2M=P2,Power inductor,2.2 uH,+1V1_RTCORE buck inductor
+Page1,C441,Generic 0402 X5R,Ceramic capacitor,4.7 uF / 6.3 V,U404 VIN decoupling
+Page1,C442,Generic 0402 X5R,Ceramic capacitor,10 uF / 6.3 V,U404 VOUT bulk
+Page1,C443,Generic 0402 X7R,Ceramic capacitor,100 nF / 6.3 V,U404 high-frequency output decoupling
+Page1,R440,Generic 0402 1%,Resistor,100 k,U404 EN pull-up from +1V8_AON
+Page1,C440,Generic 0402 X7R,Ceramic capacitor,100 nF / 6.3 V,U404 EN delay capacitor
+Page1,R441,Generic 0402 1%,Resistor,8.45 k,U404 RSET for 1.1 V
+Page1,BT401,Custom protected 1S Li-ion pack,Battery pack,3.7 V nominal with protector and 10k NTC,Do not substitute bare cell
+Page1,SW401,TL3342F160QG/TR,Tactile switch,QON power key,Exit ship mode/full reset
+Page2,U200,MIMXRT685SFVKB,Crossover MCU,VFBGA176,Always-on controller
+Page2,U220,SE050E2HQ1/Z01Z3Z,Secure element,I2C secure storage and signing,Device identity root
+Page2,U230,W25Q64JWSSIQ,1.8V QSPI NOR flash,64 Mbit,Boot flash on FlexSPI-A
+Page2,Y200,NX2016SA-24.000M-STD-CSR-1,Crystal,24 MHz 8 pF load,Main high-frequency clock
+Page2,C221-C222,Generic 0402 NP0,Ceramic capacitor,12 pF,Crystal load capacitors
+Page2,R220,Generic 0402 1%,Resistor,33 ohm DNI,XTAL_OUT damping option
+Page2,R201,Generic 0402 1%,Resistor,10 k,LDO_ENABLE pull-down
+Page2,R202,Generic 0402 1%,Resistor,100 k,RESETN pull-up
+Page2,C217,Generic 0402 X7R,Ceramic capacitor,100 nF,RESETN RC hold
+Page2,R203,Generic 0402 1%,Resistor,10 k,PMIC_IRQ_N pull-up
+Page2,R230-R235,Generic 0402 1%,Resistor,22 ohm,FLEXSPI series damping
+Page2,C230,Generic 0402 X7R,Ceramic capacitor,100 nF,W25Q64 local decoupling
+Page2,C231,Generic 0402 X5R,Ceramic capacitor,1 uF,W25Q64 local bulk
+Page2,R240-R242,Generic 0402 1%,Resistor,47 k,ISP strap resistors
+Page2,R250-R251,Generic 0402 1%,Resistor,4.7 k,I2C_PWR pull-ups
+Page2,R252-R253,Generic 0402 1%,Resistor,2.2 k,I2C_AON pull-ups
+Page2,C240-C241,Generic 0402,Ceramic capacitor,100 nF and 1 uF,SE050 local decoupling
+Page2,R260-R261,Generic 0402 1%,Resistor,47 k,Button pull-ups
+Page2,C260-C261,Generic 0402 X7R,Ceramic capacitor,1 nF,Button EMI filter
+Page2,C201-C208,Generic 0402 X7R,Ceramic capacitor,100 nF,RT685 1.8 V pin-group decoupling
+Page2,C209-C214,Generic 0402 X5R,Ceramic capacitor,4.7 uF,RT685 bulk/core decoupling
+Page2,C215-C216,Generic 0402 X7R,Ceramic capacitor,100 nF,RT685 core high-frequency decoupling
+Page2,J201,TC2030-IDC-NL,Tag-Connect SWD header,6-pin no-leg,Production debug
+Page2,SW201-SW204,TL3342F160QG/TR,Tactile switch,Confirm / Cancel / Force ISP / Reset,Human-in-loop and rescue

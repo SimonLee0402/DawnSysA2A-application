@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080">
+  <rect width="1600" height="1080" fill="#faf8f3"/>
+  <text x="40" y="48" font-size="28" font-family="Segoe UI, Arial" fill="#1f2937">Dawn Smart Glasses Page 1 Power Production Intent</text>
+  <text x="40" y="78" font-size="14" font-family="Segoe UI, Arial" fill="#4b5563">USB-C 5V input, BQ25619 charger, MAX17048 gauge, 1.8V always-on rail, 1.1V RT685 core rail</text>
+
+  <rect x="40" y="120" width="220" height="150" rx="12" fill="#fff" stroke="#334155" stroke-width="2"/>
+  <text x="60" y="155" font-size="22" font-family="Segoe UI, Arial" fill="#0f172a">J401 USB-C</text>
+  <text x="60" y="186" font-size="14" font-family="Segoe UI, Arial" fill="#334155">USB4110-GF-A</text>
+  <text x="60" y="212" font-size="14" font-family="Segoe UI, Arial" fill="#334155">CC1 -> 5.1k -> GND</text>
+  <text x="60" y="234" font-size="14" font-family="Segoe UI, Arial" fill="#334155">CC2 -> 5.1k -> GND</text>
+  <text x="60" y="256" font-size="14" font-family="Segoe UI, Arial" fill="#334155">Shield -> 1nF || 1M -> chassis</text>
+
+  <rect x="310" y="140" width="150" height="110" rx="10" fill="#fff" stroke="#334155" stroke-width="2"/>
+  <text x="330" y="175" font-size="20" font-family="Segoe UI, Arial" fill="#0f172a">D401 ESD</text>
+  <text x="330" y="202" font-size="14" font-family="Segoe UI, Arial" fill="#334155">TPD4E05U06</text>
+  <text x="330" y="224" font-size="14" font-family="Segoe UI, Arial" fill="#334155">VBUS / CC clamp</text>
+
+  <rect x="510" y="140" width="140" height="110" rx="10" fill="#fff" stroke="#334155" stroke-width="2"/>
+  <text x="528" y="175" font-size="20" font-family="Segoe UI, Arial" fill="#0f172a">FB401</text>
+  <text x="528" y="202" font-size="14" font-family="Segoe UI, Arial" fill="#334155">BLM18PG600</text>
+  <text x="528" y="224" font-size="14" font-family="Segoe UI, Arial" fill="#334155">VBUS EMI bead</text>
+
+  <rect x="730" y="100" width="330" height="220" rx="14" fill="#fff" stroke="#1d4ed8" stroke-width="3"/>
+  <text x="755" y="140" font-size="24" font-family="Segoe UI, Arial" fill="#1d4ed8">U401 BQ25619RTWR</text>
+  <text x="755" y="172" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">VBUS/VAC &lt;- +VBUS_CHG</text>
+  <text x="755" y="196" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">BTST = 47nF to SW</text>
+  <text x="755" y="220" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">REGN = 4.7uF to GND</text>
+  <text x="755" y="244" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">SYS = 2x10uF bulk</text>
+  <text x="755" y="268" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PSEL -> REGN via 100k (safe 500mA default)</text>
+  <text x="755" y="292" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">TS: 5.36k top, 31.1k bottom, 10k NTC</text>
+
+  <rect x="1120" y="100" width="220" height="170" rx="12" fill="#fff" stroke="#334155" stroke-width="2"/>
+  <text x="1145" y="138" font-size="22" font-family="Segoe UI, Arial" fill="#0f172a">BT401 Battery Pack</text>
+  <text x="1145" y="168" font-size="14" font-family="Segoe UI, Arial" fill="#334155">1S Li-ion protected pack</text>
+  <text x="1145" y="192" font-size="14" font-family="Segoe UI, Arial" fill="#334155">Integrated protector</text>
+  <text x="1145" y="216" font-size="14" font-family="Segoe UI, Arial" fill="#334155">10k NTC lead to TS node</text>
+  <text x="1145" y="240" font-size="14" font-family="Segoe UI, Arial" fill="#334155">PACK+ / PACK- / NTC</text>
+
+  <rect x="1120" y="320" width="220" height="150" rx="12" fill="#fff" stroke="#334155" stroke-width="2"/>
+  <text x="1145" y="356" font-size="22" font-family="Segoe UI, Arial" fill="#0f172a">U402 MAX17048</text>
+  <text x="1145" y="384" font-size="14" font-family="Segoe UI, Arial" fill="#334155">CELL, VDD &lt;- BAT_PACK</text>
+  <text x="1145" y="408" font-size="14" font-family="Segoe UI, Arial" fill="#334155">0.1uF local decoupling</text>
+  <text x="1145" y="432" font-size="14" font-family="Segoe UI, Arial" fill="#334155">I2C_PWR_1V8 + FG_ALRT_N</text>
+
+  <rect x="430" y="420" width="300" height="190" rx="14" fill="#fff" stroke="#0f766e" stroke-width="3"/>
+  <text x="455" y="458" font-size="24" font-family="Segoe UI, Arial" fill="#0f766e">U403 TPS628437DRLR</text>
+  <text x="455" y="486" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">VIN &lt;- SYS_MAIN</text>
+  <text x="455" y="510" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">EN &lt;- SYS_MAIN via 100k</text>
+  <text x="455" y="534" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">VSET -> GND (fixed 1.8V)</text>
+  <text x="455" y="558" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">L402 = 1uH</text>
+  <text x="455" y="582" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">CIN = 4.7uF, COUT = 10uF + 100nF</text>
+
+  <rect x="840" y="420" width="320" height="200" rx="14" fill="#fff" stroke="#7c3aed" stroke-width="3"/>
+  <text x="865" y="458" font-size="24" font-family="Segoe UI, Arial" fill="#7c3aed">U404 TPS62841DGR</text>
+  <text x="865" y="486" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">VIN &lt;- SYS_MAIN</text>
+  <text x="865" y="510" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">EN &lt;- 1V8_AON via 100k</text>
+  <text x="865" y="534" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">EN -> 100nF to GND for delay</text>
+  <text x="865" y="558" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">RSET = 8.45k to GND for 1.1V</text>
+  <text x="865" y="582" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">L403 = 2.2uH</text>
+  <text x="865" y="606" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">CIN = 4.7uF, COUT = 10uF + 100nF</text>
+
+  <rect x="1220" y="520" width="280" height="140" rx="12" fill="#eef2ff" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="1245" y="558" font-size="22" font-family="Segoe UI, Arial" fill="#1d4ed8">Output Rails</text>
+  <text x="1245" y="588" font-size="16" font-family="Segoe UI, Arial" fill="#1f2937">+SYS_MAIN -> AR1 / downstream pages</text>
+  <text x="1245" y="614" font-size="16" font-family="Segoe UI, Arial" fill="#1f2937">+1V8_AON -> RT685 IO + sensors</text>
+  <text x="1245" y="640" font-size="16" font-family="Segoe UI, Arial" fill="#1f2937">+1V1_RTCORE -> RT685 core only</text>
+
+  <line x1="260" y1="195" x2="310" y2="195" stroke="#111827" stroke-width="3"/>
+  <line x1="460" y1="195" x2="510" y2="195" stroke="#111827" stroke-width="3"/>
+  <line x1="650" y1="195" x2="730" y2="195" stroke="#111827" stroke-width="3"/>
+  <text x="540" y="128" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">+VBUS_CHG</text>
+
+  <line x1="1060" y1="175" x2="1120" y2="175" stroke="#111827" stroke-width="3"/>
+  <text x="1075" y="164" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">BAT / BATSNS</text>
+
+  <line x1="1030" y1="320" x2="1030" y2="360" stroke="#111827" stroke-width="3"/>
+  <line x1="1030" y1="360" x2="1120" y2="360" stroke="#111827" stroke-width="3"/>
+  <text x="1044" y="352" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">I2C_PWR_1V8</text>
+
+  <line x1="900" y1="320" x2="900" y2="420" stroke="#111827" stroke-width="3"/>
+  <line x1="900" y1="320" x2="580" y2="420" stroke="#111827" stroke-width="3"/>
+  <text x="910" y="345" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">SYS_MAIN</text>
+
+  <line x1="730" y1="520" x2="840" y2="520" stroke="#111827" stroke-width="3"/>
+  <text x="742" y="510" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">+1V8_AON enables core rail</text>
+
+  <line x1="1160" y1="520" x2="1220" y2="560" stroke="#111827" stroke-width="3"/>
+  <line x1="730" y1="548" x2="1220" y2="588" stroke="#111827" stroke-width="3"/>
+  <line x1="1160" y1="592" x2="1220" y2="640" stroke="#111827" stroke-width="3"/>
+
+  <rect x="40" y="760" width="1490" height="250" rx="16" fill="#fff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="70" y="804" font-size="22" font-family="Segoe UI, Arial" fill="#0f172a">Production Notes</text>
+  <text x="70" y="838" font-size="16" font-family="Segoe UI, Arial" fill="#334155">1. Default attach current is intentionally conservative. RT685 raises charge/input current only after the charger bus is alive.</text>
+  <text x="70" y="866" font-size="16" font-family="Segoe UI, Arial" fill="#334155">2. Fuel gauge stays on the battery side. No PCA9306 is used; the gauge bus is pulled up to 1.8V logic directly.</text>
+  <text x="70" y="894" font-size="16" font-family="Segoe UI, Arial" fill="#334155">3. 1.8V rail is always-on. 1.1V core rail is delayed from 1.8V with an RC enable to keep RT685 power-up ordering deterministic.</text>
+  <text x="70" y="922" font-size="16" font-family="Segoe UI, Arial" fill="#334155">4. Battery must be a protected pack with an integrated NTC lead. Do not substitute a bare pouch cell on the main board.</text>
+  <text x="70" y="950" font-size="16" font-family="Segoe UI, Arial" fill="#334155">5. Page 1 is board-ready for EVT. Remaining high-risk validation items are charger thermals, attach-current behavior, and battery-model tuning.</text>
+</svg>

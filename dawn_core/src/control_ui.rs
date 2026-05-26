@@ -776,55 +776,54 @@ fn channel_capability_profile(platform: &str) -> Value {
         consistency_tier,
         command_discovery,
         command_hint,
-    ) =
-        match platform {
-            "signal" | "bluebubbles" => (
+    ) = match platform {
+        "signal" | "bluebubbles" => (
+            true,
+            true,
+            true,
+            false,
+            "advanced",
+            "advanced",
+            "slash",
+            "/help · /status · #observe",
+        ),
+        "telegram" => (
+            true,
+            true,
+            true,
+            true,
+            "text",
+            "standard",
+            "platform_commands",
+            "/help · /skills · /status",
+        ),
+        "feishu" | "dingtalk" | "wechat_official_account" | "qq" | "wecom" => {
+            let hint = match platform {
+                "wechat_official_account" => "帮助 · 状态 · 技能 · ／skills · ＃observe",
+                _ => "@机器人 /help · 帮助 · 技能 · ／skills · ＃observe",
+            };
+            (
                 true,
                 true,
                 true,
                 false,
-                "advanced",
-                "advanced",
-                "slash",
-                "/help · /status · #observe",
-            ),
-            "telegram" => (
-                true,
-                true,
-                true,
-                true,
                 "text",
-                "standard",
-                "platform_commands",
-                "/help · /skills · /status",
-            ),
-            "feishu" | "dingtalk" | "wechat_official_account" | "qq" | "wecom" => {
-                let hint = match platform {
-                    "wechat_official_account" => "帮助 · 状态 · 技能 · ／skills · ＃observe",
-                    _ => "@机器人 /help · 帮助 · 技能 · ／skills · ＃observe",
-                };
-                (
-                    true,
-                    true,
-                    true,
-                    false,
-                    "text",
-                    "minimum",
-                    "mention_or_alias",
-                    hint,
-                )
-            }
-            _ => (
-                false,
-                false,
-                false,
-                false,
-                "send_only",
-                "outbound_only",
-                "send_only",
-                "",
-            ),
-        };
+                "minimum",
+                "mention_or_alias",
+                hint,
+            )
+        }
+        _ => (
+            false,
+            false,
+            false,
+            false,
+            "send_only",
+            "outbound_only",
+            "send_only",
+            "",
+        ),
+    };
     json!({
         "supportsIngress": supports_ingress,
         "supportsSlash": supports_slash,
@@ -845,7 +844,10 @@ fn channel_next_action_hint(
     blocked_count: usize,
     capability_profile: &Value,
 ) -> Option<String> {
-    let command_hint = capability_profile["commandHint"].as_str().unwrap_or("").trim();
+    let command_hint = capability_profile["commandHint"]
+        .as_str()
+        .unwrap_or("")
+        .trim();
     let supports_ingress = capability_profile["supportsIngress"]
         .as_bool()
         .unwrap_or(false);
@@ -863,11 +865,20 @@ fn channel_next_action_hint(
     }
     if is_default && supports_ingress {
         return Some(match platform {
-            "feishu" => "先确认群机器人 webhook 可达；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
-            "dingtalk" => "先补齐 callback token / 加签配置；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
-            "wechat_official_account" => "先补齐公众号 callback token；随后直接发 `帮助` 或 `／skills`。".to_string(),
+            "feishu" => {
+                "先确认群机器人 webhook 可达；随后直接发 `帮助` 或 `@机器人 /help`。".to_string()
+            }
+            "dingtalk" => {
+                "先补齐 callback token / 加签配置；随后直接发 `帮助` 或 `@机器人 /help`。"
+                    .to_string()
+            }
+            "wechat_official_account" => {
+                "先补齐公众号 callback token；随后直接发 `帮助` 或 `／skills`。".to_string()
+            }
             "qq" => "先补齐 QQ callback secret；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
-            "wecom" => "先补齐企业微信 callback token；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
+            "wecom" => {
+                "先补齐企业微信 callback token；随后直接发 `帮助` 或 `@机器人 /help`。".to_string()
+            }
             _ => "先完成 ingress 配置，再直接发送命令做 live 测试。".to_string(),
         });
     }

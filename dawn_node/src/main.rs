@@ -725,8 +725,11 @@ fn dispatch_command_future<'a>(
         "desktop_wait_for_window" => Box::pin(execute_desktop_wait_for_window_command(envelope)),
         "desktop_focus_app" => Box::pin(execute_desktop_focus_app_command(envelope)),
         "desktop_launch_and_focus" => Box::pin(execute_desktop_launch_and_focus_command(envelope)),
+        "desktop_mouse_position" => Box::pin(execute_desktop_mouse_position_command(envelope)),
         "desktop_mouse_move" => Box::pin(execute_desktop_mouse_move_command(envelope)),
         "desktop_mouse_click" => Box::pin(execute_desktop_mouse_click_command(envelope)),
+        "desktop_screen_info" => Box::pin(execute_desktop_screen_info_command(envelope)),
+        "desktop_snapshot" => Box::pin(execute_desktop_snapshot_command(envelope)),
         "desktop_screenshot" => Box::pin(execute_desktop_screenshot_command(envelope)),
         "desktop_ocr" => Box::pin(execute_desktop_ocr_command(envelope)),
         "desktop_accessibility_query" => {
@@ -2769,6 +2772,30 @@ struct DesktopWindowEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DesktopPoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopScreenEntry {
+    device_name: String,
+    primary: bool,
+    bounds: DesktopBoundingRect,
+    working_area: DesktopBoundingRect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopScreenInfo {
+    screen_count: usize,
+    virtual_bounds: DesktopBoundingRect,
+    screens: Vec<DesktopScreenEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DesktopScreenshotResult {
     path: String,
     x: i32,
@@ -3173,6 +3200,30 @@ async fn execute_desktop_mouse_move_command(
                 "launcher": launcher,
                 "x": point.0,
                 "y": point.1,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_mouse_position_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    match get_desktop_mouse_position().await {
+        Ok(position) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "desktop_mouse_position",
+                "position": position,
             })),
             error: None,
         },
@@ -4284,6 +4335,138 @@ async fn execute_desktop_mouse_click_command(
             result: None,
             error: Some(error.to_string()),
         },
+    }
+}
+
+async fn execute_desktop_screen_info_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    match get_desktop_screen_info().await {
+        Ok(screen_info) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "succeeded",
+            result: Some(json!({
+                "action": "desktop_screen_info",
+                "screenInfo": screen_info,
+            })),
+            error: None,
+        },
+        Err(error) => CommandResultEnvelope {
+            message_type: "command_result",
+            command_id: envelope.command_id,
+            status: "failed",
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn execute_desktop_snapshot_command(
+    envelope: GatewayCommandEnvelope,
+) -> CommandResultEnvelope {
+    let window_limit = envelope
+        .payload
+        .get("windowLimit")
+        .or_else(|| envelope.payload.get("limit"))
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(DEFAULT_DESKTOP_WINDOW_LIMIT);
+    let include_screenshot = envelope
+        .payload
+        .get("includeScreenshot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mouse = match get_desktop_mouse_position().await {
+        Ok(position) => position,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let screen_info = match get_desktop_screen_info().await {
+        Ok(screen_info) => screen_info,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let foreground_window = match get_foreground_desktop_window().await {
+        Ok(window) => window,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let windows = match list_desktop_windows(window_limit).await {
+        Ok(windows) => windows,
+        Err(error) => {
+            return CommandResultEnvelope {
+                message_type: "command_result",
+                command_id: envelope.command_id,
+                status: "failed",
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let screenshot = if include_screenshot {
+        let screenshot_path = resolve_desktop_screenshot_path(
+            envelope
+                .payload
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim),
+        );
+        match capture_desktop_screenshot(&screenshot_path, None).await {
+            Ok(result) => Some(result),
+            Err(error) => {
+                return CommandResultEnvelope {
+                    message_type: "command_result",
+                    command_id: envelope.command_id,
+                    status: "failed",
+                    result: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        }
+    } else {
+        None
+    };
+
+    CommandResultEnvelope {
+        message_type: "command_result",
+        command_id: envelope.command_id,
+        status: "succeeded",
+        result: Some(json!({
+            "action": "desktop_snapshot",
+            "observedAtUnixMs": unix_timestamp_ms(),
+            "mouse": mouse,
+            "screenInfo": screen_info,
+            "foregroundWindow": foreground_window,
+            "windowLimit": window_limit,
+            "windowCount": windows.len(),
+            "windows": windows,
+            "screenshot": screenshot,
+        })),
+        error: None,
     }
 }
 
@@ -11063,6 +11246,94 @@ $limit = [int]$env:DAWN_WINDOW_LIMIT
     serde_json::from_str(&stdout).context("failed to parse desktop window list JSON")
 }
 
+async fn get_desktop_screen_info() -> anyhow::Result<DesktopScreenInfo> {
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+    [pscustomobject]@{
+        deviceName = $_.DeviceName
+        primary = [bool]$_.Primary
+        bounds = [pscustomobject]@{
+            x = [int]$_.Bounds.X
+            y = [int]$_.Bounds.Y
+            width = [int]$_.Bounds.Width
+            height = [int]$_.Bounds.Height
+        }
+        workingArea = [pscustomobject]@{
+            x = [int]$_.WorkingArea.X
+            y = [int]$_.WorkingArea.Y
+            width = [int]$_.WorkingArea.Width
+            height = [int]$_.WorkingArea.Height
+        }
+    }
+})
+if ($screens.Count -eq 0) {
+    throw "no desktop screens were reported"
+}
+$minX = ($screens | ForEach-Object { $_.bounds.x } | Measure-Object -Minimum).Minimum
+$minY = ($screens | ForEach-Object { $_.bounds.y } | Measure-Object -Minimum).Minimum
+$maxX = ($screens | ForEach-Object { $_.bounds.x + $_.bounds.width } | Measure-Object -Maximum).Maximum
+$maxY = ($screens | ForEach-Object { $_.bounds.y + $_.bounds.height } | Measure-Object -Maximum).Maximum
+[pscustomobject]@{
+    screenCount = [int]$screens.Count
+    virtualBounds = [pscustomobject]@{
+        x = [int]$minX
+        y = [int]$minY
+        width = [int]($maxX - $minX)
+        height = [int]($maxY - $minY)
+    }
+    screens = @($screens)
+} | ConvertTo-Json -Compress -Depth 8
+"#;
+    let stdout = run_windows_powershell_capture(script, &[]).await?;
+    serde_json::from_str(&stdout).context("failed to parse desktop screen info JSON")
+}
+
+async fn get_foreground_desktop_window() -> anyhow::Result<Option<DesktopWindowEntry>> {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class DawnForegroundWindowInterop {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+    [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@
+$handle = [DawnForegroundWindowInterop]::GetForegroundWindow()
+if ($handle -eq [IntPtr]::Zero) {
+    $null | ConvertTo-Json -Compress
+    return
+}
+$length = [DawnForegroundWindowInterop]::GetWindowTextLength($handle)
+$title = ""
+if ($length -gt 0) {
+    $buffer = New-Object System.Text.StringBuilder ($length + 1)
+    [void][DawnForegroundWindowInterop]::GetWindowText($handle, $buffer, $buffer.Capacity)
+    $title = $buffer.ToString().Trim()
+}
+$processId = 0
+[void][DawnForegroundWindowInterop]::GetWindowThreadProcessId($handle, [ref]$processId)
+$processName = $null
+try {
+    $process = Get-Process -Id $processId -ErrorAction Stop
+    $processName = $process.ProcessName
+} catch {
+    $processName = $null
+}
+[pscustomobject]@{
+    handle = ("0x{0:X}" -f $handle.ToInt64())
+    title = $title
+    processId = [int]$processId
+    processName = $processName
+} | ConvertTo-Json -Compress
+"#;
+    let stdout = run_windows_powershell_capture(script, &[]).await?;
+    serde_json::from_str(&stdout).context("failed to parse foreground desktop window JSON")
+}
+
 async fn focus_desktop_window(
     title: Option<&str>,
     handle: Option<&str>,
@@ -12103,6 +12374,34 @@ fn desktop_accessibility_selector_has_predicate(
         || selector.control_type.is_some()
 }
 
+async fn get_desktop_mouse_position() -> anyhow::Result<DesktopPoint> {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class DawnMouseInterop {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetCursorPos(out POINT point);
+}
+"@
+$point = New-Object DawnMouseInterop+POINT
+if (-not [DawnMouseInterop]::GetCursorPos([ref]$point)) {
+    throw "failed to read desktop mouse position"
+}
+[pscustomobject]@{
+    x = $point.X
+    y = $point.Y
+} | ConvertTo-Json -Compress
+"#;
+    let stdout = run_windows_powershell_capture(script, &[]).await?;
+    serde_json::from_str(&stdout).context("failed to parse desktop mouse position JSON")
+}
+
 async fn move_desktop_mouse(x: i32, y: i32) -> anyhow::Result<&'static str> {
     let script = r#"
 Add-Type @"
@@ -12687,8 +12986,11 @@ fn default_capabilities() -> Vec<String> {
         "desktop_wait_for_window".to_string(),
         "desktop_focus_app".to_string(),
         "desktop_launch_and_focus".to_string(),
+        "desktop_mouse_position".to_string(),
         "desktop_mouse_move".to_string(),
         "desktop_mouse_click".to_string(),
+        "desktop_screen_info".to_string(),
+        "desktop_snapshot".to_string(),
         "desktop_screenshot".to_string(),
         "desktop_ocr".to_string(),
         "desktop_accessibility_query".to_string(),
@@ -14506,6 +14808,11 @@ mod tests {
         assert!(
             capabilities
                 .iter()
+                .any(|value| value == "desktop_mouse_position")
+        );
+        assert!(
+            capabilities
+                .iter()
                 .any(|value| value == "desktop_mouse_move")
         );
         assert!(
@@ -14513,6 +14820,12 @@ mod tests {
                 .iter()
                 .any(|value| value == "desktop_mouse_click")
         );
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "desktop_screen_info")
+        );
+        assert!(capabilities.iter().any(|value| value == "desktop_snapshot"));
         assert!(
             capabilities
                 .iter()

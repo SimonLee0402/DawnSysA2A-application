@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1100" viewBox="0 0 1600 1100">
+  <rect width="1600" height="1100" fill="#f7f8fc"/>
+  <text x="40" y="48" font-size="28" font-family="Segoe UI, Arial" fill="#1f2937">Dawn Smart Glasses Page 2 RT685 Production Intent</text>
+  <text x="40" y="78" font-size="14" font-family="Segoe UI, Arial" fill="#4b5563">RT685 always-on controller, boot flash, security element, debug, boot straps and physical confirmation path</text>
+
+  <rect x="520" y="120" width="540" height="520" rx="16" fill="#ffffff" stroke="#0f172a" stroke-width="3"/>
+  <text x="560" y="164" font-size="28" font-family="Segoe UI, Arial" fill="#0f172a">U200 MIMXRT685SFVKB</text>
+  <text x="560" y="198" font-size="16" font-family="Segoe UI, Arial" fill="#334155">VDD_AO1V8 / VDD1V8 / VDDIOx &lt;- +1V8_AON</text>
+  <text x="560" y="224" font-size="16" font-family="Segoe UI, Arial" fill="#334155">VDDCORE &lt;- +1V1_RTCORE</text>
+  <text x="560" y="250" font-size="16" font-family="Segoe UI, Arial" fill="#334155">LDO_ENABLE -> 10k -> GND</text>
+  <text x="560" y="276" font-size="16" font-family="Segoe UI, Arial" fill="#334155">RESETN -> 100k to +1V8_AON and 100nF to GND</text>
+  <text x="560" y="312" font-size="16" font-family="Segoe UI, Arial" fill="#1d4ed8">FlexSPI-A</text>
+  <text x="590" y="338" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_18 = SCLK</text>
+  <text x="590" y="360" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_19 = SS0_N</text>
+  <text x="590" y="382" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_20..23 = DATA0..3</text>
+  <text x="560" y="422" font-size="16" font-family="Segoe UI, Arial" fill="#0f766e">I2C Buses</text>
+  <text x="590" y="448" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO0_29 / PIO0_30 = I2C_PWR_1V8</text>
+  <text x="590" y="470" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_6 / PIO1_7 = I2C_AON_1V8</text>
+  <text x="560" y="510" font-size="16" font-family="Segoe UI, Arial" fill="#7c3aed">Boot / Rescue</text>
+  <text x="590" y="536" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_15 ISP0 = pull-up 47k</text>
+  <text x="590" y="558" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_16 ISP1 = pull-up 47k</text>
+  <text x="590" y="580" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO1_17 ISP2 = pull-down 47k</text>
+  <text x="590" y="602" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PIO0_1 / PIO0_2 = UART0 serial ISP</text>
+
+  <rect x="80" y="150" width="250" height="170" rx="12" fill="#fff" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="110" y="190" font-size="24" font-family="Segoe UI, Arial" fill="#1d4ed8">Y200 24 MHz</text>
+  <text x="110" y="220" font-size="14" font-family="Segoe UI, Arial" fill="#334155">NX2016SA-24.000M</text>
+  <text x="110" y="246" font-size="14" font-family="Segoe UI, Arial" fill="#334155">C221 = 12pF</text>
+  <text x="110" y="270" font-size="14" font-family="Segoe UI, Arial" fill="#334155">C222 = 12pF</text>
+  <text x="110" y="294" font-size="14" font-family="Segoe UI, Arial" fill="#334155">R220 = 33 ohm DNI option</text>
+
+  <rect x="1180" y="150" width="280" height="210" rx="12" fill="#fff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="1210" y="188" font-size="24" font-family="Segoe UI, Arial" fill="#7c3aed">U230 Boot NOR</text>
+  <text x="1210" y="216" font-size="14" font-family="Segoe UI, Arial" fill="#334155">W25Q64JWSSIQ</text>
+  <text x="1210" y="242" font-size="14" font-family="Segoe UI, Arial" fill="#334155">VCC = +1V8_AON</text>
+  <text x="1210" y="266" font-size="14" font-family="Segoe UI, Arial" fill="#334155">22 ohm series on CS/CLK/IO0..3</text>
+  <text x="1210" y="290" font-size="14" font-family="Segoe UI, Arial" fill="#334155">100nF + 1uF local decoupling</text>
+  <text x="1210" y="314" font-size="14" font-family="Segoe UI, Arial" fill="#334155">FlexSPI Port A boot device</text>
+
+  <rect x="1180" y="420" width="280" height="180" rx="12" fill="#fff" stroke="#0f766e" stroke-width="2"/>
+  <text x="1210" y="458" font-size="24" font-family="Segoe UI, Arial" fill="#0f766e">U220 SE050</text>
+  <text x="1210" y="486" font-size="14" font-family="Segoe UI, Arial" fill="#334155">SE050E2HQ1/Z01Z3Z</text>
+  <text x="1210" y="512" font-size="14" font-family="Segoe UI, Arial" fill="#334155">I2C_AON_1V8</text>
+  <text x="1210" y="536" font-size="14" font-family="Segoe UI, Arial" fill="#334155">100nF + 1uF local decoupling</text>
+  <text x="1210" y="560" font-size="14" font-family="Segoe UI, Arial" fill="#334155">Hardware identity / signing root</text>
+
+  <rect x="80" y="410" width="270" height="210" rx="12" fill="#fff" stroke="#334155" stroke-width="2"/>
+  <text x="108" y="448" font-size="24" font-family="Segoe UI, Arial" fill="#0f172a">J201 SWD / ISP</text>
+  <text x="108" y="478" font-size="14" font-family="Segoe UI, Arial" fill="#334155">Tag-Connect TC2030-IDC-NL</text>
+  <text x="108" y="504" font-size="14" font-family="Segoe UI, Arial" fill="#334155">VTREF = +1V8_AON</text>
+  <text x="108" y="528" font-size="14" font-family="Segoe UI, Arial" fill="#334155">SWDIO / SWCLK / nRESET / GND</text>
+  <text x="108" y="552" font-size="14" font-family="Segoe UI, Arial" fill="#334155">UART0_TX / UART0_RX on fixture pads</text>
+  <text x="108" y="576" font-size="14" font-family="Segoe UI, Arial" fill="#334155">Keep serial ISP escape path</text>
+
+  <rect x="80" y="690" width="300" height="220" rx="12" fill="#fff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="108" y="728" font-size="24" font-family="Segoe UI, Arial" fill="#7c3aed">Boot Strap / Buttons</text>
+  <text x="108" y="758" font-size="14" font-family="Segoe UI, Arial" fill="#334155">ISP0 = 47k pull-up</text>
+  <text x="108" y="782" font-size="14" font-family="Segoe UI, Arial" fill="#334155">ISP1 = 47k pull-up</text>
+  <text x="108" y="806" font-size="14" font-family="Segoe UI, Arial" fill="#334155">ISP2 = 47k pull-down</text>
+  <text x="108" y="830" font-size="14" font-family="Segoe UI, Arial" fill="#334155">SW201 CONFIRM, SW202 CANCEL</text>
+  <text x="108" y="854" font-size="14" font-family="Segoe UI, Arial" fill="#334155">47k pull-up + 1nF EMI cap each</text>
+  <text x="108" y="878" font-size="14" font-family="Segoe UI, Arial" fill="#334155">SW203 optional force-ISP key</text>
+
+  <rect x="520" y="700" width="420" height="210" rx="12" fill="#fff" stroke="#0f766e" stroke-width="2"/>
+  <text x="550" y="738" font-size="24" font-family="Segoe UI, Arial" fill="#0f766e">Off-page Nets</text>
+  <text x="550" y="770" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">I2C_PWR_1V8 -> Page 1 BQ25619 / MAX17048</text>
+  <text x="550" y="796" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">I2C_AON_1V8 -> Page 3 ToF / ALS / secure peripherals</text>
+  <text x="550" y="822" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PDM_CLK01 / PDM_DATA01 -> Page 4 front microphones</text>
+  <text x="550" y="848" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">PDM_CLK23 / PDM_DATA23 -> Page 4 temple microphones</text>
+  <text x="550" y="874" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">UART_AON_HOST / WAKE_HOST_N -> Page 5 AR1 boundary</text>
+
+  <rect x="1080" y="720" width="410" height="190" rx="12" fill="#eef2ff" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="1110" y="758" font-size="24" font-family="Segoe UI, Arial" fill="#1d4ed8">Bring-up Sequence</text>
+  <text x="1110" y="790" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">1. Verify +1V8_AON / +1V1_RTCORE / RESETN timing</text>
+  <text x="1110" y="816" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">2. Enter ROM ISP over UART0 if flash is blank</text>
+  <text x="1110" y="842" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">3. Program W25Q64 on FlexSPI-A</text>
+  <text x="1110" y="868" font-size="15" font-family="Segoe UI, Arial" fill="#1f2937">4. Read charger / gauge on I2C_PWR before adding sensors</text>
+
+  <line x1="330" y1="235" x2="520" y2="235" stroke="#111827" stroke-width="3"/>
+  <text x="356" y="226" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">XTAL_IN / XTAL_OUT</text>
+
+  <line x1="1060" y1="330" x2="1180" y2="250" stroke="#111827" stroke-width="3"/>
+  <text x="1080" y="276" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">FlexSPI-A</text>
+
+  <line x1="1060" y1="470" x2="1180" y2="500" stroke="#111827" stroke-width="3"/>
+  <text x="1080" y="454" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">I2C_AON_1V8</text>
+
+  <line x1="350" y1="510" x2="520" y2="510" stroke="#111827" stroke-width="3"/>
+  <text x="372" y="500" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">SWD / UART0 / nRESET</text>
+
+  <line x1="380" y1="800" x2="520" y2="560" stroke="#111827" stroke-width="3"/>
+  <text x="392" y="710" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">ISP straps + human buttons</text>
+
+  <line x1="940" y1="790" x2="1080" y2="790" stroke="#111827" stroke-width="3"/>
+  <text x="948" y="780" font-size="14" font-family="Segoe UI, Arial" fill="#1f2937">Page interface summary</text>
+
+  <rect x="40" y="960" width="1520" height="100" rx="16" fill="#fff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="70" y="998" font-size="16" font-family="Segoe UI, Arial" fill="#334155">Package choice is frozen to MIMXRT685SFVKB (VFBGA176), not the small WLCSP option. This is the more realistic first-production package for glasses mainboard routing, debug access and rework.</text>
+  <text x="70" y="1026" font-size="16" font-family="Segoe UI, Arial" fill="#334155">The page is production-intent for the RT685 domain. AR1 host-UART details remain on the Page 5 boundary because that side still depends on vendor reference constraints.</text>
+</svg>

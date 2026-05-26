@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980">
+  <defs>
+    <style>
+      .title { font: 700 28px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 14px Arial, sans-serif; fill: #334155; }
+      .box { fill: #f8fafc; stroke: #1e293b; stroke-width: 2; rx: 14; ry: 14; }
+      .soft { fill: #eef4ff; stroke: #3b82f6; stroke-width: 2; rx: 14; ry: 14; }
+      .power { fill: #fff7ed; stroke: #f97316; stroke-width: 2; rx: 14; ry: 14; }
+      .sensor { fill: #f0fdf4; stroke: #16a34a; stroke-width: 2; rx: 14; ry: 14; }
+      .media { fill: #faf5ff; stroke: #9333ea; stroke-width: 2; rx: 14; ry: 14; }
+      .text { font: 600 18px Arial, sans-serif; fill: #0f172a; }
+      .small { font: 400 14px Arial, sans-serif; fill: #334155; }
+      .net { font: 700 13px Arial, sans-serif; fill: #0f172a; }
+      .line { stroke: #334155; stroke-width: 3; fill: none; }
+      .dash { stroke: #64748b; stroke-width: 2.5; fill: none; stroke-dasharray: 10 8; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="50" class="title">Dawn Smart Glasses System Schematic</text>
+  <text x="40" y="75" class="subtitle">System-level draft aligned with Dawn runtime + companion-compute architecture</text>
+
+  <rect x="40" y="110" width="300" height="120" class="soft"/>
+  <text x="60" y="145" class="text">Companion Phone / Edge Node</text>
+  <text x="60" y="175" class="small">Runs Dawn gateway/node and Gemma4</text>
+  <text x="60" y="198" class="small">Receives sensor, media and approval events</text>
+
+  <rect x="420" y="90" width="740" height="820" class="box"/>
+  <text x="450" y="130" class="text">Glasses Main Board</text>
+  <text x="450" y="155" class="small">First EVT target: AR1 media domain + RT685 always-on domain</text>
+
+  <rect x="470" y="210" width="250" height="160" class="power"/>
+  <text x="495" y="245" class="text">Power Front End</text>
+  <text x="495" y="275" class="small">USB-C sink-only</text>
+  <text x="495" y="298" class="small">NX5P3090UK + BQ25619</text>
+  <text x="495" y="321" class="small">LP452030 + MAX17048</text>
+  <text x="495" y="344" class="small">PCA9420 rails</text>
+
+  <rect x="470" y="430" width="250" height="220" class="sensor"/>
+  <text x="495" y="465" class="text">RT685 AON Controller</text>
+  <text x="495" y="495" class="small">MIMXRT685SFAWBR</text>
+  <text x="495" y="518" class="small">Buttons / AP2 signing</text>
+  <text x="495" y="541" class="small">PDM mic hub</text>
+  <text x="495" y="564" class="small">I2C sensor host</text>
+  <text x="495" y="587" class="small">UART low-speed link to AR1</text>
+
+  <rect x="780" y="210" width="320" height="250" class="media"/>
+  <text x="805" y="245" class="text">AR1 Media Domain</text>
+  <text x="805" y="275" class="small">Qualcomm Snapdragon AR1 module / SOM</text>
+  <text x="805" y="298" class="small">CSI camera path</text>
+  <text x="805" y="321" class="small">DSI optical path</text>
+  <text x="805" y="344" class="small">Wi-Fi / BT / media codec</text>
+  <text x="805" y="367" class="small">Companion link to Dawn runtime</text>
+
+  <rect x="780" y="500" width="320" height="150" class="sensor"/>
+  <text x="805" y="535" class="text">Always-On Sensor Bus</text>
+  <text x="805" y="565" class="small">BHI360 host interface</text>
+  <text x="805" y="588" class="small">TMF8828 / TMD3725 / SE050</text>
+  <text x="805" y="611" class="small">PCA9306 to MAX17048</text>
+
+  <rect x="1180" y="180" width="340" height="150" class="media"/>
+  <text x="1205" y="215" class="text">Camera Module</text>
+  <text x="1205" y="245" class="small">Sony IMX662-AAQR1</text>
+  <text x="1205" y="268" class="small">CSI-2 2/4 lane + I2C</text>
+  <text x="1205" y="291" class="small">3.3 V / 1.1 V / 1.8 V rails</text>
+
+  <rect x="1180" y="380" width="340" height="210" class="media"/>
+  <text x="1205" y="415" class="text">Near-Eye Display Path</text>
+  <text x="1205" y="445" class="small">Option A: JBD Hummingbird II</text>
+  <text x="1205" y="468" class="small">Option B: Sony ECX350F driver board</text>
+  <text x="1205" y="491" class="small">Cellid G3 waveguide is passive optic</text>
+  <text x="1205" y="514" class="small">Interface from AR1: MIPI DSI</text>
+  <text x="1205" y="537" class="small">Populate one option only in EVT1</text>
+
+  <rect x="1180" y="650" width="340" height="170" class="sensor"/>
+  <text x="1205" y="685" class="text">Mics + Motion + Security</text>
+  <text x="1205" y="715" class="small">4x T5838 PDM microphones</text>
+  <text x="1205" y="738" class="small">BHI360 + BMM350</text>
+  <text x="1205" y="761" class="small">SE050 + CONFIRM / CANCEL buttons</text>
+  <text x="1205" y="784" class="small">Handled by RT685 AON domain</text>
+
+  <path d="M 340 170 L 470 170 L 470 260" class="dash" marker-end="url(#arrow)"/>
+  <text x="360" y="160" class="net">Wi-Fi / BT / app protocol</text>
+
+  <path d="M 595 370 L 595 430" class="line" marker-end="url(#arrow)"/>
+  <text x="610" y="405" class="net">+SYS_MAIN / PMIC rails</text>
+
+  <path d="M 720 290 L 780 290" class="line" marker-end="url(#arrow)"/>
+  <text x="725" y="275" class="net">+SYS_MAIN</text>
+
+  <path d="M 720 530 L 780 530" class="line" marker-end="url(#arrow)"/>
+  <text x="727" y="515" class="net">I2C_AON_1V8</text>
+
+  <path d="M 720 610 L 1180 735" class="line" marker-end="url(#arrow)"/>
+  <text x="865" y="660" class="net">PDM / GPIO / IRQ / secure control</text>
+
+  <path d="M 1100 260 L 1180 255" class="line" marker-end="url(#arrow)"/>
+  <text x="1110" y="240" class="net">CSI0 + CAM_I2C</text>
+
+  <path d="M 1100 360 L 1180 470" class="line" marker-end="url(#arrow)"/>
+  <text x="1115" y="405" class="net">DSI0</text>
+
+  <path d="M 1100 540 L 1180 540" class="line" marker-end="url(#arrow)"/>
+  <text x="1112" y="525" class="net">Mgmt / control / telemetry</text>
+
+  <path d="M 940 460 L 940 500" class="line" marker-end="url(#arrow)"/>
+  <text x="955" y="488" class="net">UART2 + I2C optional</text>
+
+  <path d="M 605 650 L 605 860 L 1510 860 L 1510 820" class="dash" marker-end="url(#arrow)"/>
+  <text x="760" y="885" class="net">AON events: wake, approval, battery, sensor fusion</text>
+</svg>

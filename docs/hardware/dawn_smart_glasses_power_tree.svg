@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="920" viewBox="0 0 1400 920">
+  <defs>
+    <style>
+      .title { font: 700 28px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 14px Arial, sans-serif; fill: #334155; }
+      .box { fill: #fff7ed; stroke: #f97316; stroke-width: 2; rx: 14; ry: 14; }
+      .rail { fill: #eff6ff; stroke: #2563eb; stroke-width: 2; rx: 12; ry: 12; }
+      .sink { fill: #f8fafc; stroke: #1e293b; stroke-width: 2; rx: 12; ry: 12; }
+      .aon { fill: #f0fdf4; stroke: #16a34a; stroke-width: 2; rx: 12; ry: 12; }
+      .text { font: 600 18px Arial, sans-serif; fill: #0f172a; }
+      .small { font: 400 14px Arial, sans-serif; fill: #334155; }
+      .net { font: 700 13px Arial, sans-serif; fill: #0f172a; }
+      .line { stroke: #334155; stroke-width: 3; fill: none; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="52" class="title">Dawn Smart Glasses Power Tree</text>
+  <text x="40" y="76" class="subtitle">Recommended EVT1 supply partitioning for AR1 media domain + RT685 AON domain</text>
+
+  <rect x="560" y="110" width="260" height="90" class="box"/>
+  <text x="595" y="145" class="text">J400 USB-C Sink</text>
+  <text x="595" y="170" class="small">CC1/CC2 = 5.1k Rd</text>
+
+  <rect x="560" y="245" width="260" height="90" class="box"/>
+  <text x="598" y="280" class="text">U401 NX5P3090UK</text>
+  <text x="611" y="305" class="small">VBUS protection switch</text>
+
+  <rect x="520" y="385" width="340" height="120" class="box"/>
+  <text x="570" y="420" class="text">U400 BQ25619</text>
+  <text x="570" y="445" class="small">1-cell charger + power path</text>
+  <text x="570" y="468" class="small">SYS output = +SYS_MAIN</text>
+
+  <rect x="150" y="405" width="250" height="90" class="box"/>
+  <text x="200" y="440" class="text">BT400 LP452030</text>
+  <text x="205" y="465" class="small">Single-cell LiPo</text>
+
+  <rect x="980" y="405" width="250" height="90" class="box"/>
+  <text x="1040" y="440" class="text">U402 MAX17048</text>
+  <text x="1040" y="465" class="small">Fuel gauge</text>
+
+  <rect x="535" y="560" width="310" height="120" class="box"/>
+  <text x="592" y="595" class="text">U210 PCA9420</text>
+  <text x="565" y="620" class="small">RT685 companion PMIC</text>
+  <text x="565" y="643" class="small">SW1 / SW2 / LDO1 / LDO2</text>
+
+  <rect x="150" y="750" width="230" height="90" class="rail"/>
+  <text x="195" y="785" class="text">+VDD_RT685_CORE_1V1</text>
+  <text x="205" y="810" class="small">PCA9420 SW1</text>
+
+  <rect x="430" y="750" width="230" height="90" class="rail"/>
+  <text x="480" y="785" class="text">+VDD_SENSOR_IO_1V8</text>
+  <text x="510" y="810" class="small">PCA9420 SW2</text>
+
+  <rect x="710" y="750" width="230" height="90" class="rail"/>
+  <text x="775" y="785" class="text">+VDD_AUX_3V3</text>
+  <text x="785" y="810" class="small">PCA9420 LDO2</text>
+
+  <rect x="990" y="750" width="230" height="90" class="aon"/>
+  <text x="1055" y="785" class="text">+VDD_AON_1V8</text>
+  <text x="1065" y="810" class="small">PCA9420 LDO1</text>
+
+  <rect x="80" y="610" width="280" height="95" class="sink"/>
+  <text x="125" y="645" class="text">U100 AR1 Module</text>
+  <text x="125" y="670" class="small">VIN_MAIN &lt;- +SYS_MAIN</text>
+
+  <rect x="390" y="610" width="300" height="95" class="sink"/>
+  <text x="450" y="645" class="text">U200 RT685</text>
+  <text x="450" y="670" class="small">Core 1.1 V / IO 1.8 V</text>
+
+  <rect x="720" y="610" width="300" height="95" class="sink"/>
+  <text x="760" y="645" class="text">Sensors + Mics + SE050</text>
+  <text x="760" y="670" class="small">1.8 V domain</text>
+
+  <rect x="1050" y="610" width="260" height="95" class="sink"/>
+  <text x="1095" y="645" class="text">Flash / LED / Aux</text>
+  <text x="1110" y="670" class="small">3.3 V domain</text>
+
+  <path d="M 690 200 L 690 245" class="line" marker-end="url(#arrow)"/>
+  <text x="705" y="228" class="net">VBUS_5V</text>
+
+  <path d="M 690 335 L 690 385" class="line" marker-end="url(#arrow)"/>
+  <text x="705" y="362" class="net">+VBUS_PROT_5V</text>
+
+  <path d="M 400 450 L 520 450" class="line" marker-end="url(#arrow)"/>
+  <text x="420" y="435" class="net">BAT+</text>
+
+  <path d="M 860 450 L 980 450" class="line" marker-end="url(#arrow)"/>
+  <text x="882" y="435" class="net">BAT+</text>
+
+  <path d="M 690 505 L 690 560" class="line" marker-end="url(#arrow)"/>
+  <text x="705" y="535" class="net">+SYS_MAIN</text>
+
+  <path d="M 520 450 L 360 450" class="line" marker-start="url(#arrow)"/>
+  <text x="420" y="472" class="net">Charge / discharge path</text>
+
+  <path d="M 585 505 L 220 610" class="line" marker-end="url(#arrow)"/>
+  <text x="345" y="570" class="net">+SYS_MAIN</text>
+
+  <path d="M 640 680 L 265 750" class="line" marker-end="url(#arrow)"/>
+  <text x="410" y="735" class="net">SW1 = 1.1 V</text>
+
+  <path d="M 690 680 L 545 750" class="line" marker-end="url(#arrow)"/>
+  <text x="615" y="735" class="net">SW2 = 1.8 V</text>
+
+  <path d="M 740 680 L 825 750" class="line" marker-end="url(#arrow)"/>
+  <text x="760" y="735" class="net">LDO2 = 3.3 V</text>
+
+  <path d="M 790 680 L 1105 750" class="line" marker-end="url(#arrow)"/>
+  <text x="930" y="735" class="net">LDO1 = 1.8 V</text>
+
+  <path d="M 545 840 L 545 610" class="line" marker-end="url(#arrow)"/>
+  <text x="560" y="725" class="net">IO rail</text>
+
+  <path d="M 825 840 L 825 705" class="line" marker-end="url(#arrow)"/>
+  <text x="840" y="725" class="net">sensor rail</text>
+
+  <path d="M 1105 840 L 1105 705" class="line" marker-end="url(#arrow)"/>
+  <text x="1120" y="725" class="net">aux rail</text>
+
+  <path d="M 265 840 L 515 705" class="line" marker-end="url(#arrow)"/>
+  <text x="350" y="755" class="net">RT685 core</text>
+
+  <path d="M 1105 495 L 1105 560 L 930 560 L 930 610" class="line" marker-end="url(#arrow)"/>
+  <text x="955" y="575" class="net">PCA9306 -> I2C_AON_1V8</text>
+</svg>

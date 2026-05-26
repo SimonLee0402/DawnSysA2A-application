@@ -999,8 +999,8 @@ mod tests {
         sandbox,
         skill_registry::{
             NATIVE_BUILTIN_SOURCE_KIND, RegisterSignedSkillRequest, SignedSkillDocument,
-            SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest,
-            register_signed_skill_inner, upsert_skill_publisher_trust_root_inner,
+            SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest, register_signed_skill_inner,
+            upsert_skill_publisher_trust_root_inner,
         },
     };
     use ed25519_dalek::{Signer, SigningKey};
@@ -1114,18 +1114,41 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(catalog.skills.len(), 3);
-        assert!(catalog.skills.iter().any(|skill| skill.skill_id == "market-skill"));
-        assert!(catalog
-            .skills
-            .iter()
-            .any(|skill| skill.skill_id == "agent-card-discoverer"
-                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
-        assert!(catalog
-            .skills
-            .iter()
-            .any(|skill| skill.skill_id == "bayesian-skill-set"
-                && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND));
+        assert!(catalog.skills.len() >= 5);
+        assert!(
+            catalog
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "market-skill")
+        );
+        assert!(
+            catalog
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "agent-card-discoverer"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
+        assert!(
+            catalog
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "bayesian-skill-set"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
+        assert!(
+            catalog
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "dawn-orchestrator"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
+        assert!(
+            catalog
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "dawn-model-router"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
         assert_eq!(catalog.agent_cards.len(), 1);
         assert_eq!(catalog.agent_cards[0].card_id, "market-agent");
 
