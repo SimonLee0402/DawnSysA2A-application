@@ -201,7 +201,6 @@ cargo test --manifest-path dawn_node/Cargo.toml
 - [Rust 网关实现说明](docs/dawn_rust_gateway_implementation.md)
 - [Gemma4 本地接入说明](docs/gemma4_ollama_integration.md)
 - [AP2 串口签名协议](docs/ap2_serial_signer_protocol.md)
-- [API 参考](docs/api_reference.md)
 
 ## 许可证
 
