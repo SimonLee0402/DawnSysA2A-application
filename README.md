@@ -28,6 +28,15 @@ DawnSys 要解决的不是单点的模型调用问题，而是把一整条自动
   Dawn 不只支持安装 Wasm 技能，也支持原生内置 skills，把系统级能力直接做成可见、可调用、可运营的 Agent 技能。
 - 人在环治理
   对高风险动作、授权链路和 AP2 支付场景，可以在流程中插入审批、签名和确认，而不是把所有动作都交给自动化盲执行。
+- 可审计进化
+  系统可以把真实任务、聊天入口、执行结果和复盘经验沉淀到本地经验库中，供后续规划和技能提案检索；经验写入不等于自动改代码或自动发布。
+  网关启动后会运行低风险自动复盘 worker，默认只从最近聊天事件生成经验记录。它不会调用模型自评、不会执行动作、不会激活技能；如需关闭可设置 `DAWN_EVOLUTION_AUTO_REFLECTION=0`。
+  当经验库中出现重复的非普通聊天任务模式时，Evolution API 可以生成候选 skill proposal。proposal 只是一条待评审建议，不会创建代码、不注册 skill、不改变权限。
+  操作员可以把 proposal 标记为 `approved`、`rejected` 或 `deferred`。这些状态只用于审计和后续人工实现排队，批准 proposal 仍不会自动激活 skill。
+  对已批准 proposal，系统可以生成 draft implementation plan，用来记录实现步骤、验收条件和安全边界；plan 可以继续被标记为 `approved`、`rejected` 或 `deferred`，但仍然不会自动修改代码、执行实现或发布能力。
+  对已批准 plan，系统可以准备 implementation run/change package，记录允许变更范围、验证命令和回滚说明；run 的 review 也只表示允许进入后续人工或未来 agent 执行阶段，不会在当前 API 中实际执行变更。
+  对已批准 run，系统可以创建 implementation execution 记录，保存 preflight、命令计划、执行边界和人工审批结果；被再次批准后，网关只允许通过 `/verify` 执行固定 allowlist 里的验证命令并采集证据，不允许任意 shell、代码变更、技能激活或发布版本。
+  对已通过验证的 execution，系统可以创建 patch candidate，记录候选变更文件、补丁 manifest、回滚计划和验证证据；candidate 被批准后可以通过独立的 `/apply` 和 `/rollback` API 进行受控 dry-run、应用和回滚。真实写文件或真实回滚必须带 `confirmPatchId`，并且只允许 manifest 中明确列出的非 QGIS 文本文件路径；`.git`、`data`、`target`、缓存、输出目录和密钥类路径会被拒绝。应用后仍不会自动激活 skill 或发布版本，必须继续走验证与发布审批。
 - 双视角界面
   `/app` 面向终端用户和任务工作台，`/console` 面向操作员与治理层。系统不是单 UI，而是同时服务执行层和运营层。
 - 可扩展分发
@@ -72,6 +81,8 @@ flowchart LR
   负责把自然语言需求转成任务、子任务、委托链路和执行编排。
 - `dawn-chat-bridge`
   负责多聊天平台命令归一化、消息入站和结果回写。
+- `dawn-desktop-control`
+  负责把手机端聊天意图安全桥接到屏幕观察、鼠标位置、鼠标移动和点击控制。
 - `dawn-model-router`
   负责模型选择、连接器路由、本地模型接入和调用落点控制。
 - `dawn-node-operator`
@@ -94,6 +105,7 @@ flowchart LR
 - Marketplace 与联邦目录聚合
 - Approval Center、Control Center 和终端用户工作台
 - AP2 支付授权与人工确认链路
+- Evolution experience store，用于低风险经验沉淀和后续技能提案
 - 本地 Ollama 模型接入，包括 Gemma4
 
 ## 典型适用场景

@@ -1307,6 +1307,7 @@ async fn publish_card(
         .map_err(internal_error)
 }
 
+#[cfg(test)]
 pub async fn publish_agent_card(
     state: &AppState,
     request: PublishAgentCardRequest,

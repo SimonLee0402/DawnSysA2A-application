@@ -23,6 +23,7 @@ use crate::{
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct AP2Mandate {
     pub mandate_id: Uuid,
     pub payer_did: String,
@@ -34,6 +35,7 @@ pub struct AP2Mandate {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct VerifiableCredential<T> {
     pub credential_type: String,
     pub issuer_did: String,
@@ -41,6 +43,7 @@ pub struct VerifiableCredential<T> {
     pub signature: String,
 }
 
+#[allow(dead_code)]
 pub type AP2MandateVC = VerifiableCredential<AP2Mandate>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

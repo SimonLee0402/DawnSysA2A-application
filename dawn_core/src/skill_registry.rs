@@ -88,6 +88,20 @@ const NATIVE_BUILTIN_SKILLS: &[NativeBuiltinSkillSpec] = &[
         artifact_relative_path: "../workflow/native_skills/dawn-chat-bridge/SKILL.md",
     },
     NativeBuiltinSkillSpec {
+        skill_id: "dawn-desktop-control",
+        version: "native",
+        display_name: "Dawn Desktop Control",
+        description: "Dawn native skill for guarded desktop observation, mouse positioning, and click control from approved chat and node-command workflows.",
+        capabilities: &[
+            "desktop_control",
+            "mouse_control",
+            "screen_observation",
+            "approval_required",
+            "native_workflow",
+        ],
+        artifact_relative_path: "../workflow/native_skills/dawn-desktop-control/SKILL.md",
+    },
+    NativeBuiltinSkillSpec {
         skill_id: "dawn-model-router",
         version: "native",
         display_name: "Dawn Model Router",
@@ -1055,6 +1069,9 @@ pub fn native_builtin_skill_usage(skill_id: &str) -> Option<String> {
         "dawn-chat-bridge" => Some(
             "这是 Dawn 的原生技能 `Dawn Chat Bridge`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天平台: Telegram、Slack、Discord、Signal、飞书、钉钉、企微、QQ Bot\n- 命令入口: `/help`、`/skills`、`/status`\n- 网关: 统一接收入站消息并把结果回写到原通道\n\n它的职责是做多通道消息归一化和回传，而不是执行 Wasm。".to_string(),
         ),
+        "dawn-desktop-control" => Some(
+            "这是 Dawn 的原生技能 `Dawn Desktop Control`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天: `#assist` 预览，`#autopilot` 后发送 `看一下屏幕`、`鼠标位置`、`移动鼠标到 400,300`、`点击 400,300`\n- /console: Node Command Console 和 Approval Center\n- CLI: `dawn-node node-command dispatch --type desktop_mouse_click --payload '{\"x\":400,\"y\":300,\"button\":\"left\"}'`\n\n它的职责是把手机端聊天意图安全地桥接到桌面观察和鼠标动作；桌面动作仍然走节点能力、可信 attestation 和审批链。".to_string(),
+        ),
         "dawn-model-router" => Some(
             "这是 Dawn 的原生技能 `Dawn Model Router`，默认可用，不需要安装。\n\n本机使用方式：\n- 聊天: `/model`\n- CLI: `dawn.ps1 connectors status`、`dawn.ps1 models test ollama`\n- 工作流: `model_connector` 步骤统一接入云模型和本地模型\n\n它的职责是做模型路由和连接器落点控制，而不是执行 Wasm。".to_string(),
         ),
@@ -1452,6 +1469,13 @@ mod tests {
                 .any(|skill| skill.skill_id == "dawn-model-router"
                     && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
         );
+        assert!(
+            distribution
+                .skills
+                .iter()
+                .any(|skill| skill.skill_id == "dawn-desktop-control"
+                    && skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+        );
         drop(state);
         fs::remove_file(db_path).ok();
     }
@@ -1462,6 +1486,7 @@ mod tests {
         assert!(native_builtin_skill_usage("bayesian-skill-set").is_some());
         assert!(native_builtin_skill_usage("dawn-orchestrator").is_some());
         assert!(native_builtin_skill_usage("dawn-chat-bridge").is_some());
+        assert!(native_builtin_skill_usage("dawn-desktop-control").is_some());
         assert!(native_builtin_skill_usage("dawn-model-router").is_some());
         assert!(native_builtin_skill_usage("dawn-node-operator").is_some());
         assert!(native_builtin_skill_usage("dawn-approval-guard").is_some());

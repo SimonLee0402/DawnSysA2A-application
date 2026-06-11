@@ -341,6 +341,177 @@ pub struct ChatIngressEventRecord {
     pub updated_at_unix_ms: u128,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExperienceRecord {
+    pub experience_id: Uuid,
+    pub source: String,
+    pub scope: String,
+    pub task_kind: String,
+    pub input_summary: String,
+    pub action_summary: String,
+    pub outcome: String,
+    pub lesson: String,
+    pub reusable_hint: Option<String>,
+    pub evidence: Value,
+    pub tags: Vec<String>,
+    pub risk_level: String,
+    pub related_task_id: Option<Uuid>,
+    pub related_ingress_id: Option<Uuid>,
+    pub created_by: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct AgentExperienceListFilter {
+    pub limit: Option<u32>,
+    pub source: Option<String>,
+    pub outcome: Option<String>,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillProposalRecord {
+    pub proposal_id: Uuid,
+    pub proposal_key: String,
+    pub title: String,
+    pub summary: String,
+    pub rationale: String,
+    pub suggested_skill_id: String,
+    pub source: String,
+    pub status: String,
+    pub confidence: f64,
+    pub evidence: Value,
+    pub tags: Vec<String>,
+    pub risk_level: String,
+    pub created_by: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SkillProposalListFilter {
+    pub limit: Option<u32>,
+    pub status: Option<String>,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImplementationPlanRecord {
+    pub plan_id: Uuid,
+    pub proposal_id: Uuid,
+    pub suggested_skill_id: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
+    pub steps: Value,
+    pub acceptance_criteria: Value,
+    pub guardrails: Value,
+    pub created_by: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SkillImplementationPlanListFilter {
+    pub limit: Option<u32>,
+    pub status: Option<String>,
+    pub proposal_id: Option<Uuid>,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImplementationRunRecord {
+    pub run_id: Uuid,
+    pub plan_id: Uuid,
+    pub proposal_id: Uuid,
+    pub suggested_skill_id: String,
+    pub status: String,
+    pub execution_mode: String,
+    pub change_package: Value,
+    pub verification: Value,
+    pub rollback: Value,
+    pub guardrails: Value,
+    pub created_by: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SkillImplementationRunListFilter {
+    pub limit: Option<u32>,
+    pub status: Option<String>,
+    pub plan_id: Option<Uuid>,
+    pub proposal_id: Option<Uuid>,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImplementationExecutionRecord {
+    pub execution_id: Uuid,
+    pub run_id: Uuid,
+    pub plan_id: Uuid,
+    pub proposal_id: Uuid,
+    pub suggested_skill_id: String,
+    pub status: String,
+    pub executor: String,
+    pub preflight_report: Value,
+    pub command_plan: Value,
+    pub result: Value,
+    pub guardrails: Value,
+    pub created_by: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SkillImplementationExecutionListFilter {
+    pub limit: Option<u32>,
+    pub status: Option<String>,
+    pub run_id: Option<Uuid>,
+    pub plan_id: Option<Uuid>,
+    pub proposal_id: Option<Uuid>,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImplementationPatchRecord {
+    pub patch_id: Uuid,
+    pub execution_id: Uuid,
+    pub run_id: Uuid,
+    pub plan_id: Uuid,
+    pub proposal_id: Uuid,
+    pub suggested_skill_id: String,
+    pub status: String,
+    pub patch_kind: String,
+    pub summary: String,
+    pub changed_files: Value,
+    pub patch_manifest: Value,
+    pub rollback_plan: Value,
+    pub verification_evidence: Value,
+    pub guardrails: Value,
+    pub created_by: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SkillImplementationPatchListFilter {
+    pub limit: Option<u32>,
+    pub status: Option<String>,
+    pub execution_id: Option<Uuid>,
+    pub run_id: Option<Uuid>,
+    pub plan_id: Option<Uuid>,
+    pub proposal_id: Option<Uuid>,
+    pub query: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatChannelIdentityStatus {
@@ -1526,6 +1697,1141 @@ impl AppState {
         .with_context(|| format!("failed to fetch latest chat ingress event for task {task_id}"))?;
 
         row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn upsert_agent_experience(
+        &self,
+        experience: AgentExperienceRecord,
+    ) -> anyhow::Result<AgentExperienceRecord> {
+        save_agent_experience(&self.pool, &experience).await?;
+        self.emit_console_event(
+            "evolution",
+            Some(experience.experience_id.to_string()),
+            Some(experience.outcome.clone()),
+            format!(
+                "{} · {} · {}",
+                experience.source, experience.task_kind, experience.lesson
+            ),
+        );
+        Ok(experience)
+    }
+
+    pub async fn get_agent_experience(
+        &self,
+        experience_id: Uuid,
+    ) -> anyhow::Result<Option<AgentExperienceRecord>> {
+        let row = sqlx::query_as::<_, AgentExperienceRow>(
+            r#"
+            SELECT
+                experience_id,
+                source,
+                scope,
+                task_kind,
+                input_summary,
+                action_summary,
+                outcome,
+                lesson,
+                reusable_hint,
+                evidence,
+                tags,
+                risk_level,
+                related_task_id,
+                related_ingress_id,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM agent_experiences
+            WHERE experience_id = ?1
+            "#,
+        )
+        .bind(experience_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch agent experience {experience_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_agent_experiences(
+        &self,
+        filter: AgentExperienceListFilter,
+    ) -> anyhow::Result<Vec<AgentExperienceRecord>> {
+        let search = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+        let limit = filter.limit.unwrap_or(50).clamp(1, 200);
+        let rows = sqlx::query_as::<_, AgentExperienceRow>(
+            r#"
+            SELECT
+                experience_id,
+                source,
+                scope,
+                task_kind,
+                input_summary,
+                action_summary,
+                outcome,
+                lesson,
+                reusable_hint,
+                evidence,
+                tags,
+                risk_level,
+                related_task_id,
+                related_ingress_id,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM agent_experiences
+            WHERE (?1 IS NULL OR source = ?1)
+              AND (?2 IS NULL OR outcome = ?2)
+              AND (
+                ?3 IS NULL
+                OR input_summary LIKE ?3
+                OR action_summary LIKE ?3
+                OR lesson LIKE ?3
+                OR reusable_hint LIKE ?3
+                OR tags LIKE ?3
+              )
+            ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(
+            filter
+                .source
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            filter
+                .outcome
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(search.as_deref())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list agent experiences")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn count_agent_experiences(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_experiences")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count agent experiences")?;
+        u64::try_from(count).context("negative agent experience count")
+    }
+
+    pub async fn has_agent_experience_for_ingress(&self, ingress_id: Uuid) -> anyhow::Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM agent_experiences
+            WHERE related_ingress_id = ?1
+            "#,
+        )
+        .bind(ingress_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("failed to count experiences for ingress {ingress_id}"))?;
+        Ok(count > 0)
+    }
+
+    pub async fn upsert_skill_proposal(
+        &self,
+        proposal: SkillProposalRecord,
+    ) -> anyhow::Result<SkillProposalRecord> {
+        save_skill_proposal(&self.pool, &proposal).await?;
+        self.emit_console_event(
+            "skill_proposal",
+            Some(proposal.proposal_id.to_string()),
+            Some(proposal.status.clone()),
+            format!("{} · {}", proposal.suggested_skill_id, proposal.title),
+        );
+        Ok(proposal)
+    }
+
+    pub async fn update_skill_proposal_review(
+        &self,
+        proposal: SkillProposalRecord,
+    ) -> anyhow::Result<SkillProposalRecord> {
+        let result = sqlx::query(
+            r#"
+            UPDATE skill_proposals
+            SET
+                status = ?1,
+                rationale = ?2,
+                evidence = ?3,
+                updated_at_unix_ms = ?4
+            WHERE proposal_id = ?5
+            "#,
+        )
+        .bind(&proposal.status)
+        .bind(&proposal.rationale)
+        .bind(
+            serde_json::to_string(&proposal.evidence)
+                .context("failed to serialize skill proposal review evidence")?,
+        )
+        .bind(u128_to_i64(proposal.updated_at_unix_ms)?)
+        .bind(proposal.proposal_id.to_string())
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to update skill proposal review {}",
+                proposal.proposal_id
+            )
+        })?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow!(
+                "skill proposal {} was not found for review update",
+                proposal.proposal_id
+            ));
+        }
+        self.emit_console_event(
+            "skill_proposal_review",
+            Some(proposal.proposal_id.to_string()),
+            Some(proposal.status.clone()),
+            format!("{} · {}", proposal.suggested_skill_id, proposal.title),
+        );
+        Ok(proposal)
+    }
+
+    pub async fn get_skill_proposal(
+        &self,
+        proposal_id: Uuid,
+    ) -> anyhow::Result<Option<SkillProposalRecord>> {
+        let row = sqlx::query_as::<_, SkillProposalRow>(
+            r#"
+            SELECT
+                proposal_id,
+                proposal_key,
+                title,
+                summary,
+                rationale,
+                suggested_skill_id,
+                source,
+                status,
+                confidence,
+                evidence,
+                tags,
+                risk_level,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_proposals
+            WHERE proposal_id = ?1
+            "#,
+        )
+        .bind(proposal_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch skill proposal {proposal_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_skill_proposal_by_key(
+        &self,
+        proposal_key: &str,
+    ) -> anyhow::Result<Option<SkillProposalRecord>> {
+        let row = sqlx::query_as::<_, SkillProposalRow>(
+            r#"
+            SELECT
+                proposal_id,
+                proposal_key,
+                title,
+                summary,
+                rationale,
+                suggested_skill_id,
+                source,
+                status,
+                confidence,
+                evidence,
+                tags,
+                risk_level,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_proposals
+            WHERE proposal_key = ?1
+            "#,
+        )
+        .bind(proposal_key)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch skill proposal by key {proposal_key}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_skill_proposals(
+        &self,
+        filter: SkillProposalListFilter,
+    ) -> anyhow::Result<Vec<SkillProposalRecord>> {
+        let search = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+        let limit = filter.limit.unwrap_or(50).clamp(1, 200);
+        let rows = sqlx::query_as::<_, SkillProposalRow>(
+            r#"
+            SELECT
+                proposal_id,
+                proposal_key,
+                title,
+                summary,
+                rationale,
+                suggested_skill_id,
+                source,
+                status,
+                confidence,
+                evidence,
+                tags,
+                risk_level,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_proposals
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (
+                ?2 IS NULL
+                OR title LIKE ?2
+                OR summary LIKE ?2
+                OR rationale LIKE ?2
+                OR suggested_skill_id LIKE ?2
+                OR tags LIKE ?2
+              )
+            ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+            LIMIT ?3
+            "#,
+        )
+        .bind(
+            filter
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(search.as_deref())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list skill proposals")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn count_skill_proposals(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_proposals")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count skill proposals")?;
+        u64::try_from(count).context("negative skill proposal count")
+    }
+
+    pub async fn upsert_skill_implementation_plan(
+        &self,
+        plan: SkillImplementationPlanRecord,
+    ) -> anyhow::Result<SkillImplementationPlanRecord> {
+        save_skill_implementation_plan(&self.pool, &plan).await?;
+        self.emit_console_event(
+            "skill_implementation_plan",
+            Some(plan.plan_id.to_string()),
+            Some(plan.status.clone()),
+            format!("{} · {}", plan.suggested_skill_id, plan.title),
+        );
+        Ok(plan)
+    }
+
+    pub async fn update_skill_implementation_plan_review(
+        &self,
+        plan: SkillImplementationPlanRecord,
+    ) -> anyhow::Result<SkillImplementationPlanRecord> {
+        let result = sqlx::query(
+            r#"
+            UPDATE skill_implementation_plans
+            SET
+                status = ?1,
+                guardrails = ?2,
+                updated_at_unix_ms = ?3
+            WHERE plan_id = ?4
+            "#,
+        )
+        .bind(&plan.status)
+        .bind(
+            serde_json::to_string(&plan.guardrails)
+                .context("failed to serialize skill implementation plan review guardrails")?,
+        )
+        .bind(u128_to_i64(plan.updated_at_unix_ms)?)
+        .bind(plan.plan_id.to_string())
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to update skill implementation plan review {}",
+                plan.plan_id
+            )
+        })?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow!(
+                "skill implementation plan {} was not found for review update",
+                plan.plan_id
+            ));
+        }
+        self.emit_console_event(
+            "skill_implementation_plan_review",
+            Some(plan.plan_id.to_string()),
+            Some(plan.status.clone()),
+            format!("{} · {}", plan.suggested_skill_id, plan.title),
+        );
+        Ok(plan)
+    }
+
+    pub async fn get_skill_implementation_plan(
+        &self,
+        plan_id: Uuid,
+    ) -> anyhow::Result<Option<SkillImplementationPlanRecord>> {
+        let row = sqlx::query_as::<_, SkillImplementationPlanRow>(
+            r#"
+            SELECT
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                title,
+                summary,
+                status,
+                steps,
+                acceptance_criteria,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_plans
+            WHERE plan_id = ?1
+            "#,
+        )
+        .bind(plan_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch skill implementation plan {plan_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_skill_implementation_plan_by_proposal(
+        &self,
+        proposal_id: Uuid,
+    ) -> anyhow::Result<Option<SkillImplementationPlanRecord>> {
+        let row = sqlx::query_as::<_, SkillImplementationPlanRow>(
+            r#"
+            SELECT
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                title,
+                summary,
+                status,
+                steps,
+                acceptance_criteria,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_plans
+            WHERE proposal_id = ?1
+            "#,
+        )
+        .bind(proposal_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!("failed to fetch skill implementation plan for proposal {proposal_id}")
+        })?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_skill_implementation_plans(
+        &self,
+        filter: SkillImplementationPlanListFilter,
+    ) -> anyhow::Result<Vec<SkillImplementationPlanRecord>> {
+        let search = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+        let proposal_id = filter.proposal_id.map(|value| value.to_string());
+        let limit = filter.limit.unwrap_or(50).clamp(1, 200);
+        let rows = sqlx::query_as::<_, SkillImplementationPlanRow>(
+            r#"
+            SELECT
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                title,
+                summary,
+                status,
+                steps,
+                acceptance_criteria,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_plans
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (?2 IS NULL OR proposal_id = ?2)
+              AND (
+                ?3 IS NULL
+                OR title LIKE ?3
+                OR summary LIKE ?3
+                OR suggested_skill_id LIKE ?3
+                OR steps LIKE ?3
+                OR acceptance_criteria LIKE ?3
+                OR guardrails LIKE ?3
+              )
+            ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(
+            filter
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(proposal_id.as_deref())
+        .bind(search.as_deref())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list skill implementation plans")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn count_skill_implementation_plans(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_implementation_plans")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count skill implementation plans")?;
+        u64::try_from(count).context("negative skill implementation plan count")
+    }
+
+    pub async fn upsert_skill_implementation_run(
+        &self,
+        run: SkillImplementationRunRecord,
+    ) -> anyhow::Result<SkillImplementationRunRecord> {
+        save_skill_implementation_run(&self.pool, &run).await?;
+        self.emit_console_event(
+            "skill_implementation_run",
+            Some(run.run_id.to_string()),
+            Some(run.status.clone()),
+            format!("{} · {}", run.suggested_skill_id, run.execution_mode),
+        );
+        Ok(run)
+    }
+
+    pub async fn update_skill_implementation_run_review(
+        &self,
+        run: SkillImplementationRunRecord,
+    ) -> anyhow::Result<SkillImplementationRunRecord> {
+        let result = sqlx::query(
+            r#"
+            UPDATE skill_implementation_runs
+            SET
+                status = ?1,
+                guardrails = ?2,
+                updated_at_unix_ms = ?3
+            WHERE run_id = ?4
+            "#,
+        )
+        .bind(&run.status)
+        .bind(
+            serde_json::to_string(&run.guardrails)
+                .context("failed to serialize skill implementation run guardrails")?,
+        )
+        .bind(u128_to_i64(run.updated_at_unix_ms)?)
+        .bind(run.run_id.to_string())
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to update skill implementation run {}", run.run_id))?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow!(
+                "skill implementation run {} was not found for review update",
+                run.run_id
+            ));
+        }
+        self.emit_console_event(
+            "skill_implementation_run_review",
+            Some(run.run_id.to_string()),
+            Some(run.status.clone()),
+            format!("{} · {}", run.suggested_skill_id, run.execution_mode),
+        );
+        Ok(run)
+    }
+
+    pub async fn get_skill_implementation_run(
+        &self,
+        run_id: Uuid,
+    ) -> anyhow::Result<Option<SkillImplementationRunRecord>> {
+        let row = sqlx::query_as::<_, SkillImplementationRunRow>(
+            r#"
+            SELECT
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                execution_mode,
+                change_package,
+                verification,
+                rollback,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_runs
+            WHERE run_id = ?1
+            "#,
+        )
+        .bind(run_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch skill implementation run {run_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_skill_implementation_run_by_plan(
+        &self,
+        plan_id: Uuid,
+    ) -> anyhow::Result<Option<SkillImplementationRunRecord>> {
+        let row = sqlx::query_as::<_, SkillImplementationRunRow>(
+            r#"
+            SELECT
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                execution_mode,
+                change_package,
+                verification,
+                rollback,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_runs
+            WHERE plan_id = ?1
+            "#,
+        )
+        .bind(plan_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch skill implementation run for plan {plan_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_skill_implementation_runs(
+        &self,
+        filter: SkillImplementationRunListFilter,
+    ) -> anyhow::Result<Vec<SkillImplementationRunRecord>> {
+        let search = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+        let plan_id = filter.plan_id.map(|value| value.to_string());
+        let proposal_id = filter.proposal_id.map(|value| value.to_string());
+        let limit = filter.limit.unwrap_or(50).clamp(1, 200);
+        let rows = sqlx::query_as::<_, SkillImplementationRunRow>(
+            r#"
+            SELECT
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                execution_mode,
+                change_package,
+                verification,
+                rollback,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_runs
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (?2 IS NULL OR plan_id = ?2)
+              AND (?3 IS NULL OR proposal_id = ?3)
+              AND (
+                ?4 IS NULL
+                OR suggested_skill_id LIKE ?4
+                OR execution_mode LIKE ?4
+                OR change_package LIKE ?4
+                OR verification LIKE ?4
+                OR rollback LIKE ?4
+                OR guardrails LIKE ?4
+              )
+            ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+            LIMIT ?5
+            "#,
+        )
+        .bind(
+            filter
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(plan_id.as_deref())
+        .bind(proposal_id.as_deref())
+        .bind(search.as_deref())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list skill implementation runs")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn count_skill_implementation_runs(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_implementation_runs")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count skill implementation runs")?;
+        u64::try_from(count).context("negative skill implementation run count")
+    }
+
+    pub async fn upsert_skill_implementation_execution(
+        &self,
+        execution: SkillImplementationExecutionRecord,
+    ) -> anyhow::Result<SkillImplementationExecutionRecord> {
+        save_skill_implementation_execution(&self.pool, &execution).await?;
+        self.emit_console_event(
+            "skill_implementation_execution",
+            Some(execution.execution_id.to_string()),
+            Some(execution.status.clone()),
+            format!("{} · {}", execution.suggested_skill_id, execution.executor),
+        );
+        Ok(execution)
+    }
+
+    pub async fn update_skill_implementation_execution_review(
+        &self,
+        execution: SkillImplementationExecutionRecord,
+    ) -> anyhow::Result<SkillImplementationExecutionRecord> {
+        let result = sqlx::query(
+            r#"
+            UPDATE skill_implementation_executions
+            SET
+                status = ?1,
+                result = ?2,
+                guardrails = ?3,
+                updated_at_unix_ms = ?4
+            WHERE execution_id = ?5
+            "#,
+        )
+        .bind(&execution.status)
+        .bind(
+            serde_json::to_string(&execution.result)
+                .context("failed to serialize skill implementation execution result")?,
+        )
+        .bind(
+            serde_json::to_string(&execution.guardrails)
+                .context("failed to serialize skill implementation execution guardrails")?,
+        )
+        .bind(u128_to_i64(execution.updated_at_unix_ms)?)
+        .bind(execution.execution_id.to_string())
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to update skill implementation execution {}",
+                execution.execution_id
+            )
+        })?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow!(
+                "skill implementation execution {} was not found for review update",
+                execution.execution_id
+            ));
+        }
+        self.emit_console_event(
+            "skill_implementation_execution",
+            Some(execution.execution_id.to_string()),
+            Some(execution.status.clone()),
+            format!("{} · {}", execution.suggested_skill_id, execution.executor),
+        );
+        Ok(execution)
+    }
+
+    pub async fn get_skill_implementation_execution(
+        &self,
+        execution_id: Uuid,
+    ) -> anyhow::Result<Option<SkillImplementationExecutionRecord>> {
+        let row = sqlx::query_as::<_, SkillImplementationExecutionRow>(
+            r#"
+            SELECT
+                execution_id,
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                executor,
+                preflight_report,
+                command_plan,
+                result,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_executions
+            WHERE execution_id = ?1
+            "#,
+        )
+        .bind(execution_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!("failed to fetch skill implementation execution {execution_id}")
+        })?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_skill_implementation_executions(
+        &self,
+        filter: SkillImplementationExecutionListFilter,
+    ) -> anyhow::Result<Vec<SkillImplementationExecutionRecord>> {
+        let search = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+        let run_id = filter.run_id.map(|value| value.to_string());
+        let plan_id = filter.plan_id.map(|value| value.to_string());
+        let proposal_id = filter.proposal_id.map(|value| value.to_string());
+        let limit = filter.limit.unwrap_or(50).clamp(1, 250);
+        let rows = sqlx::query_as::<_, SkillImplementationExecutionRow>(
+            r#"
+            SELECT
+                execution_id,
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                executor,
+                preflight_report,
+                command_plan,
+                result,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_executions
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (?2 IS NULL OR run_id = ?2)
+              AND (?3 IS NULL OR plan_id = ?3)
+              AND (?4 IS NULL OR proposal_id = ?4)
+              AND (
+                ?5 IS NULL
+                OR suggested_skill_id LIKE ?5
+                OR executor LIKE ?5
+                OR preflight_report LIKE ?5
+                OR command_plan LIKE ?5
+                OR result LIKE ?5
+                OR guardrails LIKE ?5
+              )
+            ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+            LIMIT ?6
+            "#,
+        )
+        .bind(
+            filter
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(run_id.as_deref())
+        .bind(plan_id.as_deref())
+        .bind(proposal_id.as_deref())
+        .bind(search.as_deref())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list skill implementation executions")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn count_skill_implementation_executions(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_implementation_executions")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count skill implementation executions")?;
+        u64::try_from(count).context("negative skill implementation execution count")
+    }
+
+    pub async fn upsert_skill_implementation_patch(
+        &self,
+        patch: SkillImplementationPatchRecord,
+    ) -> anyhow::Result<SkillImplementationPatchRecord> {
+        save_skill_implementation_patch(&self.pool, &patch).await?;
+        self.emit_console_event(
+            "skill_implementation_patch",
+            Some(patch.patch_id.to_string()),
+            Some(patch.status.clone()),
+            format!("{} · {}", patch.suggested_skill_id, patch.patch_kind),
+        );
+        Ok(patch)
+    }
+
+    pub async fn update_skill_implementation_patch_review(
+        &self,
+        patch: SkillImplementationPatchRecord,
+    ) -> anyhow::Result<SkillImplementationPatchRecord> {
+        let result = sqlx::query(
+            r#"
+            UPDATE skill_implementation_patches
+            SET
+                status = ?1,
+                verification_evidence = ?2,
+                guardrails = ?3,
+                updated_at_unix_ms = ?4
+            WHERE patch_id = ?5
+            "#,
+        )
+        .bind(&patch.status)
+        .bind(
+            serde_json::to_string(&patch.verification_evidence)
+                .context("failed to serialize skill implementation patch verification evidence")?,
+        )
+        .bind(
+            serde_json::to_string(&patch.guardrails)
+                .context("failed to serialize skill implementation patch guardrails")?,
+        )
+        .bind(u128_to_i64(patch.updated_at_unix_ms)?)
+        .bind(patch.patch_id.to_string())
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to update skill implementation patch {}",
+                patch.patch_id
+            )
+        })?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow!(
+                "skill implementation patch {} was not found for review update",
+                patch.patch_id
+            ));
+        }
+        self.emit_console_event(
+            "skill_implementation_patch",
+            Some(patch.patch_id.to_string()),
+            Some(patch.status.clone()),
+            format!("{} · {}", patch.suggested_skill_id, patch.patch_kind),
+        );
+        Ok(patch)
+    }
+
+    pub async fn update_skill_implementation_patch_runtime(
+        &self,
+        patch: SkillImplementationPatchRecord,
+    ) -> anyhow::Result<SkillImplementationPatchRecord> {
+        let result = sqlx::query(
+            r#"
+            UPDATE skill_implementation_patches
+            SET
+                status = ?1,
+                patch_manifest = ?2,
+                rollback_plan = ?3,
+                verification_evidence = ?4,
+                guardrails = ?5,
+                updated_at_unix_ms = ?6
+            WHERE patch_id = ?7
+            "#,
+        )
+        .bind(&patch.status)
+        .bind(
+            serde_json::to_string(&patch.patch_manifest)
+                .context("failed to serialize skill implementation patch manifest")?,
+        )
+        .bind(
+            serde_json::to_string(&patch.rollback_plan)
+                .context("failed to serialize skill implementation patch rollback plan")?,
+        )
+        .bind(
+            serde_json::to_string(&patch.verification_evidence)
+                .context("failed to serialize skill implementation patch verification evidence")?,
+        )
+        .bind(
+            serde_json::to_string(&patch.guardrails)
+                .context("failed to serialize skill implementation patch guardrails")?,
+        )
+        .bind(u128_to_i64(patch.updated_at_unix_ms)?)
+        .bind(patch.patch_id.to_string())
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to update skill implementation patch runtime {}",
+                patch.patch_id
+            )
+        })?;
+        if result.rows_affected() == 0 {
+            return Err(anyhow!(
+                "skill implementation patch {} was not found for runtime update",
+                patch.patch_id
+            ));
+        }
+        self.emit_console_event(
+            "skill_implementation_patch",
+            Some(patch.patch_id.to_string()),
+            Some(patch.status.clone()),
+            format!("{} · {}", patch.suggested_skill_id, patch.patch_kind),
+        );
+        Ok(patch)
+    }
+
+    pub async fn get_skill_implementation_patch(
+        &self,
+        patch_id: Uuid,
+    ) -> anyhow::Result<Option<SkillImplementationPatchRecord>> {
+        let row = sqlx::query_as::<_, SkillImplementationPatchRow>(
+            r#"
+            SELECT
+                patch_id,
+                execution_id,
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                patch_kind,
+                summary,
+                changed_files,
+                patch_manifest,
+                rollback_plan,
+                verification_evidence,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_patches
+            WHERE patch_id = ?1
+            "#,
+        )
+        .bind(patch_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch skill implementation patch {patch_id}"))?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_skill_implementation_patches(
+        &self,
+        filter: SkillImplementationPatchListFilter,
+    ) -> anyhow::Result<Vec<SkillImplementationPatchRecord>> {
+        let search = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+        let execution_id = filter.execution_id.map(|value| value.to_string());
+        let run_id = filter.run_id.map(|value| value.to_string());
+        let plan_id = filter.plan_id.map(|value| value.to_string());
+        let proposal_id = filter.proposal_id.map(|value| value.to_string());
+        let limit = filter.limit.unwrap_or(50).clamp(1, 250);
+        let rows = sqlx::query_as::<_, SkillImplementationPatchRow>(
+            r#"
+            SELECT
+                patch_id,
+                execution_id,
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id,
+                status,
+                patch_kind,
+                summary,
+                changed_files,
+                patch_manifest,
+                rollback_plan,
+                verification_evidence,
+                guardrails,
+                created_by,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM skill_implementation_patches
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (?2 IS NULL OR execution_id = ?2)
+              AND (?3 IS NULL OR run_id = ?3)
+              AND (?4 IS NULL OR plan_id = ?4)
+              AND (?5 IS NULL OR proposal_id = ?5)
+              AND (
+                ?6 IS NULL
+                OR suggested_skill_id LIKE ?6
+                OR patch_kind LIKE ?6
+                OR summary LIKE ?6
+                OR changed_files LIKE ?6
+                OR patch_manifest LIKE ?6
+                OR rollback_plan LIKE ?6
+                OR verification_evidence LIKE ?6
+                OR guardrails LIKE ?6
+              )
+            ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+            LIMIT ?7
+            "#,
+        )
+        .bind(
+            filter
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(execution_id.as_deref())
+        .bind(run_id.as_deref())
+        .bind(plan_id.as_deref())
+        .bind(proposal_id.as_deref())
+        .bind(search.as_deref())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list skill implementation patches")?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn count_skill_implementation_patches(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_implementation_patches")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count skill implementation patches")?;
+        u64::try_from(count).context("negative skill implementation patch count")
     }
 
     pub async fn upsert_chat_channel_identity(
@@ -2773,6 +4079,263 @@ impl TryFrom<ChatIngressEventRow> for ChatIngressEventRecord {
 }
 
 #[derive(FromRow)]
+struct AgentExperienceRow {
+    experience_id: String,
+    source: String,
+    scope: String,
+    task_kind: String,
+    input_summary: String,
+    action_summary: String,
+    outcome: String,
+    lesson: String,
+    reusable_hint: Option<String>,
+    evidence: String,
+    tags: String,
+    risk_level: String,
+    related_task_id: Option<String>,
+    related_ingress_id: Option<String>,
+    created_by: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<AgentExperienceRow> for AgentExperienceRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: AgentExperienceRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            experience_id: parse_uuid(&row.experience_id, "experience_id")?,
+            source: row.source,
+            scope: row.scope,
+            task_kind: row.task_kind,
+            input_summary: row.input_summary,
+            action_summary: row.action_summary,
+            outcome: row.outcome,
+            lesson: row.lesson,
+            reusable_hint: row.reusable_hint,
+            evidence: parse_json_field(&row.evidence, "evidence")?,
+            tags: parse_json_field(&row.tags, "tags")?,
+            risk_level: row.risk_level,
+            related_task_id: parse_uuid_opt(row.related_task_id, "related_task_id")?,
+            related_ingress_id: parse_uuid_opt(row.related_ingress_id, "related_ingress_id")?,
+            created_by: row.created_by,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct SkillProposalRow {
+    proposal_id: String,
+    proposal_key: String,
+    title: String,
+    summary: String,
+    rationale: String,
+    suggested_skill_id: String,
+    source: String,
+    status: String,
+    confidence: f64,
+    evidence: String,
+    tags: String,
+    risk_level: String,
+    created_by: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<SkillProposalRow> for SkillProposalRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SkillProposalRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            proposal_id: parse_uuid(&row.proposal_id, "proposal_id")?,
+            proposal_key: row.proposal_key,
+            title: row.title,
+            summary: row.summary,
+            rationale: row.rationale,
+            suggested_skill_id: row.suggested_skill_id,
+            source: row.source,
+            status: row.status,
+            confidence: row.confidence,
+            evidence: parse_json_field(&row.evidence, "evidence")?,
+            tags: parse_json_field(&row.tags, "tags")?,
+            risk_level: row.risk_level,
+            created_by: row.created_by,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct SkillImplementationPlanRow {
+    plan_id: String,
+    proposal_id: String,
+    suggested_skill_id: String,
+    title: String,
+    summary: String,
+    status: String,
+    steps: String,
+    acceptance_criteria: String,
+    guardrails: String,
+    created_by: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<SkillImplementationPlanRow> for SkillImplementationPlanRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SkillImplementationPlanRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            plan_id: parse_uuid(&row.plan_id, "plan_id")?,
+            proposal_id: parse_uuid(&row.proposal_id, "proposal_id")?,
+            suggested_skill_id: row.suggested_skill_id,
+            title: row.title,
+            summary: row.summary,
+            status: row.status,
+            steps: parse_json_field(&row.steps, "steps")?,
+            acceptance_criteria: parse_json_field(&row.acceptance_criteria, "acceptance_criteria")?,
+            guardrails: parse_json_field(&row.guardrails, "guardrails")?,
+            created_by: row.created_by,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct SkillImplementationRunRow {
+    run_id: String,
+    plan_id: String,
+    proposal_id: String,
+    suggested_skill_id: String,
+    status: String,
+    execution_mode: String,
+    change_package: String,
+    verification: String,
+    rollback: String,
+    guardrails: String,
+    created_by: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<SkillImplementationRunRow> for SkillImplementationRunRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SkillImplementationRunRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            run_id: parse_uuid(&row.run_id, "run_id")?,
+            plan_id: parse_uuid(&row.plan_id, "plan_id")?,
+            proposal_id: parse_uuid(&row.proposal_id, "proposal_id")?,
+            suggested_skill_id: row.suggested_skill_id,
+            status: row.status,
+            execution_mode: row.execution_mode,
+            change_package: parse_json_field(&row.change_package, "change_package")?,
+            verification: parse_json_field(&row.verification, "verification")?,
+            rollback: parse_json_field(&row.rollback, "rollback")?,
+            guardrails: parse_json_field(&row.guardrails, "guardrails")?,
+            created_by: row.created_by,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct SkillImplementationExecutionRow {
+    execution_id: String,
+    run_id: String,
+    plan_id: String,
+    proposal_id: String,
+    suggested_skill_id: String,
+    status: String,
+    executor: String,
+    preflight_report: String,
+    command_plan: String,
+    result: String,
+    guardrails: String,
+    created_by: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<SkillImplementationExecutionRow> for SkillImplementationExecutionRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SkillImplementationExecutionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            execution_id: parse_uuid(&row.execution_id, "execution_id")?,
+            run_id: parse_uuid(&row.run_id, "run_id")?,
+            plan_id: parse_uuid(&row.plan_id, "plan_id")?,
+            proposal_id: parse_uuid(&row.proposal_id, "proposal_id")?,
+            suggested_skill_id: row.suggested_skill_id,
+            status: row.status,
+            executor: row.executor,
+            preflight_report: parse_json_field(&row.preflight_report, "preflight_report")?,
+            command_plan: parse_json_field(&row.command_plan, "command_plan")?,
+            result: parse_json_field(&row.result, "result")?,
+            guardrails: parse_json_field(&row.guardrails, "guardrails")?,
+            created_by: row.created_by,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct SkillImplementationPatchRow {
+    patch_id: String,
+    execution_id: String,
+    run_id: String,
+    plan_id: String,
+    proposal_id: String,
+    suggested_skill_id: String,
+    status: String,
+    patch_kind: String,
+    summary: String,
+    changed_files: String,
+    patch_manifest: String,
+    rollback_plan: String,
+    verification_evidence: String,
+    guardrails: String,
+    created_by: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+}
+
+impl TryFrom<SkillImplementationPatchRow> for SkillImplementationPatchRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SkillImplementationPatchRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            patch_id: parse_uuid(&row.patch_id, "patch_id")?,
+            execution_id: parse_uuid(&row.execution_id, "execution_id")?,
+            run_id: parse_uuid(&row.run_id, "run_id")?,
+            plan_id: parse_uuid(&row.plan_id, "plan_id")?,
+            proposal_id: parse_uuid(&row.proposal_id, "proposal_id")?,
+            suggested_skill_id: row.suggested_skill_id,
+            status: row.status,
+            patch_kind: row.patch_kind,
+            summary: row.summary,
+            changed_files: parse_json_field(&row.changed_files, "changed_files")?,
+            patch_manifest: parse_json_field(&row.patch_manifest, "patch_manifest")?,
+            rollback_plan: parse_json_field(&row.rollback_plan, "rollback_plan")?,
+            verification_evidence: parse_json_field(
+                &row.verification_evidence,
+                "verification_evidence",
+            )?,
+            guardrails: parse_json_field(&row.guardrails, "guardrails")?,
+            created_by: row.created_by,
+            created_at_unix_ms: i64_to_u128(row.created_at_unix_ms)?,
+            updated_at_unix_ms: i64_to_u128(row.updated_at_unix_ms)?,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct ChatChannelIdentityRow {
     platform: String,
     identity_key: String,
@@ -3402,6 +4965,198 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_chat_ingress_events_linked_task_id
         ON chat_ingress_events(linked_task_id, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_experiences (
+            experience_id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
+            input_summary TEXT NOT NULL,
+            action_summary TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            lesson TEXT NOT NULL,
+            reusable_hint TEXT,
+            evidence TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            related_task_id TEXT,
+            related_ingress_id TEXT,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_experiences_source_updated_at
+        ON agent_experiences(source, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_experiences_outcome_updated_at
+        ON agent_experiences(outcome, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_experiences_task_kind_updated_at
+        ON agent_experiences(task_kind, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_experiences_related_task
+        ON agent_experiences(related_task_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_experiences_related_ingress
+        ON agent_experiences(related_ingress_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            proposal_key TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            suggested_skill_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            evidence TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_proposals_status_updated_at
+        ON skill_proposals(status, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_proposals_skill_id_updated_at
+        ON skill_proposals(suggested_skill_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_implementation_plans (
+            plan_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL UNIQUE,
+            suggested_skill_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            steps TEXT NOT NULL,
+            acceptance_criteria TEXT NOT NULL,
+            guardrails TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_plans_status_updated_at
+        ON skill_implementation_plans(status, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_plans_skill_id_updated_at
+        ON skill_implementation_plans(suggested_skill_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_implementation_runs (
+            run_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL UNIQUE,
+            proposal_id TEXT NOT NULL,
+            suggested_skill_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            execution_mode TEXT NOT NULL,
+            change_package TEXT NOT NULL,
+            verification TEXT NOT NULL,
+            rollback TEXT NOT NULL,
+            guardrails TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_runs_status_updated_at
+        ON skill_implementation_runs(status, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_runs_proposal_updated_at
+        ON skill_implementation_runs(proposal_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_runs_skill_id_updated_at
+        ON skill_implementation_runs(suggested_skill_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_implementation_executions (
+            execution_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL,
+            suggested_skill_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            executor TEXT NOT NULL,
+            preflight_report TEXT NOT NULL,
+            command_plan TEXT NOT NULL,
+            result TEXT NOT NULL,
+            guardrails TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_executions_status_updated_at
+        ON skill_implementation_executions(status, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_executions_run_updated_at
+        ON skill_implementation_executions(run_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_executions_proposal_updated_at
+        ON skill_implementation_executions(proposal_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_executions_skill_id_updated_at
+        ON skill_implementation_executions(suggested_skill_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_implementation_patches (
+            patch_id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL,
+            suggested_skill_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            patch_kind TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            changed_files TEXT NOT NULL,
+            patch_manifest TEXT NOT NULL,
+            rollback_plan TEXT NOT NULL,
+            verification_evidence TEXT NOT NULL,
+            guardrails TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_patches_status_updated_at
+        ON skill_implementation_patches(status, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_patches_execution_updated_at
+        ON skill_implementation_patches(execution_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_patches_proposal_updated_at
+        ON skill_implementation_patches(proposal_id, updated_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_implementation_patches_skill_id_updated_at
+        ON skill_implementation_patches(suggested_skill_id, updated_at_unix_ms DESC)
         "#,
         r#"
         CREATE TABLE IF NOT EXISTS chat_channel_identities (
@@ -4239,6 +5994,426 @@ async fn save_chat_ingress_event(
     Ok(())
 }
 
+async fn save_agent_experience(
+    pool: &SqlitePool,
+    experience: &AgentExperienceRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agent_experiences (
+            experience_id,
+            source,
+            scope,
+            task_kind,
+            input_summary,
+            action_summary,
+            outcome,
+            lesson,
+            reusable_hint,
+            evidence,
+            tags,
+            risk_level,
+            related_task_id,
+            related_ingress_id,
+            created_by,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        ON CONFLICT(experience_id) DO UPDATE SET
+            source = excluded.source,
+            scope = excluded.scope,
+            task_kind = excluded.task_kind,
+            input_summary = excluded.input_summary,
+            action_summary = excluded.action_summary,
+            outcome = excluded.outcome,
+            lesson = excluded.lesson,
+            reusable_hint = excluded.reusable_hint,
+            evidence = excluded.evidence,
+            tags = excluded.tags,
+            risk_level = excluded.risk_level,
+            related_task_id = excluded.related_task_id,
+            related_ingress_id = excluded.related_ingress_id,
+            created_by = excluded.created_by,
+            created_at_unix_ms = agent_experiences.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(experience.experience_id.to_string())
+    .bind(&experience.source)
+    .bind(&experience.scope)
+    .bind(&experience.task_kind)
+    .bind(&experience.input_summary)
+    .bind(&experience.action_summary)
+    .bind(&experience.outcome)
+    .bind(&experience.lesson)
+    .bind(&experience.reusable_hint)
+    .bind(
+        serde_json::to_string(&experience.evidence)
+            .context("failed to serialize agent experience evidence")?,
+    )
+    .bind(
+        serde_json::to_string(&experience.tags)
+            .context("failed to serialize agent experience tags")?,
+    )
+    .bind(&experience.risk_level)
+    .bind(experience.related_task_id.map(|value| value.to_string()))
+    .bind(experience.related_ingress_id.map(|value| value.to_string()))
+    .bind(&experience.created_by)
+    .bind(u128_to_i64(experience.created_at_unix_ms)?)
+    .bind(u128_to_i64(experience.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save agent experience")?;
+
+    Ok(())
+}
+
+async fn save_skill_proposal(
+    pool: &SqlitePool,
+    proposal: &SkillProposalRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO skill_proposals (
+            proposal_id,
+            proposal_key,
+            title,
+            summary,
+            rationale,
+            suggested_skill_id,
+            source,
+            status,
+            confidence,
+            evidence,
+            tags,
+            risk_level,
+            created_by,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        ON CONFLICT(proposal_key) DO UPDATE SET
+            title = excluded.title,
+            summary = excluded.summary,
+            rationale = excluded.rationale,
+            suggested_skill_id = excluded.suggested_skill_id,
+            source = excluded.source,
+            status = skill_proposals.status,
+            confidence = excluded.confidence,
+            evidence = excluded.evidence,
+            tags = excluded.tags,
+            risk_level = excluded.risk_level,
+            created_by = excluded.created_by,
+            created_at_unix_ms = skill_proposals.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(proposal.proposal_id.to_string())
+    .bind(&proposal.proposal_key)
+    .bind(&proposal.title)
+    .bind(&proposal.summary)
+    .bind(&proposal.rationale)
+    .bind(&proposal.suggested_skill_id)
+    .bind(&proposal.source)
+    .bind(&proposal.status)
+    .bind(proposal.confidence)
+    .bind(
+        serde_json::to_string(&proposal.evidence)
+            .context("failed to serialize skill proposal evidence")?,
+    )
+    .bind(serde_json::to_string(&proposal.tags).context("failed to serialize skill proposal tags")?)
+    .bind(&proposal.risk_level)
+    .bind(&proposal.created_by)
+    .bind(u128_to_i64(proposal.created_at_unix_ms)?)
+    .bind(u128_to_i64(proposal.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save skill proposal")?;
+
+    Ok(())
+}
+
+async fn save_skill_implementation_plan(
+    pool: &SqlitePool,
+    plan: &SkillImplementationPlanRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO skill_implementation_plans (
+            plan_id,
+            proposal_id,
+            suggested_skill_id,
+            title,
+            summary,
+            status,
+            steps,
+            acceptance_criteria,
+            guardrails,
+            created_by,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(proposal_id) DO UPDATE SET
+            suggested_skill_id = excluded.suggested_skill_id,
+            title = excluded.title,
+            summary = excluded.summary,
+            status = skill_implementation_plans.status,
+            steps = excluded.steps,
+            acceptance_criteria = excluded.acceptance_criteria,
+            guardrails = excluded.guardrails,
+            created_by = excluded.created_by,
+            created_at_unix_ms = skill_implementation_plans.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(plan.plan_id.to_string())
+    .bind(plan.proposal_id.to_string())
+    .bind(&plan.suggested_skill_id)
+    .bind(&plan.title)
+    .bind(&plan.summary)
+    .bind(&plan.status)
+    .bind(
+        serde_json::to_string(&plan.steps)
+            .context("failed to serialize skill implementation plan steps")?,
+    )
+    .bind(
+        serde_json::to_string(&plan.acceptance_criteria)
+            .context("failed to serialize skill implementation plan acceptance criteria")?,
+    )
+    .bind(
+        serde_json::to_string(&plan.guardrails)
+            .context("failed to serialize skill implementation plan guardrails")?,
+    )
+    .bind(&plan.created_by)
+    .bind(u128_to_i64(plan.created_at_unix_ms)?)
+    .bind(u128_to_i64(plan.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save skill implementation plan")?;
+
+    Ok(())
+}
+
+async fn save_skill_implementation_run(
+    pool: &SqlitePool,
+    run: &SkillImplementationRunRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO skill_implementation_runs (
+            run_id,
+            plan_id,
+            proposal_id,
+            suggested_skill_id,
+            status,
+            execution_mode,
+            change_package,
+            verification,
+            rollback,
+            guardrails,
+            created_by,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        ON CONFLICT(plan_id) DO UPDATE SET
+            proposal_id = excluded.proposal_id,
+            suggested_skill_id = excluded.suggested_skill_id,
+            status = skill_implementation_runs.status,
+            execution_mode = excluded.execution_mode,
+            change_package = excluded.change_package,
+            verification = excluded.verification,
+            rollback = excluded.rollback,
+            guardrails = excluded.guardrails,
+            created_by = excluded.created_by,
+            created_at_unix_ms = skill_implementation_runs.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(run.run_id.to_string())
+    .bind(run.plan_id.to_string())
+    .bind(run.proposal_id.to_string())
+    .bind(&run.suggested_skill_id)
+    .bind(&run.status)
+    .bind(&run.execution_mode)
+    .bind(
+        serde_json::to_string(&run.change_package)
+            .context("failed to serialize skill implementation run change package")?,
+    )
+    .bind(
+        serde_json::to_string(&run.verification)
+            .context("failed to serialize skill implementation run verification")?,
+    )
+    .bind(
+        serde_json::to_string(&run.rollback)
+            .context("failed to serialize skill implementation run rollback")?,
+    )
+    .bind(
+        serde_json::to_string(&run.guardrails)
+            .context("failed to serialize skill implementation run guardrails")?,
+    )
+    .bind(&run.created_by)
+    .bind(u128_to_i64(run.created_at_unix_ms)?)
+    .bind(u128_to_i64(run.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save skill implementation run")?;
+
+    Ok(())
+}
+
+async fn save_skill_implementation_execution(
+    pool: &SqlitePool,
+    execution: &SkillImplementationExecutionRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO skill_implementation_executions (
+            execution_id,
+            run_id,
+            plan_id,
+            proposal_id,
+            suggested_skill_id,
+            status,
+            executor,
+            preflight_report,
+            command_plan,
+            result,
+            guardrails,
+            created_by,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ON CONFLICT(execution_id) DO UPDATE SET
+            run_id = excluded.run_id,
+            plan_id = excluded.plan_id,
+            proposal_id = excluded.proposal_id,
+            suggested_skill_id = excluded.suggested_skill_id,
+            status = excluded.status,
+            executor = excluded.executor,
+            preflight_report = excluded.preflight_report,
+            command_plan = excluded.command_plan,
+            result = excluded.result,
+            guardrails = excluded.guardrails,
+            created_by = excluded.created_by,
+            created_at_unix_ms = skill_implementation_executions.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(execution.execution_id.to_string())
+    .bind(execution.run_id.to_string())
+    .bind(execution.plan_id.to_string())
+    .bind(execution.proposal_id.to_string())
+    .bind(&execution.suggested_skill_id)
+    .bind(&execution.status)
+    .bind(&execution.executor)
+    .bind(
+        serde_json::to_string(&execution.preflight_report)
+            .context("failed to serialize skill implementation execution preflight report")?,
+    )
+    .bind(
+        serde_json::to_string(&execution.command_plan)
+            .context("failed to serialize skill implementation execution command plan")?,
+    )
+    .bind(
+        serde_json::to_string(&execution.result)
+            .context("failed to serialize skill implementation execution result")?,
+    )
+    .bind(
+        serde_json::to_string(&execution.guardrails)
+            .context("failed to serialize skill implementation execution guardrails")?,
+    )
+    .bind(&execution.created_by)
+    .bind(u128_to_i64(execution.created_at_unix_ms)?)
+    .bind(u128_to_i64(execution.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save skill implementation execution")?;
+
+    Ok(())
+}
+
+async fn save_skill_implementation_patch(
+    pool: &SqlitePool,
+    patch: &SkillImplementationPatchRecord,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO skill_implementation_patches (
+            patch_id,
+            execution_id,
+            run_id,
+            plan_id,
+            proposal_id,
+            suggested_skill_id,
+            status,
+            patch_kind,
+            summary,
+            changed_files,
+            patch_manifest,
+            rollback_plan,
+            verification_evidence,
+            guardrails,
+            created_by,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        ON CONFLICT(patch_id) DO UPDATE SET
+            execution_id = excluded.execution_id,
+            run_id = excluded.run_id,
+            plan_id = excluded.plan_id,
+            proposal_id = excluded.proposal_id,
+            suggested_skill_id = excluded.suggested_skill_id,
+            status = excluded.status,
+            patch_kind = excluded.patch_kind,
+            summary = excluded.summary,
+            changed_files = excluded.changed_files,
+            patch_manifest = excluded.patch_manifest,
+            rollback_plan = excluded.rollback_plan,
+            verification_evidence = excluded.verification_evidence,
+            guardrails = excluded.guardrails,
+            created_by = excluded.created_by,
+            created_at_unix_ms = skill_implementation_patches.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+    )
+    .bind(patch.patch_id.to_string())
+    .bind(patch.execution_id.to_string())
+    .bind(patch.run_id.to_string())
+    .bind(patch.plan_id.to_string())
+    .bind(patch.proposal_id.to_string())
+    .bind(&patch.suggested_skill_id)
+    .bind(&patch.status)
+    .bind(&patch.patch_kind)
+    .bind(&patch.summary)
+    .bind(
+        serde_json::to_string(&patch.changed_files)
+            .context("failed to serialize skill implementation patch changed files")?,
+    )
+    .bind(
+        serde_json::to_string(&patch.patch_manifest)
+            .context("failed to serialize skill implementation patch manifest")?,
+    )
+    .bind(
+        serde_json::to_string(&patch.rollback_plan)
+            .context("failed to serialize skill implementation patch rollback plan")?,
+    )
+    .bind(
+        serde_json::to_string(&patch.verification_evidence)
+            .context("failed to serialize skill implementation patch verification evidence")?,
+    )
+    .bind(
+        serde_json::to_string(&patch.guardrails)
+            .context("failed to serialize skill implementation patch guardrails")?,
+    )
+    .bind(&patch.created_by)
+    .bind(u128_to_i64(patch.created_at_unix_ms)?)
+    .bind(u128_to_i64(patch.updated_at_unix_ms)?)
+    .execute(pool)
+    .await
+    .context("failed to save skill implementation patch")?;
+
+    Ok(())
+}
+
 async fn save_chat_channel_identity(
     pool: &SqlitePool,
     identity: &ChatChannelIdentityRecord,
@@ -4880,7 +7055,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AppState, ApprovalRequestKind, ApprovalRequestRecord, ApprovalRequestStatus, StoredTask,
+        AgentExperienceListFilter, AgentExperienceRecord, AppState, ApprovalRequestKind,
+        ApprovalRequestRecord, ApprovalRequestStatus, SkillImplementationExecutionListFilter,
+        SkillImplementationExecutionRecord, SkillImplementationPatchListFilter,
+        SkillImplementationPatchRecord, SkillImplementationPlanListFilter,
+        SkillImplementationPlanRecord, SkillImplementationRunListFilter,
+        SkillImplementationRunRecord, SkillProposalListFilter, SkillProposalRecord, StoredTask,
         TaskStatus, unix_timestamp_ms,
     };
     use crate::sandbox;
@@ -4978,6 +7158,555 @@ mod tests {
         assert_eq!(recent[0].detail, "third event");
         assert_eq!(recent[1].entity_id.as_deref(), Some("approval-1"));
         assert_eq!(recent[1].detail, "second event");
+
+        drop(state);
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn stores_and_filters_agent_experiences() {
+        let (database_url, db_path) = temp_database_url();
+        let engine = sandbox::init_engine().unwrap();
+        let state = AppState::new_with_database_url(engine, &database_url)
+            .await
+            .unwrap();
+        let now = unix_timestamp_ms();
+        let experience_id = Uuid::new_v4();
+        let ingress_id = Uuid::new_v4();
+
+        state
+            .upsert_agent_experience(AgentExperienceRecord {
+                experience_id,
+                source: "chat_ingress:telegram".to_string(),
+                scope: "chat".to_string(),
+                task_kind: "desktop_control".to_string(),
+                input_summary: "用户要求打开微信开发者工具".to_string(),
+                action_summary: "识别为桌面控制请求，等待审批后执行".to_string(),
+                outcome: "success".to_string(),
+                lesson: "类似请求应先确认目标窗口，再下发点击或快捷键".to_string(),
+                reusable_hint: Some("先检查窗口标题和进程列表".to_string()),
+                evidence: serde_json::json!({"verified": true}),
+                tags: vec!["telegram".to_string(), "desktop".to_string()],
+                risk_level: "guarded".to_string(),
+                related_task_id: None,
+                related_ingress_id: Some(ingress_id),
+                created_by: "test".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+
+        let stored = state
+            .get_agent_experience(experience_id)
+            .await
+            .unwrap()
+            .expect("experience should exist");
+        assert_eq!(stored.task_kind, "desktop_control");
+        assert_eq!(stored.tags, vec!["telegram", "desktop"]);
+
+        let filtered = state
+            .list_agent_experiences(AgentExperienceListFilter {
+                query: Some("窗口标题".to_string()),
+                outcome: Some("success".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(state.count_agent_experiences().await.unwrap(), 1);
+        assert!(
+            state
+                .has_agent_experience_for_ingress(ingress_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !state
+                .has_agent_experience_for_ingress(Uuid::new_v4())
+                .await
+                .unwrap()
+        );
+
+        drop(state);
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn stores_and_filters_skill_proposals() {
+        let (database_url, db_path) = temp_database_url();
+        let engine = sandbox::init_engine().unwrap();
+        let state = AppState::new_with_database_url(engine, &database_url)
+            .await
+            .unwrap();
+        let now = unix_timestamp_ms();
+        let proposal_id = Uuid::new_v4();
+
+        state
+            .upsert_skill_proposal(SkillProposalRecord {
+                proposal_id,
+                proposal_key: "task-kind:desktop_control".to_string(),
+                title: "Create a desktop control helper skill".to_string(),
+                summary: "Repeated desktop control requests should become a reviewed skill."
+                    .to_string(),
+                rationale: "Two or more guarded experiences mention desktop control.".to_string(),
+                suggested_skill_id: "dawn.desktop-control-helper".to_string(),
+                source: "experience-pattern".to_string(),
+                status: "proposed".to_string(),
+                confidence: 0.75,
+                evidence: serde_json::json!({"experienceCount": 2}),
+                tags: vec!["desktop".to_string(), "proposal".to_string()],
+                risk_level: "guarded".to_string(),
+                created_by: "test".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+
+        let stored = state
+            .get_skill_proposal(proposal_id)
+            .await
+            .unwrap()
+            .expect("proposal should exist");
+        assert_eq!(stored.suggested_skill_id, "dawn.desktop-control-helper");
+
+        let by_key = state
+            .get_skill_proposal_by_key("task-kind:desktop_control")
+            .await
+            .unwrap()
+            .expect("proposal should exist by key");
+        assert_eq!(by_key.proposal_id, proposal_id);
+
+        let filtered = state
+            .list_skill_proposals(SkillProposalListFilter {
+                status: Some("proposed".to_string()),
+                query: Some("desktop".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(state.count_skill_proposals().await.unwrap(), 1);
+
+        let mut reviewed = stored;
+        reviewed.status = "approved".to_string();
+        reviewed.evidence = serde_json::json!({
+            "experienceCount": 2,
+            "reviewTrail": [
+                {
+                    "status": "approved",
+                    "reviewer": "operator",
+                    "activation": "not_activated"
+                }
+            ]
+        });
+        reviewed.updated_at_unix_ms = now + 1;
+        state.update_skill_proposal_review(reviewed).await.unwrap();
+        let reviewed = state
+            .get_skill_proposal(proposal_id)
+            .await
+            .unwrap()
+            .expect("reviewed proposal should exist");
+        assert_eq!(reviewed.status, "approved");
+        assert_eq!(
+            reviewed.evidence["reviewTrail"][0]["activation"],
+            "not_activated"
+        );
+
+        let plan_id = Uuid::new_v4();
+        state
+            .upsert_skill_implementation_plan(SkillImplementationPlanRecord {
+                plan_id,
+                proposal_id,
+                suggested_skill_id: "dawn.desktop-control-helper".to_string(),
+                title: "Draft implementation plan".to_string(),
+                summary: "Plan only; no activation.".to_string(),
+                status: "draft".to_string(),
+                steps: serde_json::json!([
+                    {
+                        "order": 1,
+                        "name": "Inspect existing desktop control skill"
+                    }
+                ]),
+                acceptance_criteria: serde_json::json!([
+                    "Existing chat ingress behavior is preserved."
+                ]),
+                guardrails: serde_json::json!({
+                    "autonomousCodeMutation": false,
+                    "requiresHumanReviewBeforeActivation": true
+                }),
+                created_by: "test".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+        let stored_plan = state
+            .get_skill_implementation_plan(plan_id)
+            .await
+            .unwrap()
+            .expect("implementation plan should exist");
+        assert_eq!(stored_plan.proposal_id, proposal_id);
+        assert_eq!(stored_plan.status, "draft");
+        assert_eq!(
+            stored_plan.guardrails["requiresHumanReviewBeforeActivation"],
+            true
+        );
+        let by_proposal = state
+            .get_skill_implementation_plan_by_proposal(proposal_id)
+            .await
+            .unwrap()
+            .expect("implementation plan should exist by proposal");
+        assert_eq!(by_proposal.plan_id, plan_id);
+        let filtered_plans = state
+            .list_skill_implementation_plans(SkillImplementationPlanListFilter {
+                status: Some("draft".to_string()),
+                proposal_id: Some(proposal_id),
+                query: Some("desktop".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered_plans.len(), 1);
+        assert_eq!(state.count_skill_implementation_plans().await.unwrap(), 1);
+
+        let mut reviewed_plan = stored_plan;
+        reviewed_plan.status = "approved".to_string();
+        reviewed_plan.guardrails = serde_json::json!({
+            "autonomousCodeMutation": false,
+            "requiresHumanReviewBeforeActivation": true,
+            "reviewTrail": [
+                {
+                    "status": "approved",
+                    "execution": "not_started",
+                    "activation": "not_activated"
+                }
+            ]
+        });
+        reviewed_plan.updated_at_unix_ms = now + 2;
+        state
+            .update_skill_implementation_plan_review(reviewed_plan)
+            .await
+            .unwrap();
+        let reviewed_plan = state
+            .get_skill_implementation_plan(plan_id)
+            .await
+            .unwrap()
+            .expect("reviewed implementation plan should exist");
+        assert_eq!(reviewed_plan.status, "approved");
+        assert_eq!(
+            reviewed_plan.guardrails["reviewTrail"][0]["execution"],
+            "not_started"
+        );
+
+        let run_id = Uuid::new_v4();
+        state
+            .upsert_skill_implementation_run(SkillImplementationRunRecord {
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id: "dawn.desktop-control-helper".to_string(),
+                status: "prepared".to_string(),
+                execution_mode: "guarded_manual_or_future_agent".to_string(),
+                change_package: serde_json::json!({
+                    "allowedTargetAreas": ["dawn_core/src"],
+                    "workspacePolicy": "do not revert unrelated user changes"
+                }),
+                verification: serde_json::json!({
+                    "requiredCommands": ["cargo check --manifest-path dawn_core/Cargo.toml"]
+                }),
+                rollback: serde_json::json!({
+                    "manualRollbackOnly": true
+                }),
+                guardrails: serde_json::json!({
+                    "autonomousCodeMutation": false,
+                    "execution": "not_executed",
+                    "activation": "not_activated"
+                }),
+                created_by: "test".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+        let stored_run = state
+            .get_skill_implementation_run(run_id)
+            .await
+            .unwrap()
+            .expect("implementation run should exist");
+        assert_eq!(stored_run.status, "prepared");
+        assert_eq!(stored_run.plan_id, plan_id);
+        let run_by_plan = state
+            .get_skill_implementation_run_by_plan(plan_id)
+            .await
+            .unwrap()
+            .expect("implementation run should exist by plan");
+        assert_eq!(run_by_plan.run_id, run_id);
+        let filtered_runs = state
+            .list_skill_implementation_runs(SkillImplementationRunListFilter {
+                status: Some("prepared".to_string()),
+                plan_id: Some(plan_id),
+                proposal_id: Some(proposal_id),
+                query: Some("desktop".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered_runs.len(), 1);
+        assert_eq!(state.count_skill_implementation_runs().await.unwrap(), 1);
+
+        let mut reviewed_run = stored_run;
+        reviewed_run.status = "approved_for_execution".to_string();
+        reviewed_run.guardrails = serde_json::json!({
+            "autonomousCodeMutation": false,
+            "reviewTrail": [
+                {
+                    "status": "approved_for_execution",
+                    "execution": "not_executed",
+                    "activation": "not_activated"
+                }
+            ]
+        });
+        reviewed_run.updated_at_unix_ms = now + 3;
+        state
+            .update_skill_implementation_run_review(reviewed_run)
+            .await
+            .unwrap();
+        let reviewed_run = state
+            .get_skill_implementation_run(run_id)
+            .await
+            .unwrap()
+            .expect("reviewed implementation run should exist");
+        assert_eq!(reviewed_run.status, "approved_for_execution");
+        assert_eq!(
+            reviewed_run.guardrails["reviewTrail"][0]["execution"],
+            "not_executed"
+        );
+
+        let execution_id = Uuid::new_v4();
+        state
+            .upsert_skill_implementation_execution(SkillImplementationExecutionRecord {
+                execution_id,
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id: "dawn.desktop-control-helper".to_string(),
+                status: "ready_for_execution".to_string(),
+                executor: "operator_or_guarded_agent".to_string(),
+                preflight_report: serde_json::json!({
+                    "status": "passed",
+                    "apiExecutedCommands": false
+                }),
+                command_plan: serde_json::json!({
+                    "requiredCommands": ["cargo check --manifest-path dawn_core/Cargo.toml"],
+                    "executionPolicy": "record only"
+                }),
+                result: serde_json::json!({
+                    "execution": "not_started",
+                    "activation": "not_activated"
+                }),
+                guardrails: serde_json::json!({
+                    "autonomousCodeMutation": false,
+                    "apiExecutedCommands": false,
+                    "activation": "not_activated"
+                }),
+                created_by: "test".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+        let stored_execution = state
+            .get_skill_implementation_execution(execution_id)
+            .await
+            .unwrap()
+            .expect("implementation execution should exist");
+        assert_eq!(stored_execution.status, "ready_for_execution");
+        assert_eq!(stored_execution.run_id, run_id);
+        let filtered_executions = state
+            .list_skill_implementation_executions(SkillImplementationExecutionListFilter {
+                status: Some("ready_for_execution".to_string()),
+                run_id: Some(run_id),
+                plan_id: Some(plan_id),
+                proposal_id: Some(proposal_id),
+                query: Some("guarded".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered_executions.len(), 1);
+        assert_eq!(
+            state.count_skill_implementation_executions().await.unwrap(),
+            1
+        );
+
+        let mut reviewed_execution = stored_execution;
+        reviewed_execution.status = "approved_for_manual_execution".to_string();
+        reviewed_execution.guardrails = serde_json::json!({
+            "autonomousCodeMutation": false,
+            "reviewTrail": [
+                {
+                    "status": "approved_for_manual_execution",
+                    "apiExecutedCommands": false,
+                    "activation": "not_activated"
+                }
+            ]
+        });
+        reviewed_execution.result = serde_json::json!({
+            "execution": "not_started",
+            "activation": "not_activated",
+            "apiExecutedCommands": false
+        });
+        reviewed_execution.updated_at_unix_ms = now + 4;
+        state
+            .update_skill_implementation_execution_review(reviewed_execution)
+            .await
+            .unwrap();
+        let reviewed_execution = state
+            .get_skill_implementation_execution(execution_id)
+            .await
+            .unwrap()
+            .expect("reviewed implementation execution should exist");
+        assert_eq!(reviewed_execution.status, "approved_for_manual_execution");
+        assert_eq!(
+            reviewed_execution.guardrails["reviewTrail"][0]["apiExecutedCommands"],
+            false
+        );
+
+        let patch_id = Uuid::new_v4();
+        state
+            .upsert_skill_implementation_patch(SkillImplementationPatchRecord {
+                patch_id,
+                execution_id,
+                run_id,
+                plan_id,
+                proposal_id,
+                suggested_skill_id: "dawn.desktop-control-helper".to_string(),
+                status: "draft".to_string(),
+                patch_kind: "review_only_candidate".to_string(),
+                summary: "Candidate patch package for a guarded desktop control helper."
+                    .to_string(),
+                changed_files: serde_json::json!(["dawn_core/src/evolution.rs"]),
+                patch_manifest: serde_json::json!({
+                    "apiAppliedPatch": false,
+                    "patchContentRequiredBeforeApplyApproval": true
+                }),
+                rollback_plan: serde_json::json!({
+                    "manualRollbackOnly": true,
+                    "apiRollbackExecuted": false
+                }),
+                verification_evidence: serde_json::json!({
+                    "sourceExecutionStatus": "verification_succeeded"
+                }),
+                guardrails: serde_json::json!({
+                    "autonomousCodeMutation": false,
+                    "apiAppliedPatch": false,
+                    "activation": "not_activated"
+                }),
+                created_by: "test".to_string(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .await
+            .unwrap();
+        let stored_patch = state
+            .get_skill_implementation_patch(patch_id)
+            .await
+            .unwrap()
+            .expect("implementation patch should exist");
+        assert_eq!(stored_patch.status, "draft");
+        assert_eq!(stored_patch.execution_id, execution_id);
+        let filtered_patches = state
+            .list_skill_implementation_patches(SkillImplementationPatchListFilter {
+                status: Some("draft".to_string()),
+                execution_id: Some(execution_id),
+                run_id: Some(run_id),
+                plan_id: Some(plan_id),
+                proposal_id: Some(proposal_id),
+                query: Some("desktop".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered_patches.len(), 1);
+        assert_eq!(state.count_skill_implementation_patches().await.unwrap(), 1);
+
+        let mut reviewed_patch = stored_patch;
+        reviewed_patch.status = "approved_for_apply".to_string();
+        reviewed_patch.guardrails = serde_json::json!({
+            "autonomousCodeMutation": false,
+            "reviewTrail": [
+                {
+                    "status": "approved_for_apply",
+                    "apiAppliedPatch": false,
+                    "activation": "not_activated"
+                }
+            ]
+        });
+        reviewed_patch.updated_at_unix_ms = now + 5;
+        state
+            .update_skill_implementation_patch_review(reviewed_patch)
+            .await
+            .unwrap();
+        let reviewed_patch = state
+            .get_skill_implementation_patch(patch_id)
+            .await
+            .unwrap()
+            .expect("reviewed implementation patch should exist");
+        assert_eq!(reviewed_patch.status, "approved_for_apply");
+        assert_eq!(
+            reviewed_patch.guardrails["reviewTrail"][0]["apiAppliedPatch"],
+            false
+        );
+
+        let mut runtime_patch = reviewed_patch;
+        runtime_patch.status = "applied_pending_verification".to_string();
+        runtime_patch.patch_manifest = serde_json::json!({
+            "apiAppliedPatch": true,
+            "lastApplyDryRun": false
+        });
+        runtime_patch.rollback_plan = serde_json::json!({
+            "apiRollbackAvailable": true,
+            "apiRollbackExecuted": false,
+            "snapshots": [
+                {
+                    "path": "dawn_core/src/evolution.rs",
+                    "existed": true,
+                    "oldSha256": "old",
+                    "oldContent": "previous",
+                    "newSha256": "new"
+                }
+            ]
+        });
+        runtime_patch.verification_evidence = serde_json::json!({
+            "runtimeTrail": [
+                {
+                    "operation": "apply",
+                    "status": "applied_pending_verification"
+                }
+            ]
+        });
+        runtime_patch.guardrails = serde_json::json!({
+            "autonomousCodeMutation": false,
+            "apiAppliedPatch": true,
+            "apiRollbackExecuted": false,
+            "activation": "not_activated"
+        });
+        runtime_patch.updated_at_unix_ms = now + 6;
+        state
+            .update_skill_implementation_patch_runtime(runtime_patch)
+            .await
+            .unwrap();
+        let runtime_patch = state
+            .get_skill_implementation_patch(patch_id)
+            .await
+            .unwrap()
+            .expect("runtime-updated implementation patch should exist");
+        assert_eq!(runtime_patch.status, "applied_pending_verification");
+        assert_eq!(runtime_patch.patch_manifest["apiAppliedPatch"], true);
+        assert_eq!(runtime_patch.rollback_plan["apiRollbackAvailable"], true);
+        assert_eq!(runtime_patch.guardrails["activation"], "not_activated");
 
         drop(state);
         let _ = fs::remove_file(db_path);

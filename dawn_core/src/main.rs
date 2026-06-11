@@ -13,6 +13,7 @@ mod control_center;
 mod control_plane;
 mod control_ui;
 mod end_user_approvals;
+mod evolution;
 mod gateway;
 mod identity;
 mod marketplace;
@@ -37,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let engine = sandbox::init_engine()?;
     let state = app_state::AppState::new(engine).await?;
     chat_ingress::spawn_telegram_ingress_worker(state.clone());
+    evolution::spawn_reflection_worker(state.clone());
 
     let app = build_app(state);
 

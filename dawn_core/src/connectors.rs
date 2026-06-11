@@ -1339,12 +1339,12 @@ async fn execute_openai_codex_response(
     } = request;
     let model = model
         .or_else(|| resolve_first_present_env(&["OPENAI_CODEX_MODEL"]))
-        .unwrap_or_else(|| "gpt-5.3-codex".to_string());
+        .filter(|value| !value.trim().is_empty());
     if !openai_codex_login_ready() {
         return Ok(ModelResponseResult {
             mode: "dry_run",
             provider: "openai_codex",
-            model,
+            model: model.unwrap_or_else(|| "codex-cli-default".to_string()),
             output_text: format!(
                 "OpenAI Codex is not logged in locally. Run `codex login` or `dawn-node models auth-login openai-codex`. Dry-run request would send input: {input}"
             ),
@@ -1353,10 +1353,15 @@ async fn execute_openai_codex_response(
     }
 
     let prompt = build_openai_codex_prompt(&input, instructions.as_deref());
-    let model_for_result = model.clone();
-    let execution = tokio::task::spawn_blocking(move || run_openai_codex_exec(&model, &prompt))
-        .await
-        .map_err(|error| anyhow::anyhow!("OpenAI Codex execution task join failure: {error}"))??;
+    let model_for_result = model
+        .clone()
+        .unwrap_or_else(|| "codex-cli-default".to_string());
+    let execution =
+        tokio::task::spawn_blocking(move || run_openai_codex_exec(model.as_deref(), &prompt))
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("OpenAI Codex execution task join failure: {error}")
+            })??;
 
     if !execution.success {
         anyhow::bail!(
@@ -1365,10 +1370,7 @@ async fn execute_openai_codex_response(
                 .status_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
-            serde_json::json!({
-                "stdout": execution.stdout,
-                "stderr": execution.stderr,
-            })
+            summarize_codex_exec_failure(&execution)
         );
     }
 
@@ -1393,19 +1395,14 @@ struct OpenAICodexExecResult {
     stderr: String,
 }
 
-fn run_openai_codex_exec(model: &str, prompt: &str) -> anyhow::Result<OpenAICodexExecResult> {
-    let output_path = std::env::temp_dir().join(format!("dawn-codex-output-{}.txt", Uuid::new_v4()));
-    let mut command = new_codex_command(&[
-            "exec",
-            "-m",
-            model,
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "--output-last-message",
-        ]);
+fn run_openai_codex_exec(
+    model: Option<&str>,
+    prompt: &str,
+) -> anyhow::Result<OpenAICodexExecResult> {
+    let output_path =
+        std::env::temp_dir().join(format!("dawn-codex-output-{}.txt", Uuid::new_v4()));
+    let args = build_openai_codex_exec_args(model);
+    let mut command = new_codex_command(&args.iter().map(String::as_str).collect::<Vec<_>>());
     let mut child = command
         .arg(&output_path)
         .arg("-")
@@ -1447,8 +1444,47 @@ fn run_openai_codex_exec(model: &str, prompt: &str) -> anyhow::Result<OpenAICode
     })
 }
 
+fn build_openai_codex_exec_args(model: Option<&str>) -> Vec<String> {
+    let mut args = vec!["exec".to_string()];
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("-m".to_string());
+        args.push(model.to_string());
+    }
+    args.extend(
+        [
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--color",
+            "never",
+            "--output-last-message",
+        ]
+        .into_iter()
+        .map(ToString::to_string),
+    );
+    args
+}
+
+fn summarize_codex_exec_failure(execution: &OpenAICodexExecResult) -> String {
+    let combined = format!("{}\n{}", execution.stderr, execution.stdout);
+    let lower = combined.to_ascii_lowercase();
+    if lower.contains("model is not supported") {
+        return "selected Codex model is not supported for the current ChatGPT account; set OPENAI_CODEX_MODEL to a supported model or remove the override to use the Codex CLI default".to_string();
+    }
+    combined
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("2026-"))
+        .map(|line| line.chars().take(600).collect())
+        .unwrap_or_else(|| "Codex CLI exited without a usable response".to_string())
+}
+
 fn build_openai_codex_prompt(input: &str, instructions: Option<&str>) -> String {
-    match instructions.map(str::trim).filter(|value| !value.is_empty()) {
+    match instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(instructions) => format!(
             "System instructions:\n{instructions}\n\nUser input:\n{input}\n\nRespond to the user request directly."
         ),
@@ -1464,8 +1500,7 @@ pub(crate) fn openai_codex_login_ready() -> bool {
     match output {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.contains("Logged in using")
-                || stdout.to_ascii_lowercase().contains("logged in")
+            stdout.contains("Logged in using") || stdout.to_ascii_lowercase().contains("logged in")
         }
         _ => false,
     }
@@ -1481,7 +1516,8 @@ fn codex_auth_file_present() -> bool {
                 .map(std::path::PathBuf::from)
                 .map(|home| home.join(".codex"))
         });
-    base.map(|dir| dir.join("auth.json").exists()).unwrap_or(false)
+    base.map(|dir| dir.join("auth.json").exists())
+        .unwrap_or(false)
 }
 
 fn resolve_codex_cli_path() -> std::path::PathBuf {
@@ -1528,8 +1564,7 @@ fn resolve_codex_cli_path() -> std::path::PathBuf {
                     2
                 }
             });
-            if let Some(first) = candidates.into_iter().find(|path| path.exists())
-            {
+            if let Some(first) = candidates.into_iter().find(|path| path.exists()) {
                 return first;
             }
         }
@@ -4091,15 +4126,17 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DecodedAttachment, QQSendRequest, TelegramSendRequest, build_bluebubbles_reaction_payload,
-        build_bluebubbles_text_payload, build_chat_completion_messages, build_line_push_payload,
-        build_matrix_send_endpoint, build_matrix_text_payload, build_qq_message_payload,
+        DecodedAttachment, OpenAICodexExecResult, QQSendRequest, TelegramSendRequest,
+        build_bluebubbles_reaction_payload, build_bluebubbles_text_payload,
+        build_chat_completion_messages, build_line_push_payload, build_matrix_send_endpoint,
+        build_matrix_text_payload, build_openai_codex_exec_args, build_qq_message_payload,
         build_signal_reaction_payload, build_signal_receipt_payload, build_signal_send_payload,
         build_telegram_send_payload, build_wechat_official_account_payload,
         build_whatsapp_text_payload, extract_anthropic_text, extract_chat_completion_text,
         extract_google_text, extract_ollama_text, extract_openai_text,
         normalize_bluebubbles_reaction, normalize_qq_target_type,
         resolve_cloudflare_ai_gateway_endpoint, resolve_openai_style_endpoint,
+        summarize_codex_exec_failure,
     };
 
     #[test]
@@ -4231,6 +4268,37 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn codex_exec_args_use_cli_default_without_model_override() {
+        let args = build_openai_codex_exec_args(None);
+
+        assert_eq!(args[0], "exec");
+        assert!(!args.iter().any(|arg| arg == "-m"));
+        assert!(args.iter().any(|arg| arg == "--output-last-message"));
+    }
+
+    #[test]
+    fn codex_exec_args_include_explicit_model_override() {
+        let args = build_openai_codex_exec_args(Some("gpt-5.5"));
+
+        assert!(args.windows(2).any(|pair| pair == ["-m", "gpt-5.5"]));
+    }
+
+    #[test]
+    fn codex_failure_summary_hides_large_stderr_for_unsupported_model() {
+        let summary = summarize_codex_exec_failure(&OpenAICodexExecResult {
+            success: false,
+            status_code: Some(1),
+            output_text: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.\nlarge diagnostic payload".to_string(),
+        });
+
+        assert!(summary.contains("not supported"));
+        assert!(summary.contains("OPENAI_CODEX_MODEL"));
+        assert!(!summary.contains("large diagnostic payload"));
     }
 
     #[test]

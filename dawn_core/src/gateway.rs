@@ -7,7 +7,7 @@ use tracing::error;
 
 use crate::{
     agent_cards, app_state::AppState, approval_center, chat_ingress, connectors, control_plane,
-    end_user_approvals, identity, marketplace, policy, skill_registry,
+    end_user_approvals, evolution, identity, marketplace, policy, skill_registry,
 };
 
 #[derive(Debug, Serialize)]
@@ -46,6 +46,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/control-plane", control_plane::router())
         .nest("/connectors", connectors::router())
         .nest("/end-user", end_user_approvals::api_router())
+        .nest("/evolution", evolution::router())
         .nest("/identity", identity::router())
         .nest("/ingress", chat_ingress::router())
         .nest("/marketplace", marketplace::router())
@@ -117,6 +118,7 @@ async fn capabilities() -> Json<GatewayCapabilities> {
             "signed wasm skill distribution with trusted publishers",
             "event-auditable task, node, and payment transitions",
             "connector-ready gateway for model and chat integrations",
+            "bounded agent evolution through reviewable experience memory",
             "china-market model and chat connector expansion path",
         ],
     })

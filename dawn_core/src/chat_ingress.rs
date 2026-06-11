@@ -18,9 +18,9 @@ use uuid::Uuid;
 use crate::{
     a2a::{self, Task},
     app_state::{
-        AppState, ChatAutomationMode, ChatAutomationModeRecord, ChatChannelIdentityRecord,
-        ChatChannelIdentityStatus, ChatIngressEventRecord, ChatIngressStatus, NodeCommandStatus,
-        unix_timestamp_ms,
+        AgentExperienceListFilter, AgentExperienceRecord, AppState, ChatAutomationMode,
+        ChatAutomationModeRecord, ChatChannelIdentityRecord, ChatChannelIdentityStatus,
+        ChatIngressEventRecord, ChatIngressStatus, NodeCommandStatus, unix_timestamp_ms,
     },
     connectors::{self, ChatDispatchRequest, OpenAIResponseRequest},
     control_plane,
@@ -119,9 +119,28 @@ enum IngressCommand {
     Unknown(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalActionIntent {
-    BrowserOpen { target: String },
-    DesktopNotification { message: String },
+    BrowserOpen {
+        target: String,
+    },
+    DesktopNotification {
+        message: String,
+    },
+    DesktopSnapshot {
+        include_screenshot: bool,
+    },
+    DesktopMousePosition,
+    DesktopMouseMove {
+        x: i32,
+        y: i32,
+    },
+    DesktopMouseClick {
+        x: Option<i32>,
+        y: Option<i32>,
+        button: String,
+        double_click: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -893,7 +912,10 @@ async fn ingest_message(
                 dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
                     .await
             {
-                warn!(?error, platform, "failed to deliver pending-pairing ingress reply");
+                warn!(
+                    ?error,
+                    platform, "failed to deliver pending-pairing ingress reply"
+                );
                 record.error = Some(format!(
                     "{platform} sender is waiting for pairing approval ({pairing_code}); reply dispatch failed: {error}"
                 ));
@@ -977,7 +999,10 @@ async fn ingest_message(
                 dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
                     .await
             {
-                warn!(?error, platform, "failed to deliver mode-aware ingress reply");
+                warn!(
+                    ?error,
+                    platform, "failed to deliver mode-aware ingress reply"
+                );
                 record.reply_text = Some(reply);
                 record.status = ChatIngressStatus::Failed;
                 record.error = Some(format!("failed to dispatch mode-aware reply: {error}"));
@@ -1003,8 +1028,9 @@ async fn ingest_message(
                     warn!(?error, platform, "failed to deliver default model reply");
                     record.reply_text = Some(reply);
                     record.status = ChatIngressStatus::Failed;
-                    record.error =
-                        Some(format!("default model reply generated but dispatch failed: {error}"));
+                    record.error = Some(format!(
+                        "default model reply generated but dispatch failed: {error}"
+                    ));
                     record.updated_at_unix_ms = unix_timestamp_ms();
                     state.upsert_chat_ingress_event(record.clone()).await?;
                     return Ok(record);
@@ -1015,18 +1041,41 @@ async fn ingest_message(
                 state.upsert_chat_ingress_event(record.clone()).await?;
                 return Ok(record);
             }
-            Ok(None) => {}
+            Ok(None) => {
+                let reply = no_live_model_reply(&state).await?;
+                if let Err(error) =
+                    dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
+                        .await
+                {
+                    warn!(?error, platform, "failed to deliver no-model reply");
+                    record.reply_text = Some(reply);
+                    record.status = ChatIngressStatus::Failed;
+                    record.error = Some(format!(
+                        "no-model reply generated but dispatch failed: {error}"
+                    ));
+                    record.updated_at_unix_ms = unix_timestamp_ms();
+                    state.upsert_chat_ingress_event(record.clone()).await?;
+                    return Ok(record);
+                }
+                record.reply_text = Some(reply);
+                record.status = ChatIngressStatus::Replied;
+                record.updated_at_unix_ms = unix_timestamp_ms();
+                state.upsert_chat_ingress_event(record.clone()).await?;
+                return Ok(record);
+            }
             Err(error) => {
-                warn!(?error, platform, "default model reply failed for chat ingress");
-                let reply = format!("Model reply failed: {error}");
+                warn!(
+                    ?error,
+                    platform, "default model reply failed for chat ingress"
+                );
+                let reply = render_model_failure_reply(&error);
                 if let Err(dispatch_error) =
                     dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
                         .await
                 {
                     warn!(
                         ?dispatch_error,
-                        platform,
-                        "failed to deliver default model failure reply"
+                        platform, "failed to deliver default model failure reply"
                     );
                 }
                 record.reply_text = Some(reply);
@@ -1076,7 +1125,10 @@ async fn ingest_message(
                 dispatch_ingress_reply_if_possible(platform, record.chat_id.as_deref(), &reply)
                     .await
             {
-                warn!(?error, platform, "failed to deliver task-created ingress reply");
+                warn!(
+                    ?error,
+                    platform, "failed to deliver task-created ingress reply"
+                );
                 record.error = Some(format!(
                     "task {} created, but reply dispatch failed: {error}",
                     task_response.task.task_id
@@ -1096,8 +1148,7 @@ async fn ingest_message(
             {
                 warn!(
                     ?dispatch_error,
-                    platform,
-                    "failed to deliver ingress routing failure reply"
+                    platform, "failed to deliver ingress routing failure reply"
                 );
             }
             record.reply_text = Some(reply);
@@ -1395,7 +1446,10 @@ fn strip_leading_chat_command_prefix<'a>(platform: &str, text: &'a str) -> Optio
     if let Some(rest) = strip_leading_at_mention(trimmed) {
         return Some(rest);
     }
-    if matches!(platform, "feishu" | "dingtalk" | "wechat_official_account" | "qq") {
+    if matches!(
+        platform,
+        "feishu" | "dingtalk" | "wechat_official_account" | "qq"
+    ) {
         if let Some(rest) = strip_leading_tag_mention(trimmed) {
             return Some(rest);
         }
@@ -1616,14 +1670,9 @@ async fn execute_ingress_command(
         }
         IngressCommand::Model => {
             let workspace = identity::ensure_workspace_profile(&state).await?;
-            let live = workspace
-                .default_model_providers
-                .iter()
-                .filter(|provider| is_model_provider_live_configured(provider))
-                .cloned()
-                .collect::<Vec<_>>();
+            let live = live_model_provider_candidates(&workspace.default_model_providers);
             Ok(IngressCommandResult::Reply(format!(
-                "当前默认模型: {}。\n已就绪模型: {}。",
+                "当前默认模型: {}。\n可用对话模型: {}。",
                 if workspace.default_model_providers.is_empty() {
                     "<none>".to_string()
                 } else {
@@ -1642,7 +1691,9 @@ async fn execute_ingress_command(
             chat_mode_description(current_mode)
         ))),
         IngressCommand::ModeSet { mode } => {
-            let Some(chat_key) = chat_mode_key(record.chat_id.as_deref(), record.sender_id.as_deref()) else {
+            let Some(chat_key) =
+                chat_mode_key(record.chat_id.as_deref(), record.sender_id.as_deref())
+            else {
                 return Ok(IngressCommandResult::Reply(
                     "当前会话没有可持久化的 chat 标识，暂时无法切换功能等级。".to_string(),
                 ));
@@ -1670,6 +1721,10 @@ async fn execute_ingress_command(
         }
         IngressCommand::Status => {
             let workspace = identity::ensure_workspace_profile(&state).await?;
+            let live_model = live_model_provider_candidates(&workspace.default_model_providers)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "<none>".to_string());
             let nodes = state.list_nodes().await?;
             let connected = nodes.iter().filter(|node| node.connected).count();
             let trusted = nodes
@@ -1677,7 +1732,7 @@ async fn execute_ingress_command(
                 .filter(|node| node.connected && node.attestation_verified)
                 .count();
             Ok(IngressCommandResult::Reply(format!(
-                "工作区: {} [{}]\n当前功能等级: {}\n默认模型: {}\n默认聊天: {}\n在线节点: {}，可信节点: {}。",
+                "工作区: {} [{}]\n当前功能等级: {}\n默认模型: {}\n可用对话模型: {}\n默认聊天: {}\n在线节点: {}，可信节点: {}。",
                 workspace.display_name,
                 workspace.region,
                 chat_mode_label(current_mode),
@@ -1686,6 +1741,7 @@ async fn execute_ingress_command(
                 } else {
                     workspace.default_model_providers.join(", ")
                 },
+                live_model,
                 if workspace.default_chat_platforms.is_empty() {
                     "<none>".to_string()
                 } else {
@@ -1751,9 +1807,10 @@ fn help_command_text() -> String {
         "/new - 开始新的对话",
         "/skills [关键字] - 查看已安装技能",
         "/skills search <关键字> - 搜索已安装技能",
-        "/skill <skill[@version][#function]> - 调用一个已安装技能",
+        "/skill <skill[@version][#function]> [参数] - 调用一个已安装技能",
         "/model - 查看当前默认模型",
         "/status - 查看工作区与节点状态",
+        "桌面控制: #assist 预览，#autopilot 后可发 `看一下屏幕`、`鼠标位置`、`移动鼠标到 400,300`、`点击 400,300`",
         "/task <内容> - 提交普通任务",
         "/orchestrate <JSON> - 提交编排任务",
         "/wasm <skill[@version][#function]> - 直接提交 Wasm 技能任务",
@@ -1769,9 +1826,9 @@ fn help_command_text_for_platform(platform: &str) -> String {
         "feishu" | "dingtalk" | "qq" | "wecom" => Some(
             "平台提示：可以直接发 `帮助`、`状态`、`技能`，也支持 `@机器人 /help`、`／skills`、`＃observe`。",
         ),
-        "wechat_official_account" => Some(
-            "平台提示：可以直接发 `帮助`、`状态`、`技能`，也支持 `／skills`、`＃observe`。",
-        ),
+        "wechat_official_account" => {
+            Some("平台提示：可以直接发 `帮助`、`状态`、`技能`，也支持 `／skills`、`＃observe`。")
+        }
         _ => None,
     };
     if let Some(platform_hint) = platform_hint {
@@ -1792,15 +1849,11 @@ fn chat_mode_label(mode: ChatAutomationMode) -> &'static str {
 
 fn chat_mode_description(mode: ChatAutomationMode) -> &'static str {
     match mode {
-        ChatAutomationMode::Chat => {
-            "仅使用默认模型回复，不主动读取电脑状态，也不执行本机动作。"
-        }
+        ChatAutomationMode::Chat => "仅使用默认模型回复，不主动读取电脑状态，也不执行本机动作。",
         ChatAutomationMode::Observe => {
             "允许只读观察当前电脑状态，会在需要时采样进程快照并让模型总结。"
         }
-        ChatAutomationMode::Assist => {
-            "会先给出本机动作预览和安全提示；危险动作不会直接执行。"
-        }
+        ChatAutomationMode::Assist => "会先给出本机动作预览和安全提示；危险动作不会直接执行。",
         ChatAutomationMode::Autopilot => {
             "允许在审批链内自动下发受控电脑动作；浏览器和桌面动作仍然需要审批。"
         }
@@ -1905,6 +1958,7 @@ fn should_attempt_observation(text: &str) -> bool {
 
 fn parse_local_action_intent(text: &str) -> Option<LocalActionIntent> {
     let trimmed = text.trim();
+    let normalized = trimmed.to_ascii_lowercase();
     for prefix in ["打开 ", "open "] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             let target = rest.trim();
@@ -1925,7 +1979,167 @@ fn parse_local_action_intent(text: &str) -> Option<LocalActionIntent> {
             }
         }
     }
+    if is_desktop_snapshot_intent(trimmed, &normalized) {
+        return Some(LocalActionIntent::DesktopSnapshot {
+            include_screenshot: should_include_desktop_screenshot(trimmed, &normalized),
+        });
+    }
+    if is_mouse_position_intent(trimmed, &normalized) {
+        return Some(LocalActionIntent::DesktopMousePosition);
+    }
+    if is_mouse_move_intent(trimmed, &normalized) {
+        if let Some((x, y)) = parse_coordinate_pair(trimmed) {
+            return Some(LocalActionIntent::DesktopMouseMove { x, y });
+        }
+    }
+    if is_mouse_click_intent(trimmed, &normalized) {
+        let coordinates = parse_coordinate_pair(trimmed);
+        if coordinates.is_some() || mentions_current_pointer(trimmed, &normalized) {
+            let (x, y) = coordinates
+                .map(|(x, y)| (Some(x), Some(y)))
+                .unwrap_or((None, None));
+            return Some(LocalActionIntent::DesktopMouseClick {
+                x,
+                y,
+                button: parse_desktop_mouse_button(trimmed, &normalized).to_string(),
+                double_click: is_double_click_intent(trimmed, &normalized),
+            });
+        }
+    }
     None
+}
+
+fn contains_any(text: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|keyword| text.contains(keyword))
+}
+
+fn is_desktop_snapshot_intent(text: &str, normalized: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "看一下屏幕",
+            "看看屏幕",
+            "观察屏幕",
+            "屏幕快照",
+            "屏幕截图",
+            "截屏",
+            "截图",
+            "当前屏幕",
+            "桌面状态",
+            "屏幕状态",
+        ],
+    ) || contains_any(
+        normalized,
+        &[
+            "screenshot",
+            "screen shot",
+            "screen snapshot",
+            "desktop snapshot",
+            "show screen",
+            "look at screen",
+        ],
+    )
+}
+
+fn should_include_desktop_screenshot(text: &str, normalized: &str) -> bool {
+    contains_any(
+        text,
+        &["看一下屏幕", "看看屏幕", "屏幕截图", "截屏", "截图"],
+    ) || contains_any(
+        normalized,
+        &["screenshot", "screen shot", "show screen", "look at screen"],
+    )
+}
+
+fn is_mouse_position_intent(text: &str, normalized: &str) -> bool {
+    (contains_any(text, &["鼠标", "光标"])
+        && contains_any(text, &["位置", "坐标", "在哪", "在哪里"]))
+        || contains_any(
+            normalized,
+            &["mouse position", "cursor position", "where is the mouse"],
+        )
+}
+
+fn is_mouse_move_intent(text: &str, normalized: &str) -> bool {
+    (contains_any(text, &["鼠标", "光标"])
+        && contains_any(text, &["移动", "移到", "移动到", "挪到"]))
+        || contains_any(
+            normalized,
+            &["move mouse", "move cursor", "mouse move", "cursor move"],
+        )
+}
+
+fn is_mouse_click_intent(text: &str, normalized: &str) -> bool {
+    contains_any(
+        text,
+        &["点击", "点一下", "单击", "双击", "左键", "右键", "中键"],
+    ) || text.starts_with("点 ")
+        || contains_any(
+            normalized,
+            &[
+                "click",
+                "left click",
+                "right click",
+                "double click",
+                "middle click",
+            ],
+        )
+}
+
+fn mentions_current_pointer(text: &str, normalized: &str) -> bool {
+    contains_any(
+        text,
+        &["当前位置", "当前鼠标", "鼠标当前位置", "光标当前位置"],
+    ) || contains_any(
+        normalized,
+        &["current position", "current mouse", "current cursor"],
+    )
+}
+
+fn parse_desktop_mouse_button(text: &str, normalized: &str) -> &'static str {
+    if contains_any(text, &["右键"]) || contains_any(normalized, &["right click", "secondary"]) {
+        "right"
+    } else if contains_any(text, &["中键", "滚轮"])
+        || contains_any(normalized, &["middle click", "wheel"])
+    {
+        "middle"
+    } else {
+        "left"
+    }
+}
+
+fn is_double_click_intent(text: &str, normalized: &str) -> bool {
+    contains_any(text, &["双击"]) || contains_any(normalized, &["double click"])
+}
+
+fn parse_coordinate_pair(text: &str) -> Option<(i32, i32)> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() || (ch == '-' && current.is_empty()) {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if current != "-" {
+                if let Ok(value) = current.parse::<i32>() {
+                    values.push(value);
+                    if values.len() >= 2 {
+                        return Some((values[0], values[1]));
+                    }
+                }
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() && current != "-" {
+        if let Ok(value) = current.parse::<i32>() {
+            values.push(value);
+        }
+    }
+    if values.len() >= 2 {
+        Some((values[0], values[1]))
+    } else {
+        None
+    }
 }
 
 fn render_assist_action_preview(action: LocalActionIntent) -> String {
@@ -1938,7 +2152,58 @@ fn render_assist_action_preview(action: LocalActionIntent) -> String {
             "辅助模式已识别出桌面通知预览：将发送通知 `{}`。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试，或显式使用 /task /orchestrate。",
             message
         ),
+        LocalActionIntent::DesktopSnapshot { include_screenshot } => format!(
+            "辅助模式已识别出桌面观察预览：将读取桌面快照{}。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试；执行时仍会进入审批链。",
+            if include_screenshot { "并保存截图" } else { "" }
+        ),
+        LocalActionIntent::DesktopMousePosition => {
+            "辅助模式已识别出鼠标位置读取预览：将读取当前鼠标坐标。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试；执行时仍会进入审批链。".to_string()
+        }
+        LocalActionIntent::DesktopMouseMove { x, y } => format!(
+            "辅助模式已识别出鼠标移动预览：将鼠标移动到 ({x}, {y})。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试；执行时仍会进入审批链。"
+        ),
+        LocalActionIntent::DesktopMouseClick {
+            x,
+            y,
+            button,
+            double_click,
+        } => format!(
+            "辅助模式已识别出鼠标点击预览：将在{}执行{}{}。\n出于安全原则，辅助模式只预览不执行。发送 `#autopilot` 后重试；执行时仍会进入审批链。",
+            match (x, y) {
+                (Some(x), Some(y)) => format!("坐标 ({x}, {y}) "),
+                _ => "当前鼠标位置 ".to_string(),
+            },
+            if double_click { "双击" } else { "单击" },
+            match button.as_str() {
+                "right" => "右键",
+                "middle" => "中键",
+                _ => "左键",
+            }
+        ),
     }
+}
+
+async fn dispatch_guarded_desktop_command(
+    state: &Arc<AppState>,
+    capability: &str,
+    command_type: &str,
+    payload: Value,
+    summary: String,
+) -> anyhow::Result<String> {
+    let node = select_node_for_capability(state, capability).await?;
+    let (command, delivery) =
+        control_plane::dispatch_gateway_command(state, &node.node_id, command_type, payload)
+            .await?;
+    Ok(match delivery {
+        "awaiting_approval" => format!(
+            "已创建桌面控制请求，等待审批：{summary}。\nnode={} commandId={}",
+            node.node_id, command.command_id
+        ),
+        other => format!(
+            "已下发桌面控制请求：{summary}。\nnode={} commandId={} delivery={}",
+            node.node_id, command.command_id, other
+        ),
+    })
 }
 
 async fn execute_autopilot_action(
@@ -1963,11 +2228,16 @@ async fn execute_autopilot_action(
             Ok(match delivery {
                 "awaiting_approval" => format!(
                     "已创建浏览器打开请求，等待审批。\nnode={} commandId={} target={}",
-                    node.node_id, command.command_id, normalize_browser_target(&target)
+                    node.node_id,
+                    command.command_id,
+                    normalize_browser_target(&target)
                 ),
                 other => format!(
                     "已下发浏览器打开请求。\nnode={} commandId={} delivery={} target={}",
-                    node.node_id, command.command_id, other, normalize_browser_target(&target)
+                    node.node_id,
+                    command.command_id,
+                    other,
+                    normalize_browser_target(&target)
                 ),
             })
         }
@@ -1994,6 +2264,87 @@ async fn execute_autopilot_action(
                 ),
             })
         }
+        LocalActionIntent::DesktopSnapshot { include_screenshot } => {
+            dispatch_guarded_desktop_command(
+                &state,
+                "desktop_snapshot",
+                "desktop_snapshot",
+                json!({
+                    "windowLimit": 10,
+                    "includeScreenshot": include_screenshot,
+                    "approvalRequired": true
+                }),
+                if include_screenshot {
+                    "读取桌面快照并保存截图".to_string()
+                } else {
+                    "读取桌面快照".to_string()
+                },
+            )
+            .await
+        }
+        LocalActionIntent::DesktopMousePosition => {
+            dispatch_guarded_desktop_command(
+                &state,
+                "desktop_mouse_position",
+                "desktop_mouse_position",
+                json!({ "approvalRequired": true }),
+                "读取当前鼠标坐标".to_string(),
+            )
+            .await
+        }
+        LocalActionIntent::DesktopMouseMove { x, y } => {
+            dispatch_guarded_desktop_command(
+                &state,
+                "desktop_mouse_move",
+                "desktop_mouse_move",
+                json!({
+                    "x": x,
+                    "y": y,
+                    "approvalRequired": true
+                }),
+                format!("移动鼠标到 ({x}, {y})"),
+            )
+            .await
+        }
+        LocalActionIntent::DesktopMouseClick {
+            x,
+            y,
+            button,
+            double_click,
+        } => {
+            let mut payload = json!({
+                "button": button,
+                "doubleClick": double_click,
+                "approvalRequired": true
+            });
+            if let Value::Object(map) = &mut payload {
+                if let (Some(x), Some(y)) = (x, y) {
+                    map.insert("x".to_string(), json!(x));
+                    map.insert("y".to_string(), json!(y));
+                }
+            }
+            let target = match (x, y) {
+                (Some(x), Some(y)) => format!("坐标 ({x}, {y})"),
+                _ => "当前鼠标位置".to_string(),
+            };
+            let button_label = match button.as_str() {
+                "right" => "右键",
+                "middle" => "中键",
+                _ => "左键",
+            };
+            dispatch_guarded_desktop_command(
+                &state,
+                "desktop_mouse_click",
+                "desktop_mouse_click",
+                payload,
+                format!(
+                    "在{target}执行{}{}",
+                    if double_click { "双击" } else { "单击" },
+                    button_label
+                ),
+            )
+            .await
+        }
     }
 }
 
@@ -2004,7 +2355,10 @@ async fn execute_observation_mode_reply(
     question: &str,
 ) -> anyhow::Result<String> {
     let node = select_node_for_capability(&state, "process_snapshot").await?;
-    let system_info = dispatch_and_wait_node_command(&state, &node.node_id, "system_info", json!({})).await.ok();
+    let system_info =
+        dispatch_and_wait_node_command(&state, &node.node_id, "system_info", json!({}))
+            .await
+            .ok();
     let process_snapshot = dispatch_and_wait_node_command(
         &state,
         &node.node_id,
@@ -2115,7 +2469,10 @@ async fn dispatch_and_wait_node_command(
 }
 
 fn extract_command_result_payload(value: &Value) -> Value {
-    value.get("result").cloned().unwrap_or_else(|| value.clone())
+    value
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| value.clone())
 }
 
 fn render_observation_fallback(observation: &Value) -> String {
@@ -2147,11 +2504,60 @@ fn render_observation_fallback(observation: &Value) -> String {
 
 async fn pick_live_default_model_provider(state: &Arc<AppState>) -> anyhow::Result<Option<String>> {
     let workspace = identity::ensure_workspace_profile(state).await?;
-    Ok(workspace
-        .default_model_providers
-        .iter()
-        .find(|value| is_model_provider_live_configured(value))
-        .cloned())
+    Ok(
+        live_model_provider_candidates(&workspace.default_model_providers)
+            .into_iter()
+            .next(),
+    )
+}
+
+fn live_model_provider_candidates(defaults: &[String]) -> Vec<String> {
+    model_provider_candidates(defaults)
+        .into_iter()
+        .filter(|value| is_model_provider_live_configured(value))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn model_provider_candidates(defaults: &[String]) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    for provider in defaults {
+        push_unique_provider(&mut candidates, provider);
+    }
+    for fallback in [
+        "openai_codex",
+        "ollama",
+        "openai",
+        "anthropic",
+        "google",
+        "deepseek",
+        "qwen",
+        "zhipu",
+        "moonshot",
+        "doubao",
+        "openrouter",
+        "groq",
+        "together",
+        "github_models",
+        "huggingface",
+        "vllm",
+        "mistral",
+        "nvidia",
+        "litellm",
+        "bedrock",
+        "cloudflare_ai_gateway",
+        "vercel_ai_gateway",
+    ] {
+        push_unique_provider(&mut candidates, fallback);
+    }
+    candidates
+}
+
+fn push_unique_provider<'a>(providers: &mut Vec<&'a str>, provider: &'a str) {
+    let normalized = provider.trim();
+    if !normalized.is_empty() && !providers.iter().any(|value| *value == normalized) {
+        providers.push(normalized);
+    }
 }
 
 fn normalize_browser_target(target: &str) -> String {
@@ -2271,9 +2677,10 @@ fn parse_skill_selector(raw: &str) -> anyhow::Result<ParsedSkillSelector> {
         None => (selector.trim(), None),
     };
     let (skill_id, version) = match skill_selector.split_once('@') {
-        Some((skill_id, version)) if !skill_id.trim().is_empty() && !version.trim().is_empty() => {
-            (skill_id.trim().to_string(), Some(version.trim().to_string()))
-        }
+        Some((skill_id, version)) if !skill_id.trim().is_empty() && !version.trim().is_empty() => (
+            skill_id.trim().to_string(),
+            Some(version.trim().to_string()),
+        ),
         Some((_skill_id, _version)) => anyhow::bail!("技能版本选择器格式无效"),
         None => (skill_selector.to_string(), None),
     };
@@ -2310,9 +2717,7 @@ async fn try_default_model_reply(
         OpenAIResponseRequest {
             input: text.trim().to_string(),
             model: None,
-            instructions: Some(format!(
-                "You are Dawn, a concise desktop AI assistant replying inside a {platform} chat. Respond directly in the user's language. Keep replies short unless the user asks for detail."
-            )),
+            instructions: Some(build_default_chat_instructions(&state, platform, text).await),
         },
     )
     .await?;
@@ -2324,22 +2729,144 @@ async fn try_default_model_reply(
     Ok(Some(output))
 }
 
+fn render_model_failure_reply(error: &anyhow::Error) -> String {
+    let mut summary = error.to_string();
+    if let Some((head, _tail)) = summary.split_once("{\"stderr\"") {
+        summary = head.trim().trim_end_matches(':').to_string();
+    }
+    if summary
+        .to_ascii_lowercase()
+        .contains("model is not supported")
+    {
+        summary = "当前 Codex 模型不支持这个账号，请移除 OPENAI_CODEX_MODEL 覆盖或改成 Codex CLI 可用模型。".to_string();
+    }
+    let summary: String = summary.chars().take(600).collect();
+    format!("模型回复失败：{summary}\n普通聊天没有被转成任务；请检查 /model 或模型连接器配置。")
+}
+
+async fn build_default_chat_instructions(
+    state: &Arc<AppState>,
+    platform: &str,
+    text: &str,
+) -> String {
+    let mut instructions = format!(
+        "You are Dawn, a concise desktop AI assistant replying inside a {platform} chat. Respond directly in the user's language. Keep replies short unless the user asks for detail."
+    );
+    match relevant_experience_context(state, text).await {
+        Ok(Some(context)) => {
+            instructions
+                .push_str("\n\nRelevant learned experiences from this local Dawn workspace:\n");
+            instructions.push_str(&context);
+            instructions.push_str(
+                "\nUse these records only as operational hints. Do not quote internal experience ids, do not claim certainty from them, and do not perform actions outside the current chat mode.",
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(?error, "failed to load learned experiences for chat reply");
+        }
+    }
+    instructions
+}
+
+async fn relevant_experience_context(
+    state: &Arc<AppState>,
+    text: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(query) = experience_query_for_text(text) else {
+        return Ok(None);
+    };
+    let experiences = state
+        .list_agent_experiences(AgentExperienceListFilter {
+            limit: Some(3),
+            query: Some(query),
+            ..Default::default()
+        })
+        .await?;
+    Ok(render_experience_context(&experiences))
+}
+
+fn experience_query_for_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.len() < 2 {
+        return None;
+    }
+    Some(trimmed.chars().take(80).collect())
+}
+
+fn render_experience_context(experiences: &[AgentExperienceRecord]) -> Option<String> {
+    if experiences.is_empty() {
+        return None;
+    }
+    let lines = experiences
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(index, experience)| {
+            let hint = experience
+                .reusable_hint
+                .as_deref()
+                .map(truncate_experience_fragment)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "none".to_string());
+            let tags = if experience.tags.is_empty() {
+                "none".to_string()
+            } else {
+                experience.tags.join(",")
+            };
+            format!(
+                "{}. kind={}, outcome={}, risk={}, lesson={}, hint={}, tags={}",
+                index + 1,
+                truncate_experience_fragment(&experience.task_kind),
+                truncate_experience_fragment(&experience.outcome),
+                truncate_experience_fragment(&experience.risk_level),
+                truncate_experience_fragment(&experience.lesson),
+                hint,
+                truncate_experience_fragment(&tags)
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(lines.join("\n"))
+}
+
+fn truncate_experience_fragment(value: &str) -> String {
+    value.trim().chars().take(240).collect()
+}
+
+async fn no_live_model_reply(state: &Arc<AppState>) -> anyhow::Result<String> {
+    let workspace = identity::ensure_workspace_profile(state).await?;
+    let defaults = if workspace.default_model_providers.is_empty() {
+        "<none>".to_string()
+    } else {
+        workspace.default_model_providers.join(", ")
+    };
+    Ok(format!(
+        "我现在能收到你的消息，但还没有可用的默认对话模型。\n当前默认模型: {defaults}。\n请配置该模型凭据，或把默认模型切到已登录的 `openai_codex` / 本地 `ollama`。普通聊天不会再被自动转成任务。"
+    ))
+}
+
 fn is_model_provider_live_configured(provider: &str) -> bool {
     match provider {
         "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
         "openai_codex" => connectors::openai_codex_login_ready(),
         "anthropic" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
-        "google" => std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok(),
-        "bedrock" => std::env::var("BEDROCK_API_KEY").is_ok()
-            && (std::env::var("BEDROCK_CHAT_COMPLETIONS_URL").is_ok()
-                || std::env::var("BEDROCK_BASE_URL").is_ok()
-                || std::env::var("BEDROCK_RUNTIME_ENDPOINT").is_ok()),
-        "cloudflare_ai_gateway" => (std::env::var("CLOUDFLARE_AI_GATEWAY_API_KEY").is_ok()
-            || std::env::var("OPENAI_API_KEY").is_ok())
-            && (std::env::var("CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok()
-                || std::env::var("CLOUDFLARE_AI_GATEWAY_BASE_URL").is_ok()
-                || (std::env::var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID").is_ok()
-                    && std::env::var("CLOUDFLARE_AI_GATEWAY_ID").is_ok())),
+        "google" => {
+            std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok()
+        }
+        "bedrock" => {
+            std::env::var("BEDROCK_API_KEY").is_ok()
+                && (std::env::var("BEDROCK_CHAT_COMPLETIONS_URL").is_ok()
+                    || std::env::var("BEDROCK_BASE_URL").is_ok()
+                    || std::env::var("BEDROCK_RUNTIME_ENDPOINT").is_ok())
+        }
+        "cloudflare_ai_gateway" => {
+            (std::env::var("CLOUDFLARE_AI_GATEWAY_API_KEY").is_ok()
+                || std::env::var("OPENAI_API_KEY").is_ok())
+                && (std::env::var("CLOUDFLARE_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok()
+                    || std::env::var("CLOUDFLARE_AI_GATEWAY_BASE_URL").is_ok()
+                    || (std::env::var("CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID").is_ok()
+                        && std::env::var("CLOUDFLARE_AI_GATEWAY_ID").is_ok()))
+        }
         "github_models" => {
             std::env::var("GITHUB_MODELS_API_KEY").is_ok() || std::env::var("GITHUB_TOKEN").is_ok()
         }
@@ -2349,20 +2876,28 @@ fn is_model_provider_live_configured(provider: &str) -> bool {
         "openrouter" => std::env::var("OPENROUTER_API_KEY").is_ok(),
         "groq" => std::env::var("GROQ_API_KEY").is_ok(),
         "together" => std::env::var("TOGETHER_API_KEY").is_ok(),
-        "vercel_ai_gateway" => std::env::var("VERCEL_AI_GATEWAY_API_KEY").is_ok()
-            || std::env::var("AI_GATEWAY_API_KEY").is_ok()
-            || std::env::var("VERCEL_AI_GATEWAY_BASE_URL").is_ok()
-            || std::env::var("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok(),
+        "vercel_ai_gateway" => {
+            std::env::var("VERCEL_AI_GATEWAY_API_KEY").is_ok()
+                || std::env::var("AI_GATEWAY_API_KEY").is_ok()
+                || std::env::var("VERCEL_AI_GATEWAY_BASE_URL").is_ok()
+                || std::env::var("VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL").is_ok()
+        }
         "vllm" => {
-            std::env::var("VLLM_CHAT_COMPLETIONS_URL").is_ok() || std::env::var("VLLM_BASE_URL").is_ok()
+            std::env::var("VLLM_CHAT_COMPLETIONS_URL").is_ok()
+                || std::env::var("VLLM_BASE_URL").is_ok()
         }
         "mistral" => std::env::var("MISTRAL_API_KEY").is_ok(),
-        "nvidia" => std::env::var("NVIDIA_API_KEY").is_ok() || std::env::var("NVIDIA_NIM_API_KEY").is_ok(),
+        "nvidia" => {
+            std::env::var("NVIDIA_API_KEY").is_ok() || std::env::var("NVIDIA_NIM_API_KEY").is_ok()
+        }
         "litellm" => {
-            std::env::var("LITELLM_CHAT_COMPLETIONS_URL").is_ok() || std::env::var("LITELLM_BASE_URL").is_ok()
+            std::env::var("LITELLM_CHAT_COMPLETIONS_URL").is_ok()
+                || std::env::var("LITELLM_BASE_URL").is_ok()
         }
         "deepseek" => std::env::var("DEEPSEEK_API_KEY").is_ok(),
-        "qwen" => std::env::var("QWEN_API_KEY").is_ok() || std::env::var("DASHSCOPE_API_KEY").is_ok(),
+        "qwen" => {
+            std::env::var("QWEN_API_KEY").is_ok() || std::env::var("DASHSCOPE_API_KEY").is_ok()
+        }
         "zhipu" => std::env::var("ZHIPU_API_KEY").is_ok(),
         "moonshot" => std::env::var("MOONSHOT_API_KEY").is_ok(),
         "doubao" => std::env::var("DOUBAO_API_KEY").is_ok() || std::env::var("ARK_API_KEY").is_ok(),
@@ -2968,7 +3503,9 @@ pub fn spawn_telegram_ingress_worker(state: Arc<AppState>) {
         let mut next_offset: Option<i64> = None;
         loop {
             let mut request = client
-                .get(format!("https://api.telegram.org/bot{bot_token}/getUpdates"))
+                .get(format!(
+                    "https://api.telegram.org/bot{bot_token}/getUpdates"
+                ))
                 .query(&[("timeout", "30"), ("allowed_updates", "[\"message\"]")]);
             if let Some(offset) = next_offset {
                 request = request.query(&[("offset", offset)]);
@@ -2991,7 +3528,10 @@ pub fn spawn_telegram_ingress_worker(state: Arc<AppState>) {
                         sleep(Duration::from_secs(2)).await;
                     }
                     Err(error) => {
-                        warn!(?error, "telegram polling worker failed to decode getUpdates response");
+                        warn!(
+                            ?error,
+                            "telegram polling worker failed to decode getUpdates response"
+                        );
                         sleep(Duration::from_secs(2)).await;
                     }
                 },
@@ -3861,7 +4401,10 @@ mod tests {
 
     #[test]
     fn parses_help_and_skills_commands() {
-        assert!(matches!(parse_ingress_command("/"), Some(IngressCommand::Help)));
+        assert!(matches!(
+            parse_ingress_command("/"),
+            Some(IngressCommand::Help)
+        ));
         assert!(matches!(
             parse_ingress_command("/help@Helios042agentbot"),
             Some(IngressCommand::Help)
@@ -3884,7 +4427,9 @@ mod tests {
         ));
         assert!(matches!(
             parse_ingress_command("＃observe"),
-            Some(IngressCommand::ModeSet { mode: ChatAutomationMode::Observe })
+            Some(IngressCommand::ModeSet {
+                mode: ChatAutomationMode::Observe
+            })
         ));
     }
 
@@ -3903,11 +4448,17 @@ mod tests {
             "/skills search echo"
         );
         assert_eq!(
-            normalize_ingress_command_text("wechat_official_account", "<at user_id=\"ou_x\">机器人</at> /status"),
+            normalize_ingress_command_text(
+                "wechat_official_account",
+                "<at user_id=\"ou_x\">机器人</at> /status"
+            ),
             "/status"
         );
         assert_eq!(normalize_ingress_command_text("feishu", "帮助"), "/help");
-        assert_eq!(normalize_ingress_command_text("dingtalk", "状态"), "/status");
+        assert_eq!(
+            normalize_ingress_command_text("dingtalk", "状态"),
+            "/status"
+        );
         assert_eq!(
             normalize_ingress_command_text("qq", "技能搜索 echo"),
             "/skills search echo"

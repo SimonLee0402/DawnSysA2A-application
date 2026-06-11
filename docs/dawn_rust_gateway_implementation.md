@@ -10,6 +10,7 @@ The Rust backend now has four active slices:
 - `Agent Card` publishing, discovery, remote invocation, and local `.well-known` exposure.
 - `Chat ingress + Approval Center + Control Center` for inbound routing and operator action loops.
 - `Marketplace` catalog + install endpoints for published agent cards and signed Wasm skills.
+- `Evolution` experience storage for bounded, reviewable agent learning with guarded patch apply/rollback and no autonomous skill activation or publishing.
 
 The project direction is now Rust-only for runtime startup. The legacy Django/Vue launch scripts should be treated as obsolete.
 
@@ -33,6 +34,8 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
   - Exposes the high-level gateway status and nests the control-plane and connector routers.
 - `dawn_core/src/marketplace.rs`
   - Exposes a public marketplace catalog, skill package install flow, agent-card install flow, and a lightweight `/marketplace` browser.
+- `dawn_core/src/evolution.rs`
+  - Exposes a low-risk experience store for recording task outcomes, reusable lessons, and chat-ingress-derived learning records. It also runs a deterministic auto-reflection worker over recent chat ingress events and can propose reviewed skill candidates from repeated experience patterns. Operators can mark proposals as approved, rejected, or deferred, generate and review draft implementation plans, prepare guarded implementation run/change packages, create implementation execution records with preflight reports and command plans, prepare patch candidates with rollback plans after verification, and run guarded patch dry-run/apply/rollback steps after separate review. `/verify` still runs only fixed allowlisted verification commands without a shell. Patch apply/rollback only touches manifest-declared non-QGIS text files, rejects protected paths, records pre-apply snapshots, requires `confirmPatchId` for real writes, and never auto-activates skills or publishes releases.
 - `dawn_core/src/approval_center.rs`
   - Exposes a unified approval queue for pending node-command approvals and AP2 payment approvals.
 - `dawn_core/src/control_plane.rs`
@@ -153,6 +156,35 @@ The project direction is now Rust-only for runtime startup. The legacy Django/Vu
 - `GET /api/gateway/ingress/pairings`
 - `POST /api/gateway/ingress/pairings/{platform}/{identity_key}/approve`
 - `POST /api/gateway/ingress/pairings/{platform}/{identity_key}/reject`
+- `GET /api/gateway/evolution/status`
+- `GET /api/gateway/evolution/experiences`
+- `POST /api/gateway/evolution/experiences`
+- `GET /api/gateway/evolution/experiences/{experience_id}`
+- `POST /api/gateway/evolution/experiences/from-ingress/{ingress_id}`
+- `POST /api/gateway/evolution/reflections/run`
+- `GET /api/gateway/evolution/skill-proposals`
+- `GET /api/gateway/evolution/skill-proposals/{proposal_id}`
+- `POST /api/gateway/evolution/skill-proposals/run`
+- `POST /api/gateway/evolution/skill-proposals/{proposal_id}/review`
+- `POST /api/gateway/evolution/skill-proposals/{proposal_id}/implementation-plan`
+- `GET /api/gateway/evolution/implementation-plans`
+- `GET /api/gateway/evolution/implementation-plans/{plan_id}`
+- `POST /api/gateway/evolution/implementation-plans/{plan_id}/review`
+- `POST /api/gateway/evolution/implementation-plans/{plan_id}/runs`
+- `GET /api/gateway/evolution/implementation-runs`
+- `GET /api/gateway/evolution/implementation-runs/{run_id}`
+- `POST /api/gateway/evolution/implementation-runs/{run_id}/review`
+- `POST /api/gateway/evolution/implementation-runs/{run_id}/executions`
+- `GET /api/gateway/evolution/implementation-executions`
+- `GET /api/gateway/evolution/implementation-executions/{execution_id}`
+- `POST /api/gateway/evolution/implementation-executions/{execution_id}/review`
+- `POST /api/gateway/evolution/implementation-executions/{execution_id}/verify`
+- `POST /api/gateway/evolution/implementation-executions/{execution_id}/patch-candidates`
+- `GET /api/gateway/evolution/implementation-patch-candidates`
+- `GET /api/gateway/evolution/implementation-patch-candidates/{patch_id}`
+- `POST /api/gateway/evolution/implementation-patch-candidates/{patch_id}/review`
+- `POST /api/gateway/evolution/implementation-patch-candidates/{patch_id}/apply`
+- `POST /api/gateway/evolution/implementation-patch-candidates/{patch_id}/rollback`
 - `POST /api/gateway/ingress/telegram/webhook/{secret}`
 - `POST /api/gateway/ingress/signal/events/{secret}`
 - `POST /api/gateway/ingress/bluebubbles/events/{secret}`
@@ -368,6 +400,7 @@ Identity And Onboarding:
 - guided setup now defaults to a simpler OpenClaw-style path: it auto-suggests workspace identity values, avoids prompting for tenant/project/region unless `--advanced` is used, and a first interactive `dawn-node` run will auto-launch setup when no local CLI session is present
 - the interactive setup menus now prioritize the lowest-friction paths: `OpenAI`, `Anthropic Claude`, and `Google Gemini` are shown with explicit `API key` labels, `Telegram Bot` is shown with an explicit `bot token` label, and the selector accepts natural aliases such as `claude`, `gemini`, and `google-chat`
 - local desktop control is now exposed through the same attested node-command path from the CLI with `dawn-node node-command dispatch --type <command> --payload '{...}'`; this keeps CLI-originated desktop actions on the same approval, audit, and capability checks used by every chat ingress surface.
+- the `dawn-desktop-control` native skill now gives chat users a guarded desktop-control loop: in `#assist` it previews requests such as `看一下屏幕`, `鼠标位置`, `移动鼠标到 400,300`, and `点击 400,300`; in `#autopilot` it creates approval-backed `desktop_snapshot`, `desktop_mouse_position`, `desktop_mouse_move`, or `desktop_mouse_click` node commands against an attested online node.
 - the desktop CLI now also exposes `dawn-node channels pairings list|approve|reject`, so Signal and BlueBubbles inbound pairing decisions can be resolved from the local workstation without dropping into raw HTTP calls
 - `dawn-node channels send signal|bluebubbles` now supports richer native actions: Signal can stage attachments, reactions, receipts, per-account routing, and group-management actions, while BlueBubbles can stage attachments, reactions, typing, mark-read / mark-unread, edit, unsend, reply threading, message effects, participant management, and group rename actions from the same CLI surface instead of forcing raw JSON calls
 - the desktop CLI now also exposes `dawn-node ingress status`, which prints ingress callback readiness together with Signal/BlueBubbles DM policy, allowlist counts, and pending-pairing counts
