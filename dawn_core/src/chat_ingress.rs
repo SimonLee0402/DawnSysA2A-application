@@ -1,16 +1,23 @@
 use anyhow::Context;
 use std::sync::Arc;
 
+use aes::Aes256;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
+    middleware,
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -23,9 +30,7 @@ use crate::{
         ChatIngressEventRecord, ChatIngressStatus, NodeCommandStatus, unix_timestamp_ms,
     },
     connectors::{self, ChatDispatchRequest, OpenAIResponseRequest},
-    control_plane,
-    identity,
-    skill_registry,
+    control_plane, identity, qgis, skill_registry,
 };
 
 #[derive(Debug, Serialize)]
@@ -43,9 +48,13 @@ struct ChatIngressStatusReport {
     bluebubbles_dm_policy: &'static str,
     bluebubbles_allowlist_count: usize,
     bluebubbles_pending_pairings: usize,
+    feishu_event_signature_configured: bool,
     dingtalk_callback_token_configured: bool,
+    dingtalk_callback_encryption_configured: bool,
     wecom_callback_token_configured: bool,
+    wecom_callback_encryption_configured: bool,
     wechat_official_account_token_configured: bool,
+    wechat_official_account_encryption_configured: bool,
     qq_bot_callback_secret_configured: bool,
     total_events: usize,
     task_created_events: usize,
@@ -168,6 +177,10 @@ struct TelegramUser {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WeComVerifyQuery {
+    #[serde(alias = "msg_signature")]
+    msg_signature: Option<String>,
+    timestamp: Option<String>,
+    nonce: Option<String>,
     echostr: Option<String>,
 }
 
@@ -175,13 +188,25 @@ struct WeComVerifyQuery {
 #[serde(rename_all = "camelCase")]
 struct WeChatOfficialAccountVerifyQuery {
     signature: Option<String>,
+    #[serde(alias = "msg_signature")]
+    msg_signature: Option<String>,
     timestamp: Option<String>,
     nonce: Option<String>,
     echostr: Option<String>,
+    #[serde(alias = "encrypt_type")]
+    encrypt_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DingTalkCallbackQuery {
+    signature: Option<String>,
+    timestamp: Option<String>,
+    nonce: Option<String>,
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
+    let management = Router::new()
         .route("/status", get(status))
         .route("/events", get(list_events))
         .route("/pairings", get(list_pairings))
@@ -193,6 +218,11 @@ pub fn router() -> Router<Arc<AppState>> {
             "/pairings/:platform/:identity_key/reject",
             post(reject_pairing),
         )
+        .route_layer(middleware::from_fn(
+            crate::security::require_local_or_admin_token,
+        ));
+
+    let webhooks = Router::new()
         .route("/telegram/webhook/:secret", post(telegram_webhook))
         .route("/signal/events/:secret", post(signal_events))
         .route("/bluebubbles/events/:secret", post(bluebubbles_events))
@@ -203,7 +233,9 @@ pub fn router() -> Router<Arc<AppState>> {
             "/wechat-official-account/events",
             get(wechat_official_account_verify).post(wechat_official_account_events),
         )
-        .route("/qq/events", post(qq_events))
+        .route("/qq/events", post(qq_events));
+
+    management.merge(webhooks)
 }
 
 async fn status(
@@ -257,13 +289,45 @@ async fn status(
         bluebubbles_dm_policy: chat_dm_policy_label(bluebubbles_policy),
         bluebubbles_allowlist_count: bluebubbles_allowlist.len(),
         bluebubbles_pending_pairings,
-        dingtalk_callback_token_configured: std::env::var("DAWN_DINGTALK_CALLBACK_TOKEN").is_ok(),
-        wecom_callback_token_configured: std::env::var("DAWN_WECOM_CALLBACK_TOKEN").is_ok(),
+        feishu_event_signature_configured: configured_optional_multi_secret(&[
+            "FEISHU_EVENT_ENCRYPT_KEY",
+            "DAWN_FEISHU_EVENT_ENCRYPT_KEY",
+        ])
+        .is_some(),
+        dingtalk_callback_token_configured: configured_optional_multi_secret(&[
+            "DAWN_DINGTALK_CALLBACK_TOKEN",
+            "DINGTALK_CALLBACK_TOKEN",
+        ])
+        .is_some(),
+        dingtalk_callback_encryption_configured: configured_optional_multi_secret(&[
+            "DAWN_DINGTALK_ENCODING_AES_KEY",
+            "DINGTALK_ENCODING_AES_KEY",
+        ])
+        .is_some(),
+        wecom_callback_token_configured: configured_optional_multi_secret(&[
+            "DAWN_WECOM_CALLBACK_TOKEN",
+            "WECOM_CALLBACK_TOKEN",
+        ])
+        .is_some(),
+        wecom_callback_encryption_configured: configured_optional_multi_secret(&[
+            "DAWN_WECOM_ENCODING_AES_KEY",
+            "WECOM_ENCODING_AES_KEY",
+        ])
+        .is_some(),
         wechat_official_account_token_configured: std::env::var(
             "DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN",
         )
         .is_ok(),
-        qq_bot_callback_secret_configured: std::env::var("DAWN_QQ_BOT_CALLBACK_SECRET").is_ok(),
+        wechat_official_account_encryption_configured: configured_optional_multi_secret(&[
+            "WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+            "DAWN_WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+        ])
+        .is_some(),
+        qq_bot_callback_secret_configured: configured_optional_multi_secret(&[
+            "DAWN_QQ_BOT_CALLBACK_SECRET",
+            "QQ_BOT_CLIENT_SECRET",
+        ])
+        .is_some(),
         total_events: events.len(),
         task_created_events,
     }))
@@ -320,9 +384,10 @@ async fn reject_pairing(
 async fn telegram_webhook(
     State(state): State<Arc<AppState>>,
     Path(secret): Path<String>,
+    headers: HeaderMap,
     Json(update): Json<TelegramUpdate>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_telegram_secret(&secret).map_err(bad_request)?;
+    verify_telegram_secret(&secret, &headers).map_err(bad_request)?;
     let Some(record) = process_telegram_update(state, update)
         .await
         .map_err(service_error)?
@@ -510,8 +575,10 @@ async fn bluebubbles_events(
 
 async fn feishu_events(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>,
+    headers: HeaderMap,
+    body: String,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let payload = verify_and_decode_feishu_event(&headers, &body).map_err(bad_request)?;
     if let Some(challenge) = payload.get("challenge").and_then(Value::as_str) {
         return Ok(Json(json!({ "challenge": challenge })));
     }
@@ -568,9 +635,11 @@ async fn feishu_events(
 
 async fn dingtalk_events(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>,
+    Query(query): Query<DingTalkCallbackQuery>,
+    body: String,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_dingtalk_callback_token(&payload).map_err(bad_request)?;
+    let (payload, encrypted_response) =
+        verify_and_decode_dingtalk_event(&query, &body).map_err(bad_request)?;
 
     if let Some(challenge) = payload.get("challenge").and_then(Value::as_str) {
         return Ok(Json(json!({ "challenge": challenge })));
@@ -620,6 +689,12 @@ async fn dingtalk_events(
     .await
     .map_err(service_error)?;
 
+    if encrypted_response {
+        return Ok(Json(
+            encrypt_dingtalk_success_response().map_err(service_error)?,
+        ));
+    }
+
     Ok(Json(json!({
         "ok": true,
         "ingressId": record.ingress_id,
@@ -631,16 +706,15 @@ async fn dingtalk_events(
 async fn wecom_verify(
     Query(query): Query<WeComVerifyQuery>,
 ) -> Result<String, (StatusCode, Json<Value>)> {
-    query
-        .echostr
-        .ok_or_else(|| bad_request(anyhow::anyhow!("missing echostr query parameter")))
+    verify_and_decode_wecom_echostr(&query).map_err(bad_request)
 }
 
 async fn wecom_events(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>,
+    Query(query): Query<WeComVerifyQuery>,
+    body: String,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_wecom_callback_token(&payload).map_err(bad_request)?;
+    let payload = verify_and_decode_wecom_event(&query, &body).map_err(bad_request)?;
 
     let text = extract_wecom_text(&payload).ok_or_else(|| {
         bad_request(anyhow::anyhow!(
@@ -696,10 +770,7 @@ async fn wecom_events(
 async fn wechat_official_account_verify(
     Query(query): Query<WeChatOfficialAccountVerifyQuery>,
 ) -> Result<String, (StatusCode, String)> {
-    verify_wechat_official_account_query(&query).map_err(plain_bad_request)?;
-    query
-        .echostr
-        .ok_or_else(|| plain_bad_request(anyhow::anyhow!("missing echostr query parameter")))
+    verify_and_decode_wechat_official_account_echostr(&query).map_err(plain_bad_request)
 }
 
 async fn wechat_official_account_events(
@@ -707,8 +778,9 @@ async fn wechat_official_account_events(
     Query(query): Query<WeChatOfficialAccountVerifyQuery>,
     body: String,
 ) -> Result<String, (StatusCode, String)> {
-    verify_wechat_official_account_query(&query).map_err(plain_bad_request)?;
-    let payload = parse_wechat_official_account_xml(&body)
+    let decoded_body =
+        verify_and_decode_wechat_official_account_body(&query, &body).map_err(plain_bad_request)?;
+    let payload = parse_wechat_official_account_xml(&decoded_body)
         .ok_or_else(|| plain_bad_request(anyhow::anyhow!("unsupported wechat xml payload")))?;
     let event_type = payload
         .event_type
@@ -736,7 +808,7 @@ async fn wechat_official_account_events(
             "msgId": payload.msg_id,
             "createTime": payload.create_time,
             "event": payload.event_type,
-            "rawXml": body
+            "rawXml": decoded_body
         }),
         true,
     )
@@ -748,14 +820,25 @@ async fn wechat_official_account_events(
 
 async fn qq_events(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>,
+    headers: HeaderMap,
+    body: String,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let payload = verify_and_decode_qq_event(&headers, &body).map_err(bad_request)?;
+    if payload.get("op").and_then(Value::as_i64) == Some(13) {
+        let validation = qq_validation_response(&payload).map_err(bad_request)?;
+        return Ok(Json(validation));
+    }
     let Some(text) = extract_qq_text(&payload) else {
         if let Some(plain_token) = payload.pointer("/d/plain_token").and_then(Value::as_str) {
-            return Ok(Json(json!({
-                "plain_token": plain_token,
-                "note": "qq callback challenge echoed; signature flow is not yet enforced by the gateway"
-            })));
+            let validation = qq_validation_response_for_values(
+                plain_token,
+                payload
+                    .pointer("/d/event_ts")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .map_err(bad_request)?;
+            return Ok(Json(validation));
         }
 
         return Err(bad_request(anyhow::anyhow!(
@@ -1649,6 +1732,32 @@ async fn execute_ingress_command(
                 )));
             };
             if skill_registry::is_native_builtin_skill(&skill) {
+                if qgis::is_qgis_native_skill(&skill.skill_id) {
+                    let Some(arguments) = parsed.arguments.as_deref() else {
+                        let reply = skill_registry::native_builtin_skill_usage(&skill.skill_id)
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "技能 `{}` 是 Dawn 的原生内置技能，当前本机已经可用。",
+                                    skill.display_name
+                                )
+                            });
+                        return Ok(IngressCommandResult::Reply(reply));
+                    };
+                    let instruction = build_qgis_native_instruction(
+                        platform,
+                        record,
+                        &skill.skill_id,
+                        arguments,
+                    )?;
+                    let mut task_name = format!("{platform} native {}", skill.display_name);
+                    if let Some(chat_id) = record.chat_id.as_deref() {
+                        task_name.push_str(&format!(" ({chat_id})"));
+                    }
+                    return Ok(IngressCommandResult::Task {
+                        instruction,
+                        task_name,
+                    });
+                }
                 let reply = skill_registry::native_builtin_skill_usage(&skill.skill_id)
                     .unwrap_or_else(|| {
                         format!(
@@ -2658,6 +2767,7 @@ struct ParsedSkillSelector {
     skill_id: String,
     version: Option<String>,
     function_name: Option<String>,
+    arguments: Option<String>,
 }
 
 fn parse_skill_selector(raw: &str) -> anyhow::Result<ParsedSkillSelector> {
@@ -2665,7 +2775,15 @@ fn parse_skill_selector(raw: &str) -> anyhow::Result<ParsedSkillSelector> {
     if selector.is_empty() {
         anyhow::bail!("用法: /skill <skill[@version][#function]>");
     }
+    let (selector, arguments) = match selector.find(char::is_whitespace) {
+        Some(index) => (
+            &selector[..index],
+            Some(selector[index..].trim().to_string()),
+        ),
+        None => (selector, None),
+    };
     let selector = selector
+        .trim()
         .split_whitespace()
         .next()
         .ok_or_else(|| anyhow::anyhow!("用法: /skill <skill[@version][#function]>"))?;
@@ -2688,19 +2806,228 @@ fn parse_skill_selector(raw: &str) -> anyhow::Result<ParsedSkillSelector> {
         skill_id,
         version,
         function_name,
+        arguments: arguments.filter(|value| !value.is_empty()),
     })
 }
 
-fn build_skill_selector_for_task(skill: &skill_registry::SkillRecord, function: Option<&str>) -> String {
+fn build_skill_selector_for_task(
+    skill: &skill_registry::SkillRecord,
+    function: Option<&str>,
+) -> String {
     match function.filter(|value| !value.trim().is_empty()) {
         Some(function) => format!("{}@{}#{}", skill.skill_id, skill.version, function.trim()),
         None => format!("{}@{}", skill.skill_id, skill.version),
     }
 }
 
+fn build_qgis_native_instruction(
+    platform: &str,
+    record: &ChatIngressEventRecord,
+    skill_id: &str,
+    raw_arguments: &str,
+) -> anyhow::Result<String> {
+    let payload: Value = serde_json::from_str(raw_arguments).map_err(|error| {
+        anyhow::anyhow!(
+            "QGIS 原生技能参数必须是 JSON 对象，例如 /skill {} {{\"projectId\":\"demo-map\"}}。解析失败: {}",
+            skill_id,
+            error
+        )
+    })?;
+    let mut envelope = match payload {
+        Value::Object(map) => Value::Object(map),
+        _ => anyhow::bail!("QGIS 原生技能参数必须是 JSON 对象"),
+    };
+    let object = envelope
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("QGIS 原生技能参数必须是 JSON 对象"))?;
+    object.insert("skillId".to_string(), Value::String(skill_id.to_string()));
+    object.insert(
+        "auth".to_string(),
+        json!({
+            "actor": ingress_actor_identity(platform, record),
+            "role": "user",
+            "scopes": qgis::default_scopes_for_skill(skill_id).unwrap_or_default(),
+        }),
+    );
+    if !object.contains_key("requestId") {
+        object.insert(
+            "requestId".to_string(),
+            Value::String(format!("ingress:{}", record.ingress_id)),
+        );
+    }
+    if !object.contains_key("idempotencyKey") {
+        object.insert(
+            "idempotencyKey".to_string(),
+            Value::String(format!("ingress:{}:{}", record.ingress_id, skill_id)),
+        );
+    }
+    let _parsed: qgis::QgisSkillInvocationEnvelope = serde_json::from_value(envelope.clone())
+        .map_err(|error| anyhow::anyhow!("QGIS 原生技能参数无效: {error}"))?;
+    Ok(format!(
+        "native:{}",
+        serde_json::to_string(&envelope).context("failed to serialize qgis native envelope")?
+    ))
+}
+
+fn ingress_actor_identity(platform: &str, record: &ChatIngressEventRecord) -> String {
+    record
+        .sender_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{platform}:{value}"))
+        .or_else(|| {
+            record
+                .sender_display
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("{platform}:{value}"))
+        })
+        .or_else(|| {
+            record
+                .chat_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("{platform}:chat:{value}"))
+        })
+        .unwrap_or_else(|| format!("{platform}:ingress"))
+}
+
 fn should_attempt_default_model_reply(text: &str) -> bool {
     let trimmed = text.trim();
-    !trimmed.is_empty() && !trimmed.starts_with('/') && !trimmed.starts_with('#')
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('#') {
+        return false;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    is_conversational_message(trimmed, &normalized)
+        && !looks_like_task_request(trimmed, &normalized)
+}
+
+fn is_conversational_message(text: &str, normalized: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "你是谁",
+            "你在吗",
+            "在吗",
+            "你好",
+            "您好",
+            "嗨",
+            "哈喽",
+            "谢谢",
+            "多谢",
+            "早上好",
+            "晚上好",
+            "你叫什么",
+            "你能做什么",
+            "介绍一下你自己",
+            "可以聊天",
+            "陪我聊",
+        ],
+    ) || [
+        "hi",
+        "hello",
+        "hey",
+        "thanks",
+        "thank you",
+        "who are you",
+        "what are you",
+        "what can you do",
+        "how are you",
+        "are you there",
+        "tell me about yourself",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
+        || text.ends_with('?')
+        || text.ends_with('？')
+}
+
+fn looks_like_task_request(text: &str, normalized: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "打开",
+            "启动",
+            "进入",
+            "搜索",
+            "点击",
+            "控制",
+            "读取",
+            "执行",
+            "创建",
+            "帮我",
+            "测试",
+            "订",
+            "预订",
+            "总结",
+            "发送",
+            "提醒",
+            "通知",
+            "分析",
+            "生成",
+            "上传",
+            "下载",
+            "删除",
+            "清理",
+            "运行",
+            "调用",
+            "安装",
+            "查找",
+            "整理",
+            "修改",
+            "移动",
+            "拖动",
+            "截图",
+            "截屏",
+            "鼠标",
+            "键盘",
+            "文件",
+            "浏览器",
+            "电脑",
+            "程序",
+            "任务",
+            "审批",
+            "支付",
+        ],
+    ) || contains_any(
+        normalized,
+        &[
+            "attachment received",
+            "reaction received",
+            "book ",
+            "create ",
+            "draft ",
+            "summarize ",
+            "send ",
+            "open ",
+            "launch ",
+            "search ",
+            "click ",
+            "control ",
+            "read ",
+            "run ",
+            "execute ",
+            "call ",
+            "install ",
+            "delete ",
+            "clean ",
+            "download ",
+            "upload ",
+            "move ",
+            "type ",
+            "notify ",
+            "remind ",
+            "analyze ",
+            "generate ",
+            "start ",
+            "stop ",
+            "browser",
+            "mouse",
+            "keyboard",
+            "file",
+            "task ",
+        ],
+    )
 }
 
 async fn try_default_model_reply(
@@ -3374,13 +3701,26 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     Some(remainder[..end].trim().to_string())
 }
 
-fn verify_telegram_secret(secret: &str) -> anyhow::Result<()> {
-    if let Ok(expected) = std::env::var("DAWN_TELEGRAM_WEBHOOK_SECRET") {
-        if expected != secret {
-            anyhow::bail!("telegram webhook secret mismatch");
-        }
+type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
+type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
+
+fn verify_telegram_secret(secret: &str, headers: &HeaderMap) -> anyhow::Result<()> {
+    let Some(expected) = configured_ingress_secret("DAWN_TELEGRAM_WEBHOOK_SECRET", "telegram")?
+    else {
+        return Ok(());
+    };
+    let header_secret = header_str(headers, "x-telegram-bot-api-secret-token");
+    if !telegram_secret_matches(&expected, secret, header_secret) {
+        anyhow::bail!("telegram webhook secret mismatch");
     }
     Ok(())
+}
+
+fn telegram_secret_matches(expected: &str, path_secret: &str, header_secret: Option<&str>) -> bool {
+    constant_time_str_eq(expected, path_secret)
+        || header_secret
+            .map(|value| constant_time_str_eq(expected, value))
+            .unwrap_or(false)
 }
 
 fn telegram_ingress_mode() -> &'static str {
@@ -3545,10 +3885,11 @@ pub fn spawn_telegram_ingress_worker(state: Arc<AppState>) {
 }
 
 fn verify_callback_secret(env_var: &str, platform: &str, secret: &str) -> anyhow::Result<()> {
-    if let Ok(expected) = std::env::var(env_var) {
-        if expected != secret {
-            anyhow::bail!("{platform} callback secret mismatch");
-        }
+    let Some(expected) = configured_ingress_secret(env_var, platform)? else {
+        return Ok(());
+    };
+    if !constant_time_str_eq(&expected, secret) {
+        anyhow::bail!("{platform} callback secret mismatch");
     }
     Ok(())
 }
@@ -3630,7 +3971,11 @@ fn parse_pairing_status(
 fn verify_wechat_official_account_query(
     query: &WeChatOfficialAccountVerifyQuery,
 ) -> anyhow::Result<()> {
-    let Ok(token) = std::env::var("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN") else {
+    let Some(token) = configured_ingress_secret(
+        "DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN",
+        "wechat official account",
+    )?
+    else {
         return Ok(());
     };
 
@@ -3647,45 +3992,644 @@ fn verify_wechat_official_account_query(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("missing wechat nonce"))?;
     let expected = compute_wechat_signature(&token, timestamp, nonce);
-    if expected != signature {
+    if !constant_time_str_eq(&expected, signature) {
         anyhow::bail!("wechat signature mismatch");
     }
     Ok(())
 }
 
 fn compute_wechat_signature(token: &str, timestamp: &str, nonce: &str) -> String {
-    let mut parts = [token, timestamp, nonce];
+    compute_sorted_sha1_signature(&[token, timestamp, nonce])
+}
+
+fn verify_and_decode_feishu_event(headers: &HeaderMap, body: &str) -> anyhow::Result<Value> {
+    let Some(encrypt_key) = configured_multi_ingress_secret(
+        &["FEISHU_EVENT_ENCRYPT_KEY", "DAWN_FEISHU_EVENT_ENCRYPT_KEY"],
+        "feishu",
+    )?
+    else {
+        return serde_json::from_str(body).context("failed to parse unsigned feishu payload");
+    };
+
+    verify_feishu_signature(headers, &encrypt_key, body)?;
+    let raw_payload: Value =
+        serde_json::from_str(body).context("failed to parse feishu payload")?;
+    let payload = if let Some(encrypt) = raw_payload.get("encrypt").and_then(Value::as_str) {
+        let decrypted = decrypt_feishu_event(encrypt, &encrypt_key)?;
+        serde_json::from_str(&decrypted).context("failed to parse decrypted feishu payload")?
+    } else {
+        raw_payload
+    };
+    verify_feishu_verification_token(&payload)?;
+    Ok(payload)
+}
+
+fn verify_feishu_signature(
+    headers: &HeaderMap,
+    encrypt_key: &str,
+    body: &str,
+) -> anyhow::Result<()> {
+    let timestamp = header_str(headers, "x-lark-request-timestamp")
+        .ok_or_else(|| anyhow::anyhow!("missing feishu X-Lark-Request-Timestamp header"))?;
+    let nonce = header_str(headers, "x-lark-request-nonce")
+        .ok_or_else(|| anyhow::anyhow!("missing feishu X-Lark-Request-Nonce header"))?;
+    let actual = header_str(headers, "x-lark-signature")
+        .ok_or_else(|| anyhow::anyhow!("missing feishu X-Lark-Signature header"))?;
+    let expected = compute_feishu_signature(timestamp, nonce, encrypt_key, body);
+    if !constant_time_str_eq(&expected, actual) {
+        anyhow::bail!("feishu signature mismatch");
+    }
+    Ok(())
+}
+
+fn compute_feishu_signature(timestamp: &str, nonce: &str, encrypt_key: &str, body: &str) -> String {
+    let mut sha = Sha256::new();
+    sha.update(timestamp.as_bytes());
+    sha.update(nonce.as_bytes());
+    sha.update(encrypt_key.as_bytes());
+    sha.update(body.as_bytes());
+    hex::encode(sha.finalize())
+}
+
+fn decrypt_feishu_event(encrypt: &str, encrypt_key: &str) -> anyhow::Result<String> {
+    let ciphertext = BASE64_STANDARD
+        .decode(encrypt)
+        .context("feishu encrypt field is not valid base64")?;
+    if ciphertext.len() < 32 || ciphertext.len() % 16 != 0 {
+        anyhow::bail!("feishu ciphertext length is invalid");
+    }
+    let key = Sha256::digest(encrypt_key.as_bytes());
+    let iv: [u8; 16] = ciphertext[..16]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("feishu ciphertext IV is invalid"))?;
+    let key: [u8; 32] = key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("feishu derived key is invalid"))?;
+    let decrypted = aes256_cbc_decrypt_no_padding(&key, &iv, &ciphertext[16..])?;
+    extract_json_object(&decrypted).context("decrypted feishu payload did not contain JSON")
+}
+
+fn verify_feishu_verification_token(payload: &Value) -> anyhow::Result<()> {
+    let Some(expected) = configured_optional_multi_secret(&[
+        "FEISHU_VERIFICATION_TOKEN",
+        "DAWN_FEISHU_VERIFICATION_TOKEN",
+    ]) else {
+        return Ok(());
+    };
+    let actual = payload
+        .pointer("/header/token")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("token").and_then(Value::as_str))
+        .ok_or_else(|| anyhow::anyhow!("missing feishu verification token"))?;
+    if !constant_time_str_eq(&expected, actual) {
+        anyhow::bail!("feishu verification token mismatch");
+    }
+    Ok(())
+}
+
+fn verify_and_decode_dingtalk_event(
+    query: &DingTalkCallbackQuery,
+    body: &str,
+) -> anyhow::Result<(Value, bool)> {
+    let raw_payload: Value =
+        serde_json::from_str(body).context("failed to parse dingtalk payload")?;
+    if let Some(encrypt) = raw_payload.get("encrypt").and_then(Value::as_str) {
+        verify_dingtalk_encrypted_signature(query, encrypt)?;
+        let message = decrypt_wechat_style_message(
+            &required_multi_secret(
+                &[
+                    "DAWN_DINGTALK_ENCODING_AES_KEY",
+                    "DINGTALK_ENCODING_AES_KEY",
+                ],
+                "dingtalk EncodingAESKey",
+            )?,
+            encrypt,
+        )?;
+        let payload =
+            serde_json::from_str(&message).context("failed to parse decrypted dingtalk payload")?;
+        return Ok((payload, true));
+    }
+
+    verify_dingtalk_callback_token(&raw_payload).map(|()| (raw_payload, false))
+}
+
+fn verify_dingtalk_encrypted_signature(
+    query: &DingTalkCallbackQuery,
+    encrypt: &str,
+) -> anyhow::Result<()> {
+    let token = required_multi_secret(
+        &["DAWN_DINGTALK_CALLBACK_TOKEN", "DINGTALK_CALLBACK_TOKEN"],
+        "dingtalk callback token",
+    )?;
+    let timestamp = query
+        .timestamp
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing dingtalk timestamp"))?;
+    let nonce = query
+        .nonce
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing dingtalk nonce"))?;
+    let actual = query
+        .signature
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing dingtalk signature"))?;
+    let expected = compute_sorted_sha1_signature(&[&token, timestamp, nonce, encrypt]);
+    if !constant_time_str_eq(&expected, actual) {
+        anyhow::bail!("dingtalk signature mismatch");
+    }
+    Ok(())
+}
+
+fn encrypt_dingtalk_success_response() -> anyhow::Result<Value> {
+    let token = required_multi_secret(
+        &["DAWN_DINGTALK_CALLBACK_TOKEN", "DINGTALK_CALLBACK_TOKEN"],
+        "dingtalk callback token",
+    )?;
+    let aes_key = required_multi_secret(
+        &[
+            "DAWN_DINGTALK_ENCODING_AES_KEY",
+            "DINGTALK_ENCODING_AES_KEY",
+        ],
+        "dingtalk EncodingAESKey",
+    )?;
+    let timestamp = (unix_timestamp_ms() / 1000).to_string();
+    let nonce = Uuid::new_v4().simple().to_string();
+    let encrypt = encrypt_wechat_style_message(&aes_key, "success", "")?;
+    let signature = compute_sorted_sha1_signature(&[&token, &timestamp, &nonce, &encrypt]);
+    Ok(json!({
+        "msg_signature": signature,
+        "timeStamp": timestamp,
+        "nonce": nonce,
+        "encrypt": encrypt
+    }))
+}
+
+fn verify_and_decode_wecom_echostr(query: &WeComVerifyQuery) -> anyhow::Result<String> {
+    let echostr = query
+        .echostr
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing echostr query parameter"))?;
+    if query.msg_signature.is_some() {
+        verify_wechat_style_signature_query(
+            "wecom",
+            &["DAWN_WECOM_CALLBACK_TOKEN", "WECOM_CALLBACK_TOKEN"],
+            query.msg_signature.as_deref(),
+            query.timestamp.as_deref(),
+            query.nonce.as_deref(),
+            echostr,
+        )?;
+        return decrypt_wechat_style_message(
+            &required_multi_secret(
+                &["DAWN_WECOM_ENCODING_AES_KEY", "WECOM_ENCODING_AES_KEY"],
+                "wecom EncodingAESKey",
+            )?,
+            echostr,
+        );
+    }
+    if allow_unauthenticated_ingress_for_development() {
+        return Ok(echostr.to_string());
+    }
+    anyhow::bail!("missing wecom msg_signature for callback URL verification");
+}
+
+fn verify_and_decode_wecom_event(query: &WeComVerifyQuery, body: &str) -> anyhow::Result<Value> {
+    if let Some(encrypt) = extract_xml_tag(body, "Encrypt") {
+        verify_wechat_style_signature_query(
+            "wecom",
+            &["DAWN_WECOM_CALLBACK_TOKEN", "WECOM_CALLBACK_TOKEN"],
+            query.msg_signature.as_deref(),
+            query.timestamp.as_deref(),
+            query.nonce.as_deref(),
+            &encrypt,
+        )?;
+        let message = decrypt_wechat_style_message(
+            &required_multi_secret(
+                &["DAWN_WECOM_ENCODING_AES_KEY", "WECOM_ENCODING_AES_KEY"],
+                "wecom EncodingAESKey",
+            )?,
+            &encrypt,
+        )?;
+        return Ok(wecom_xml_to_payload(&message));
+    }
+
+    let payload: Value = serde_json::from_str(body).context("failed to parse wecom payload")?;
+    verify_wecom_callback_token(&payload)?;
+    Ok(payload)
+}
+
+fn verify_and_decode_wechat_official_account_echostr(
+    query: &WeChatOfficialAccountVerifyQuery,
+) -> anyhow::Result<String> {
+    let echostr = query
+        .echostr
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing echostr query parameter"))?;
+    if query.msg_signature.is_some() || query.encrypt_type.as_deref() == Some("aes") {
+        verify_wechat_style_signature_query(
+            "wechat official account",
+            &["DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"],
+            query.msg_signature.as_deref(),
+            query.timestamp.as_deref(),
+            query.nonce.as_deref(),
+            echostr,
+        )?;
+        return decrypt_wechat_style_message(
+            &required_multi_secret(
+                &[
+                    "WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+                    "DAWN_WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+                ],
+                "wechat official account EncodingAESKey",
+            )?,
+            echostr,
+        );
+    }
+    verify_wechat_official_account_query(query)?;
+    Ok(echostr.to_string())
+}
+
+fn verify_and_decode_wechat_official_account_body(
+    query: &WeChatOfficialAccountVerifyQuery,
+    body: &str,
+) -> anyhow::Result<String> {
+    if let Some(encrypt) = extract_xml_tag(body, "Encrypt") {
+        verify_wechat_style_signature_query(
+            "wechat official account",
+            &["DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"],
+            query.msg_signature.as_deref(),
+            query.timestamp.as_deref(),
+            query.nonce.as_deref(),
+            &encrypt,
+        )?;
+        return decrypt_wechat_style_message(
+            &required_multi_secret(
+                &[
+                    "WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+                    "DAWN_WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+                ],
+                "wechat official account EncodingAESKey",
+            )?,
+            &encrypt,
+        );
+    }
+    verify_wechat_official_account_query(query)?;
+    Ok(body.to_string())
+}
+
+fn verify_and_decode_qq_event(headers: &HeaderMap, body: &str) -> anyhow::Result<Value> {
+    if let Some(secret) = configured_qq_callback_secret()? {
+        verify_qq_callback_signature(headers, body.as_bytes(), &secret)?;
+    }
+    serde_json::from_str(body).context("failed to parse qq payload")
+}
+
+fn configured_qq_callback_secret() -> anyhow::Result<Option<String>> {
+    configured_multi_ingress_secret(
+        &["DAWN_QQ_BOT_CALLBACK_SECRET", "QQ_BOT_CLIENT_SECRET"],
+        "qq",
+    )
+}
+
+fn verify_qq_callback_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &str,
+) -> anyhow::Result<()> {
+    let signature_hex = header_str(headers, "x-signature-ed25519")
+        .ok_or_else(|| anyhow::anyhow!("missing qq X-Signature-Ed25519 header"))?;
+    let timestamp = header_str(headers, "x-signature-timestamp")
+        .ok_or_else(|| anyhow::anyhow!("missing qq X-Signature-Timestamp header"))?;
+    let signature_bytes = hex::decode(signature_hex).context("qq signature is not valid hex")?;
+    let signature_bytes: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("qq signature must be 64 bytes"))?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let public_key = qq_verifying_key_from_secret(secret)?;
+    let mut message = timestamp.as_bytes().to_vec();
+    message.extend_from_slice(body);
+    public_key
+        .verify(&message, &signature)
+        .context("qq signature verification failed")
+}
+
+fn qq_validation_response(payload: &Value) -> anyhow::Result<Value> {
+    let plain_token = payload
+        .pointer("/d/plain_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing qq validation plain_token"))?;
+    let event_ts = payload
+        .pointer("/d/event_ts")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing qq validation event_ts"))?;
+    qq_validation_response_for_values(plain_token, event_ts)
+}
+
+fn qq_validation_response_for_values(plain_token: &str, event_ts: &str) -> anyhow::Result<Value> {
+    let secret = configured_qq_callback_secret()?
+        .ok_or_else(|| anyhow::anyhow!("qq callback secret is required for URL validation"))?;
+    let signing_key = qq_signing_key_from_secret(&secret)?;
+    let mut message = event_ts.as_bytes().to_vec();
+    message.extend_from_slice(plain_token.as_bytes());
+    let signature = signing_key.sign(&message);
+    Ok(json!({
+        "plain_token": plain_token,
+        "signature": hex::encode(signature.to_bytes())
+    }))
+}
+
+fn qq_signing_key_from_secret(secret: &str) -> anyhow::Result<SigningKey> {
+    Ok(SigningKey::from_bytes(&qq_seed_from_secret(secret)?))
+}
+
+fn qq_verifying_key_from_secret(secret: &str) -> anyhow::Result<VerifyingKey> {
+    Ok(VerifyingKey::from(&qq_signing_key_from_secret(secret)?))
+}
+
+fn qq_seed_from_secret(secret: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("qq callback secret cannot be empty");
+    }
+    let mut seed = trimmed.to_string();
+    while seed.len() < 32 {
+        seed.push_str(trimmed);
+    }
+    seed.as_bytes()[..32]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("failed to derive qq seed"))
+}
+
+fn verify_wechat_style_signature_query(
+    platform: &str,
+    token_env_names: &[&str],
+    actual_signature: Option<&str>,
+    timestamp: Option<&str>,
+    nonce: Option<&str>,
+    encrypt: &str,
+) -> anyhow::Result<()> {
+    let token = required_multi_secret(token_env_names, platform)?;
+    let timestamp = timestamp.ok_or_else(|| anyhow::anyhow!("missing {platform} timestamp"))?;
+    let nonce = nonce.ok_or_else(|| anyhow::anyhow!("missing {platform} nonce"))?;
+    let actual_signature =
+        actual_signature.ok_or_else(|| anyhow::anyhow!("missing {platform} msg_signature"))?;
+    let expected = compute_sorted_sha1_signature(&[&token, timestamp, nonce, encrypt]);
+    if !constant_time_str_eq(&expected, actual_signature) {
+        anyhow::bail!("{platform} msg_signature mismatch");
+    }
+    Ok(())
+}
+
+fn decrypt_wechat_style_message(aes_key: &str, encrypt: &str) -> anyhow::Result<String> {
+    let key = decode_platform_encoding_aes_key(aes_key)?;
+    let iv: [u8; 16] = key[..16]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid EncodingAESKey IV"))?;
+    let ciphertext = BASE64_STANDARD
+        .decode(encrypt)
+        .context("encrypted payload is not valid base64")?;
+    let decrypted = aes256_cbc_decrypt_no_padding(&key, &iv, &ciphertext)?;
+    let unpadded = remove_wechat_pkcs7_padding(&decrypted)?;
+    if unpadded.len() < 20 {
+        anyhow::bail!("decrypted payload is too short");
+    }
+    let msg_len = u32::from_be_bytes(
+        unpadded[16..20]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("decrypted payload length prefix is invalid"))?,
+    ) as usize;
+    let msg_start = 20;
+    let msg_end = msg_start + msg_len;
+    if msg_end > unpadded.len() {
+        anyhow::bail!("decrypted payload message length is invalid");
+    }
+    String::from_utf8(unpadded[msg_start..msg_end].to_vec())
+        .context("decrypted payload message is not valid utf-8")
+}
+
+fn encrypt_wechat_style_message(
+    aes_key: &str,
+    message: &str,
+    receive_id: &str,
+) -> anyhow::Result<String> {
+    let key = decode_platform_encoding_aes_key(aes_key)?;
+    let iv: [u8; 16] = key[..16]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid EncodingAESKey IV"))?;
+    let mut plain = vec![0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut plain);
+    plain.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    plain.extend_from_slice(message.as_bytes());
+    plain.extend_from_slice(receive_id.as_bytes());
+    add_wechat_pkcs7_padding(&mut plain);
+    let encrypted = aes256_cbc_encrypt_no_padding(&key, &iv, &plain)?;
+    Ok(BASE64_STANDARD.encode(encrypted))
+}
+
+fn decode_platform_encoding_aes_key(raw: &str) -> anyhow::Result<[u8; 32]> {
+    let value = raw.trim();
+    let padded = if value.len() % 4 == 0 {
+        value.to_string()
+    } else {
+        format!("{value}{}", "=".repeat(4 - value.len() % 4))
+    };
+    let bytes = BASE64_STANDARD
+        .decode(padded)
+        .context("EncodingAESKey is not valid base64")?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("EncodingAESKey must decode to 32 bytes"))
+}
+
+fn aes256_cbc_decrypt_no_padding(
+    key: &[u8; 32],
+    iv: &[u8; 16],
+    ciphertext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+        anyhow::bail!("ciphertext length must be a non-empty AES block multiple");
+    }
+    let mut buffer = ciphertext.to_vec();
+    let decrypted = Aes256CbcDecryptor::new(key.into(), iv.into())
+        .decrypt_padded_mut::<NoPadding>(&mut buffer)
+        .map_err(|_| anyhow::anyhow!("AES-CBC decryption failed"))?;
+    Ok(decrypted.to_vec())
+}
+
+fn aes256_cbc_encrypt_no_padding(
+    key: &[u8; 32],
+    iv: &[u8; 16],
+    plaintext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    if plaintext.is_empty() || plaintext.len() % 16 != 0 {
+        anyhow::bail!("plaintext length must be a non-empty AES block multiple");
+    }
+    let mut buffer = plaintext.to_vec();
+    let len = buffer.len();
+    let encrypted = Aes256CbcEncryptor::new(key.into(), iv.into())
+        .encrypt_padded_mut::<NoPadding>(&mut buffer, len)
+        .map_err(|_| anyhow::anyhow!("AES-CBC encryption failed"))?;
+    Ok(encrypted.to_vec())
+}
+
+fn remove_wechat_pkcs7_padding(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let Some(&padding) = bytes.last() else {
+        anyhow::bail!("empty padded payload");
+    };
+    let padding = padding as usize;
+    if padding == 0 || padding > 32 || padding > bytes.len() {
+        anyhow::bail!("invalid PKCS7 padding");
+    }
+    if !bytes[bytes.len() - padding..]
+        .iter()
+        .all(|value| *value as usize == padding)
+    {
+        anyhow::bail!("invalid PKCS7 padding bytes");
+    }
+    Ok(bytes[..bytes.len() - padding].to_vec())
+}
+
+fn add_wechat_pkcs7_padding(bytes: &mut Vec<u8>) {
+    let mut padding = 32 - (bytes.len() % 32);
+    if padding == 0 {
+        padding = 32;
+    }
+    bytes.extend(std::iter::repeat(padding as u8).take(padding));
+}
+
+fn compute_sorted_sha1_signature(parts: &[&str]) -> String {
+    let mut parts = parts.to_vec();
     parts.sort_unstable();
     let mut sha = Sha1::new();
     sha.update(parts.concat().as_bytes());
     hex::encode(sha.finalize())
 }
 
+fn extract_json_object(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end >= start).then(|| text[start..=end].to_string())
+}
+
+fn wecom_xml_to_payload(xml: &str) -> Value {
+    let msg_type = extract_xml_tag(xml, "MsgType").unwrap_or_else(|| "event".to_string());
+    json!({
+        "msgtype": msg_type,
+        "text": {
+            "content": extract_xml_tag(xml, "Content").unwrap_or_default()
+        },
+        "content": extract_xml_tag(xml, "Content"),
+        "chatid": extract_xml_tag(xml, "ChatId"),
+        "from": extract_xml_tag(xml, "FromUserName"),
+        "sender_name": extract_xml_tag(xml, "FromUserName"),
+        "ToUserName": extract_xml_tag(xml, "ToUserName"),
+        "CreateTime": extract_xml_tag(xml, "CreateTime"),
+        "MsgId": extract_xml_tag(xml, "MsgId"),
+        "Event": extract_xml_tag(xml, "Event")
+    })
+}
+
 fn verify_dingtalk_callback_token(payload: &Value) -> anyhow::Result<()> {
-    if let Ok(expected) = std::env::var("DAWN_DINGTALK_CALLBACK_TOKEN") {
-        let actual = payload
-            .pointer("/token")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("missing dingtalk callback token"))?;
-        if expected != actual {
-            anyhow::bail!("dingtalk callback token mismatch");
-        }
+    let Some(expected) = configured_ingress_secret("DAWN_DINGTALK_CALLBACK_TOKEN", "dingtalk")?
+    else {
+        return Ok(());
+    };
+    let actual = payload
+        .pointer("/token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing dingtalk callback token"))?;
+    if !constant_time_str_eq(&expected, actual) {
+        anyhow::bail!("dingtalk callback token mismatch");
     }
     Ok(())
 }
 
 fn verify_wecom_callback_token(payload: &Value) -> anyhow::Result<()> {
-    if let Ok(expected) = std::env::var("DAWN_WECOM_CALLBACK_TOKEN") {
-        let actual = payload
-            .pointer("/token")
-            .and_then(Value::as_str)
-            .or_else(|| payload.pointer("/ToUserName").and_then(Value::as_str))
-            .ok_or_else(|| anyhow::anyhow!("missing wecom callback token"))?;
-        if expected != actual {
-            anyhow::bail!("wecom callback token mismatch");
-        }
+    let Some(expected) = configured_ingress_secret("DAWN_WECOM_CALLBACK_TOKEN", "wecom")? else {
+        return Ok(());
+    };
+    let actual = payload
+        .pointer("/token")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/ToUserName").and_then(Value::as_str))
+        .ok_or_else(|| anyhow::anyhow!("missing wecom callback token"))?;
+    if !constant_time_str_eq(&expected, actual) {
+        anyhow::bail!("wecom callback token mismatch");
     }
     Ok(())
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_optional_multi_secret(env_vars: &[&str]) -> Option<String> {
+    env_vars.iter().find_map(|env_var| {
+        std::env::var(env_var)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn configured_multi_ingress_secret(
+    env_vars: &[&str],
+    platform: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(value) = configured_optional_multi_secret(env_vars) {
+        return Ok(Some(value));
+    }
+    if allow_unauthenticated_ingress_for_development() {
+        return Ok(None);
+    }
+    anyhow::bail!(
+        "{platform} ingress secret is not configured; set one of {} or explicitly enable DAWN_ALLOW_UNAUTHENTICATED_INGRESS for local development",
+        env_vars.join(", ")
+    )
+}
+
+fn required_multi_secret(env_vars: &[&str], label: &str) -> anyhow::Result<String> {
+    configured_optional_multi_secret(env_vars).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{label} is not configured; set one of {}",
+            env_vars.join(", ")
+        )
+    })
+}
+
+fn configured_ingress_secret(env_var: &str, platform: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(env_var) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_string())),
+        _ if allow_unauthenticated_ingress_for_development() => Ok(None),
+        _ => anyhow::bail!(
+            "{platform} ingress secret is not configured; set {env_var} or explicitly enable DAWN_ALLOW_UNAUTHENTICATED_INGRESS for local development"
+        ),
+    }
+}
+
+fn allow_unauthenticated_ingress_for_development() -> bool {
+    cfg!(test)
+        || std::env::var("DAWN_ALLOW_UNAUTHENTICATED_INGRESS")
+            .ok()
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+}
+
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 fn bad_request(error: anyhow::Error) -> (StatusCode, Json<Value>) {
@@ -3823,8 +4767,34 @@ mod tests {
         Ok((format!("http://{addr}"), handle, state, db_path))
     }
 
+    fn test_encoding_aes_key() -> String {
+        BASE64_STANDARD
+            .encode([7_u8; 32])
+            .trim_end_matches('=')
+            .to_string()
+    }
+
+    fn signed_wechat_style_query(
+        token: &str,
+        timestamp: &str,
+        nonce: &str,
+        encrypt: &str,
+    ) -> String {
+        let signature = compute_sorted_sha1_signature(&[token, timestamp, nonce, encrypt]);
+        format!("msg_signature={signature}&timestamp={timestamp}&nonce={nonce}")
+    }
+
+    fn qq_callback_signature(secret: &str, timestamp: &str, body: &str) -> anyhow::Result<String> {
+        let signing_key = qq_signing_key_from_secret(secret)?;
+        let mut message = timestamp.as_bytes().to_vec();
+        message.extend_from_slice(body.as_bytes());
+        Ok(hex::encode(signing_key.sign(&message).to_bytes()))
+    }
+
     #[tokio::test]
     async fn telegram_webhook_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_TELEGRAM_WEBHOOK_SECRET", None)]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -3864,8 +4834,34 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn telegram_secret_matching_accepts_official_header() {
+        assert!(telegram_secret_matches(
+            "telegram-header-secret",
+            "legacy-path-secret",
+            Some("telegram-header-secret")
+        ));
+        assert!(telegram_secret_matches(
+            "telegram-header-secret",
+            "telegram-header-secret",
+            None
+        ));
+        assert!(!telegram_secret_matches(
+            "telegram-header-secret",
+            "wrong-path-secret",
+            Some("wrong-header-secret")
+        ));
+    }
+
     #[tokio::test]
     async fn feishu_challenge_round_trip_is_supported() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("FEISHU_EVENT_ENCRYPT_KEY", None),
+            ("DAWN_FEISHU_EVENT_ENCRYPT_KEY", None),
+            ("FEISHU_VERIFICATION_TOKEN", None),
+            ("DAWN_FEISHU_VERIFICATION_TOKEN", None),
+        ]);
         let (base_url, handle, _state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -3879,6 +4875,57 @@ mod tests {
         let body: Value = response.json().await?;
         assert_eq!(body["challenge"], "abc123");
 
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn feishu_signed_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("FEISHU_EVENT_ENCRYPT_KEY", Some("feishu-encrypt-key")),
+            ("FEISHU_VERIFICATION_TOKEN", Some("feishu-verify-token")),
+        ]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let body = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_type": "im.message.receive_v1",
+                "token": "feishu-verify-token"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_feishu_chat",
+                    "message_type": "text",
+                    "content": "{\"text\":\"/task Signed Feishu event\"}"
+                },
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_feishu_sender"
+                    }
+                }
+            }
+        }))?;
+        let timestamp = "1725442341";
+        let nonce = "nonce-feishu";
+        let signature = compute_feishu_signature(timestamp, nonce, "feishu-encrypt-key", &body);
+        let response = client
+            .post(format!("{base_url}/api/gateway/ingress/feishu/events"))
+            .header("content-type", "application/json")
+            .header("X-Lark-Request-Timestamp", timestamp)
+            .header("X-Lark-Request-Nonce", nonce)
+            .header("X-Lark-Signature", signature)
+            .body(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let response_body: Value = response.json().await?;
+        assert_eq!(response_body["ok"], true);
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].platform, "feishu");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
         handle.abort();
         fs::remove_file(db_path).ok();
         Ok(())
@@ -4013,6 +5060,13 @@ mod tests {
 
     #[tokio::test]
     async fn dingtalk_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_DINGTALK_CALLBACK_TOKEN", None),
+            ("DINGTALK_CALLBACK_TOKEN", None),
+            ("DAWN_DINGTALK_ENCODING_AES_KEY", None),
+            ("DINGTALK_ENCODING_AES_KEY", None),
+        ]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -4043,6 +5097,49 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         assert_eq!(task.instruction, "Create reimbursement summary");
 
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dingtalk_encrypted_event_validates_signature_and_creates_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let aes_key = test_encoding_aes_key();
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_DINGTALK_CALLBACK_TOKEN", Some("dingtalk-token")),
+            ("DAWN_DINGTALK_ENCODING_AES_KEY", Some(&aes_key)),
+        ]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let encrypted = encrypt_wechat_style_message(
+            &aes_key,
+            r#"{"msgtype":"text","text":{"content":"/task Signed DingTalk event"},"conversationId":"dt-cid","senderStaffId":"dt-user"}"#,
+            "",
+        )?;
+        let timestamp = "1725442342";
+        let nonce = "nonce-dingtalk";
+        let signature =
+            compute_sorted_sha1_signature(&["dingtalk-token", timestamp, nonce, &encrypted]);
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/dingtalk/events?signature={signature}&timestamp={timestamp}&nonce={nonce}"
+            ))
+            .json(&json!({ "encrypt": encrypted }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let response_body: Value = response.json().await?;
+        let encrypted_ack = response_body["encrypt"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing encrypted dingtalk ack"))?;
+        assert_eq!(
+            decrypt_wechat_style_message(&aes_key, encrypted_ack)?,
+            "success"
+        );
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].platform, "dingtalk");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
         handle.abort();
         fs::remove_file(db_path).ok();
         Ok(())
@@ -4242,6 +5339,13 @@ mod tests {
 
     #[tokio::test]
     async fn wecom_verify_round_trip_is_supported() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_WECOM_CALLBACK_TOKEN", None),
+            ("WECOM_CALLBACK_TOKEN", None),
+            ("DAWN_WECOM_ENCODING_AES_KEY", None),
+            ("WECOM_ENCODING_AES_KEY", None),
+        ]);
         let (base_url, handle, _state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -4261,6 +5365,13 @@ mod tests {
 
     #[tokio::test]
     async fn wecom_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_WECOM_CALLBACK_TOKEN", None),
+            ("WECOM_CALLBACK_TOKEN", None),
+            ("DAWN_WECOM_ENCODING_AES_KEY", None),
+            ("WECOM_ENCODING_AES_KEY", None),
+        ]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -4298,7 +5409,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wecom_encrypted_event_validates_signature_and_creates_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let aes_key = test_encoding_aes_key();
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_WECOM_CALLBACK_TOKEN", Some("wecom-token")),
+            ("DAWN_WECOM_ENCODING_AES_KEY", Some(&aes_key)),
+        ]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let encrypted = encrypt_wechat_style_message(
+            &aes_key,
+            "<xml>\
+                <ToUserName><![CDATA[wwcorp]]></ToUserName>\
+                <FromUserName><![CDATA[zhangsan]]></FromUserName>\
+                <CreateTime>1710000000</CreateTime>\
+                <MsgType><![CDATA[text]]></MsgType>\
+                <Content><![CDATA[/task Signed WeCom event]]></Content>\
+                <MsgId>12345</MsgId>\
+            </xml>",
+            "wwcorp",
+        )?;
+        let query =
+            signed_wechat_style_query("wecom-token", "1725442343", "nonce-wecom", &encrypted);
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/wecom/events?{query}"
+            ))
+            .header("content-type", "application/xml")
+            .body(format!(
+                "<xml><Encrypt><![CDATA[{encrypted}]]></Encrypt></xml>"
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["ok"], true);
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].platform, "wecom");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn wechat_official_account_verify_round_trip_is_supported() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN", None),
+            ("WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY", None),
+            ("DAWN_WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY", None),
+        ]);
         let (base_url, handle, _state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -4318,6 +5480,12 @@ mod tests {
 
     #[tokio::test]
     async fn wechat_official_account_xml_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN", None),
+            ("WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY", None),
+            ("DAWN_WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY", None),
+        ]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -4360,7 +5528,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wechat_official_account_encrypted_event_validates_signature_and_creates_task()
+    -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let aes_key = test_encoding_aes_key();
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN", Some("wechat-token")),
+            ("WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY", Some(&aes_key)),
+        ]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let encrypted = encrypt_wechat_style_message(
+            &aes_key,
+            "<xml>\
+                <ToUserName><![CDATA[gh_001]]></ToUserName>\
+                <FromUserName><![CDATA[user-openid-456]]></FromUserName>\
+                <CreateTime>1710000000</CreateTime>\
+                <MsgType><![CDATA[text]]></MsgType>\
+                <Content><![CDATA[/task Signed WeChat event]]></Content>\
+                <MsgId>987654322</MsgId>\
+            </xml>",
+            "wxappid",
+        )?;
+        let query =
+            signed_wechat_style_query("wechat-token", "1725442344", "nonce-wechat", &encrypted);
+        let response = client
+            .post(format!(
+                "{base_url}/api/gateway/ingress/wechat-official-account/events?encrypt_type=aes&{query}"
+            ))
+            .header("content-type", "application/xml")
+            .body(format!(
+                "<xml><Encrypt><![CDATA[{encrypted}]]></Encrypt></xml>"
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.text().await?;
+        assert_eq!(body, "success");
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].platform, "wechat_official_account");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn qq_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[
+            ("DAWN_QQ_BOT_CALLBACK_SECRET", None),
+            ("QQ_BOT_CLIENT_SECRET", None),
+        ]);
         let (base_url, handle, state, db_path) = spawn_test_server().await?;
         let client = Client::new();
         let response = client
@@ -4394,6 +5613,84 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         assert_eq!(task.instruction, "Draft AP2 settlement summary");
 
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qq_signed_event_creates_ingress_event_and_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_QQ_BOT_CALLBACK_SECRET", Some("qq-secret"))]);
+        let (base_url, handle, state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let body = serde_json::to_string(&json!({
+            "t": "AT_MESSAGE_CREATE",
+            "d": {
+                "content": "<@!botid> /task Signed QQ event",
+                "author": {
+                    "id": "qq-user-002",
+                    "username": "qq-signed-operator"
+                }
+            }
+        }))?;
+        let timestamp = "1725442345";
+        let signature = qq_callback_signature("qq-secret", timestamp, &body)?;
+        let response = client
+            .post(format!("{base_url}/api/gateway/ingress/qq/events"))
+            .header("content-type", "application/json")
+            .header("X-Signature-Timestamp", timestamp)
+            .header("X-Signature-Ed25519", signature)
+            .body(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        assert_eq!(body["ok"], true);
+        let events = state.list_chat_ingress_events(Some(10)).await?;
+        assert_eq!(events[0].platform, "qq");
+        assert_eq!(events[0].status, ChatIngressStatus::TaskCreated);
+        handle.abort();
+        fs::remove_file(db_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qq_validation_response_is_signed() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env mutex");
+        let _env = ScopedEnvRestore::apply(&[("DAWN_QQ_BOT_CALLBACK_SECRET", Some("qq-secret"))]);
+        let (base_url, handle, _state, db_path) = spawn_test_server().await?;
+        let client = Client::new();
+        let body = serde_json::to_string(&json!({
+            "op": 13,
+            "d": {
+                "plain_token": "plain-token-123",
+                "event_ts": "1725442346"
+            }
+        }))?;
+        let timestamp = "1725442346";
+        let callback_signature = qq_callback_signature("qq-secret", timestamp, &body)?;
+        let response = client
+            .post(format!("{base_url}/api/gateway/ingress/qq/events"))
+            .header("content-type", "application/json")
+            .header("X-Signature-Timestamp", timestamp)
+            .header("X-Signature-Ed25519", callback_signature)
+            .body(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let response_body: Value = response.json().await?;
+        assert_eq!(response_body["plain_token"], "plain-token-123");
+        let signature_hex = response_body["signature"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing qq validation signature"))?;
+        let signature_bytes = hex::decode(signature_hex)?;
+        let signature_bytes: [u8; 64] = signature_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid signature length"))?;
+        let signature = Signature::from_bytes(&signature_bytes);
+        let verifying_key = qq_verifying_key_from_secret("qq-secret")?;
+        verifying_key.verify(b"1725442346plain-token-123", &signature)?;
         handle.abort();
         fs::remove_file(db_path).ok();
         Ok(())
@@ -4479,19 +5776,183 @@ mod tests {
             ),
             "/help"
         );
-        assert_eq!(
-            normalize_ingress_command_text("qq", "<@!botid>"),
-            "/help"
-        );
+        assert_eq!(normalize_ingress_command_text("qq", "<@!botid>"), "/help");
+    }
+
+    #[test]
+    fn default_model_reply_only_handles_clear_conversation() {
+        assert!(should_attempt_default_model_reply("你是谁"));
+        assert!(should_attempt_default_model_reply("hello"));
+        assert!(should_attempt_default_model_reply("What can you do?"));
+
+        assert!(!should_attempt_default_model_reply(
+            "Book train to Shanghai"
+        ));
+        assert!(!should_attempt_default_model_reply("打开浏览器，搜索抖音"));
+        assert!(!should_attempt_default_model_reply(
+            "BlueBubbles reaction received for message-guid-123"
+        ));
     }
 
     #[test]
     fn normalizes_skills_search_query_prefixes() {
         assert_eq!(parse_skills_query(""), None);
         assert_eq!(parse_skills_query("search   "), None);
-        assert_eq!(parse_skills_query("search echo skill"), Some("echo skill".to_string()));
-        assert_eq!(parse_skills_query("find travel"), Some("travel".to_string()));
+        assert_eq!(
+            parse_skills_query("search echo skill"),
+            Some("echo skill".to_string())
+        );
+        assert_eq!(
+            parse_skills_query("find travel"),
+            Some("travel".to_string())
+        );
         assert_eq!(parse_skills_query("echo"), Some("echo".to_string()));
+    }
+
+    #[test]
+    fn model_provider_candidates_keep_live_fallbacks_after_defaults() {
+        let defaults = vec!["openai".to_string(), "openai_codex".to_string()];
+        let candidates = model_provider_candidates(&defaults);
+
+        assert_eq!(candidates.first(), Some(&"openai"));
+        assert_eq!(candidates.get(1), Some(&"openai_codex"));
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|provider| **provider == "openai_codex")
+                .count(),
+            1
+        );
+        assert!(candidates.contains(&"ollama"));
+    }
+
+    #[test]
+    fn renders_experience_context_without_evidence_payload() {
+        let now = unix_timestamp_ms();
+        let context = render_experience_context(&[AgentExperienceRecord {
+            experience_id: Uuid::new_v4(),
+            source: "chat_ingress:telegram".to_string(),
+            scope: "chat".to_string(),
+            task_kind: "conversation".to_string(),
+            input_summary: "用户原始消息不应进入提示".to_string(),
+            action_summary: "模型回复正文不应进入提示".to_string(),
+            outcome: "success".to_string(),
+            lesson: "普通聊天应优先回复，不应误创建任务".to_string(),
+            reusable_hint: Some("检查可用对话模型和 linkedTaskId".to_string()),
+            evidence: json!({"rawPayload": "secret-value"}),
+            tags: vec!["telegram".to_string(), "model-fallback".to_string()],
+            risk_level: "low".to_string(),
+            related_task_id: None,
+            related_ingress_id: None,
+            created_by: "test".to_string(),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        }])
+        .expect("experience context should render");
+
+        assert!(context.contains("普通聊天应优先回复"));
+        assert!(context.contains("检查可用对话模型"));
+        assert!(!context.contains("secret-value"));
+        assert!(!context.contains("用户原始消息"));
+        assert!(!context.contains("模型回复正文"));
+    }
+
+    #[test]
+    fn model_failure_reply_is_short_and_user_safe() {
+        let error = anyhow::anyhow!(
+            "OpenAI Codex connector request failed with status 1: {{\"stderr\":\"{}\"}}",
+            "x".repeat(5000)
+        );
+        let reply = render_model_failure_reply(&error);
+
+        assert!(reply.contains("模型回复失败"));
+        assert!(reply.contains("普通聊天没有被转成任务"));
+        assert!(reply.chars().count() < 800);
+        assert!(!reply.contains(&"x".repeat(1000)));
+    }
+
+    #[test]
+    fn parses_desktop_control_action_intents() {
+        assert_eq!(
+            parse_local_action_intent("看一下屏幕"),
+            Some(LocalActionIntent::DesktopSnapshot {
+                include_screenshot: true
+            })
+        );
+        assert_eq!(
+            parse_local_action_intent("鼠标位置"),
+            Some(LocalActionIntent::DesktopMousePosition)
+        );
+        assert_eq!(
+            parse_local_action_intent("移动鼠标到 400,300"),
+            Some(LocalActionIntent::DesktopMouseMove { x: 400, y: 300 })
+        );
+        assert_eq!(
+            parse_local_action_intent("右键点击 -20 300"),
+            Some(LocalActionIntent::DesktopMouseClick {
+                x: Some(-20),
+                y: Some(300),
+                button: "right".to_string(),
+                double_click: false,
+            })
+        );
+        assert_eq!(
+            parse_local_action_intent("双击当前位置"),
+            Some(LocalActionIntent::DesktopMouseClick {
+                x: None,
+                y: None,
+                button: "left".to_string(),
+                double_click: true,
+            })
+        );
+        assert_eq!(parse_local_action_intent("点击确定"), None);
+    }
+
+    #[test]
+    fn parses_skill_selector_with_json_arguments() {
+        let parsed = parse_skill_selector(
+            r#"qgis.render.exportMap {"projectId":"demo-map","draftId":"draft-1"}"#,
+        )
+        .expect("skill selector should parse");
+
+        assert_eq!(parsed.skill_id, "qgis.render.exportMap");
+        assert_eq!(parsed.version, None);
+        assert_eq!(
+            parsed.arguments.as_deref(),
+            Some(r#"{"projectId":"demo-map","draftId":"draft-1"}"#)
+        );
+    }
+
+    #[test]
+    fn builds_qgis_native_instruction_from_ingress_record() {
+        let record = ChatIngressEventRecord {
+            ingress_id: Uuid::new_v4(),
+            platform: "telegram".to_string(),
+            event_type: "telegram.message".to_string(),
+            chat_id: Some("123".to_string()),
+            sender_id: Some("456".to_string()),
+            sender_display: Some("alice".to_string()),
+            text: "/skill qgis.render.exportMap".to_string(),
+            raw_payload: json!({}),
+            linked_task_id: None,
+            reply_text: None,
+            status: ChatIngressStatus::Received,
+            error: None,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        };
+
+        let instruction = build_qgis_native_instruction(
+            "telegram",
+            &record,
+            "qgis.render.exportMap",
+            r#"{"projectId":"demo-map","draftId":"draft-1","outputKinds":["image"]}"#,
+        )
+        .expect("native instruction should be built");
+        assert!(instruction.starts_with("native:"));
+        assert!(instruction.contains("\"skillId\":\"qgis.render.exportMap\""));
+        assert!(instruction.contains("\"projectId\":\"demo-map\""));
+        assert!(instruction.contains("\"actor\":\"telegram:456\""));
     }
 
     #[test]

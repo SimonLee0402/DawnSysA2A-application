@@ -1536,9 +1536,9 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             target: "telegram",
             label: "Telegram Webhook",
             region: "global",
-            integration_mode: "secret_path_webhook",
+            integration_mode: "official_header_or_secret_path_webhook",
             endpoint: "/api/gateway/ingress/telegram/webhook/{secret}",
-            note: "Inbound Telegram task creation path.",
+            note: "Inbound Telegram task creation path. The same secret is accepted in the official X-Telegram-Bot-Api-Secret-Token header or the legacy path segment.",
             env_hints: vec!["DAWN_TELEGRAM_WEBHOOK_SECRET"],
             env_requirement_groups: vec![vec!["DAWN_TELEGRAM_WEBHOOK_SECRET"]],
         }),
@@ -1547,43 +1547,67 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             target: "feishu",
             label: "Feishu Events",
             region: "china",
-            integration_mode: "challenge_callback",
+            integration_mode: "lark_signed_event_callback",
             endpoint: "/api/gateway/ingress/feishu/events",
-            note: "Inbound Feishu event challenge and message route.",
-            env_hints: vec!["No secret required for basic challenge mode"],
-            env_requirement_groups: vec![],
+            note: "Inbound Feishu event challenge and message route with X-Lark signature verification.",
+            env_hints: vec![
+                "FEISHU_EVENT_ENCRYPT_KEY or DAWN_FEISHU_EVENT_ENCRYPT_KEY",
+                "optional: FEISHU_VERIFICATION_TOKEN or DAWN_FEISHU_VERIFICATION_TOKEN",
+            ],
+            env_requirement_groups: vec![
+                vec!["FEISHU_EVENT_ENCRYPT_KEY"],
+                vec!["DAWN_FEISHU_EVENT_ENCRYPT_KEY"],
+            ],
         }),
         ("ingress", "dingtalk") => Some(SetupTargetProfile {
             surface: "ingress",
             target: "dingtalk",
             label: "DingTalk Events",
             region: "china",
-            integration_mode: "callback_token",
+            integration_mode: "signed_encrypted_callback",
             endpoint: "/api/gateway/ingress/dingtalk/events",
-            note: "Inbound DingTalk task launch route.",
-            env_hints: vec!["DAWN_DINGTALK_CALLBACK_TOKEN"],
-            env_requirement_groups: vec![vec!["DAWN_DINGTALK_CALLBACK_TOKEN"]],
+            note: "Inbound DingTalk task launch route with token signature verification and AES callback encryption.",
+            env_hints: vec![
+                "DAWN_DINGTALK_CALLBACK_TOKEN or DINGTALK_CALLBACK_TOKEN",
+                "DAWN_DINGTALK_ENCODING_AES_KEY or DINGTALK_ENCODING_AES_KEY",
+            ],
+            env_requirement_groups: vec![
+                vec![
+                    "DAWN_DINGTALK_CALLBACK_TOKEN",
+                    "DAWN_DINGTALK_ENCODING_AES_KEY",
+                ],
+                vec!["DINGTALK_CALLBACK_TOKEN", "DINGTALK_ENCODING_AES_KEY"],
+            ],
         }),
         ("ingress", "wecom") => Some(SetupTargetProfile {
             surface: "ingress",
             target: "wecom",
             label: "WeCom Events",
             region: "china",
-            integration_mode: "callback_token",
+            integration_mode: "signed_encrypted_callback",
             endpoint: "/api/gateway/ingress/wecom/events",
-            note: "Inbound enterprise WeCom route.",
-            env_hints: vec!["DAWN_WECOM_CALLBACK_TOKEN"],
-            env_requirement_groups: vec![vec!["DAWN_WECOM_CALLBACK_TOKEN"]],
+            note: "Inbound enterprise WeCom route with msg_signature verification and EncodingAESKey decryption.",
+            env_hints: vec![
+                "DAWN_WECOM_CALLBACK_TOKEN or WECOM_CALLBACK_TOKEN",
+                "DAWN_WECOM_ENCODING_AES_KEY or WECOM_ENCODING_AES_KEY",
+            ],
+            env_requirement_groups: vec![
+                vec!["DAWN_WECOM_CALLBACK_TOKEN", "DAWN_WECOM_ENCODING_AES_KEY"],
+                vec!["WECOM_CALLBACK_TOKEN", "WECOM_ENCODING_AES_KEY"],
+            ],
         }),
         ("ingress", "wechat_official_account") => Some(SetupTargetProfile {
             surface: "ingress",
             target: "wechat_official_account",
             label: "WeChat Official Account Events",
             region: "china",
-            integration_mode: "token_verification",
+            integration_mode: "token_signature_with_optional_aes",
             endpoint: "/api/gateway/ingress/wechat-official-account/events",
-            note: "Inbound WeChat OA verification and XML message route.",
-            env_hints: vec!["DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"],
+            note: "Inbound WeChat OA verification and XML message route. Plaintext token signatures are supported; safe mode additionally uses EncodingAESKey.",
+            env_hints: vec![
+                "DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN",
+                "optional for safe mode: WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY or DAWN_WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY",
+            ],
             env_requirement_groups: vec![vec!["DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"]],
         }),
         ("ingress", "qq") => Some(SetupTargetProfile {
@@ -1591,11 +1615,14 @@ fn setup_target_profile(surface: &str, target: &str) -> Option<SetupTargetProfil
             target: "qq",
             label: "QQ Bot Events",
             region: "china",
-            integration_mode: "callback_secret",
+            integration_mode: "ed25519_signed_callback",
             endpoint: "/api/gateway/ingress/qq/events",
-            note: "Inbound QQ bot event route.",
-            env_hints: vec!["DAWN_QQ_BOT_CALLBACK_SECRET"],
-            env_requirement_groups: vec![vec!["DAWN_QQ_BOT_CALLBACK_SECRET"]],
+            note: "Inbound QQ bot event route with X-Signature-Ed25519 validation and signed URL validation responses.",
+            env_hints: vec!["DAWN_QQ_BOT_CALLBACK_SECRET or QQ_BOT_CLIENT_SECRET"],
+            env_requirement_groups: vec![
+                vec!["DAWN_QQ_BOT_CALLBACK_SECRET"],
+                vec!["QQ_BOT_CLIENT_SECRET"],
+            ],
         }),
         ("ingress", "signal") => Some(SetupTargetProfile {
             surface: "ingress",
@@ -2367,8 +2394,7 @@ fn chat_connector_action_hint(platform: &str) -> String {
                 .to_string()
         }
         "feishu" => {
-            "Set FEISHU_BOT_WEBHOOK_URL, then send `帮助` or `@机器人 /help` in Feishu."
-                .to_string()
+            "Set FEISHU_BOT_WEBHOOK_URL, then send `帮助` or `@机器人 /help` in Feishu.".to_string()
         }
         "dingtalk" => {
             "Set DINGTALK_BOT_WEBHOOK_URL, then test with `帮助` or `@机器人 /help` in DingTalk."
@@ -2401,28 +2427,23 @@ fn chat_connector_action_hint(platform: &str) -> String {
 fn ingress_route_action_hint(platform: &str) -> String {
     match platform {
         "telegram" => {
-            "Set DAWN_TELEGRAM_WEBHOOK_SECRET or enable polling, then send /help to confirm ingress."
-                .to_string()
+            "Set DAWN_TELEGRAM_WEBHOOK_SECRET and register it as Telegram's secret_token, then send /help to confirm ingress.".to_string()
         }
         "feishu" => {
-            "Point the Feishu event callback at /api/gateway/ingress/feishu/events, then send `帮助`."
-                .to_string()
+            "Set FEISHU_EVENT_ENCRYPT_KEY or DAWN_FEISHU_EVENT_ENCRYPT_KEY, point the callback at /api/gateway/ingress/feishu/events, then send `帮助`.".to_string()
         }
         "dingtalk" => {
-            "Set DAWN_DINGTALK_CALLBACK_TOKEN, wire the DingTalk callback URL, then send `帮助`."
-                .to_string()
+            "Set the DingTalk callback token and EncodingAESKey, wire the callback URL, then send `帮助`.".to_string()
         }
         "wecom" => {
-            "Set DAWN_WECOM_CALLBACK_TOKEN, wire the WeCom callback URL, then send `帮助`."
-                .to_string()
+            "Set the WeCom callback token and EncodingAESKey, wire the callback URL, then send `帮助`.".to_string()
         }
         "wechat_official_account" => {
             "Set DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN, complete the WeChat callback verification, then send `帮助`."
                 .to_string()
         }
         "qq" => {
-            "Set DAWN_QQ_BOT_CALLBACK_SECRET, wire the QQ bot callback, then send `帮助`."
-                .to_string()
+            "Set DAWN_QQ_BOT_CALLBACK_SECRET or reuse QQ_BOT_CLIENT_SECRET, wire the QQ bot callback, then send `帮助`.".to_string()
         }
         "signal" => {
             "Set DAWN_SIGNAL_CALLBACK_SECRET, expose the Signal callback URL, then send /help."
@@ -2517,6 +2538,27 @@ fn has_bluebubbles_account_configuration() -> bool {
     env_var_present("BLUEBUBBLES_SERVER_URL")
         || env_var_present("BLUEBUBBLES_SEND_MESSAGE_URL")
         || env_var_present("DAWN_BLUEBUBBLES_ACCOUNTS_JSON")
+}
+
+fn has_feishu_ingress_signature_configuration() -> bool {
+    any_env_var_present(&["FEISHU_EVENT_ENCRYPT_KEY", "DAWN_FEISHU_EVENT_ENCRYPT_KEY"])
+}
+
+fn has_dingtalk_ingress_signature_configuration() -> bool {
+    any_env_var_present(&["DAWN_DINGTALK_CALLBACK_TOKEN", "DINGTALK_CALLBACK_TOKEN"])
+        && any_env_var_present(&[
+            "DAWN_DINGTALK_ENCODING_AES_KEY",
+            "DINGTALK_ENCODING_AES_KEY",
+        ])
+}
+
+fn has_wecom_ingress_signature_configuration() -> bool {
+    any_env_var_present(&["DAWN_WECOM_CALLBACK_TOKEN", "WECOM_CALLBACK_TOKEN"])
+        && any_env_var_present(&["DAWN_WECOM_ENCODING_AES_KEY", "WECOM_ENCODING_AES_KEY"])
+}
+
+fn has_qq_ingress_signature_configuration() -> bool {
+    any_env_var_present(&["DAWN_QQ_BOT_CALLBACK_SECRET", "QQ_BOT_CLIENT_SECRET"])
 }
 
 fn has_bedrock_configuration() -> bool {
@@ -2729,11 +2771,11 @@ fn ingress_target_for_chat_platform(platform: &str) -> Option<&'static str> {
 fn is_ingress_platform_configured(platform: &str) -> bool {
     match platform {
         "telegram" => env_var_present("DAWN_TELEGRAM_WEBHOOK_SECRET"),
-        "feishu" => true,
-        "dingtalk" => env_var_present("DAWN_DINGTALK_CALLBACK_TOKEN"),
-        "wecom" => env_var_present("DAWN_WECOM_CALLBACK_TOKEN"),
+        "feishu" => has_feishu_ingress_signature_configuration(),
+        "dingtalk" => has_dingtalk_ingress_signature_configuration(),
+        "wecom" => has_wecom_ingress_signature_configuration(),
         "wechat_official_account" => env_var_present("DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN"),
-        "qq" => env_var_present("DAWN_QQ_BOT_CALLBACK_SECRET"),
+        "qq" => has_qq_ingress_signature_configuration(),
         "signal" => env_var_present("DAWN_SIGNAL_CALLBACK_SECRET"),
         "bluebubbles" => env_var_present("DAWN_BLUEBUBBLES_CALLBACK_SECRET"),
         _ => false,
@@ -3873,7 +3915,10 @@ mod tests {
             .find(|item| item.key == "default_ingress_paths")
             .expect("ingress readiness item");
         assert_eq!(ingress_item.surface.as_deref(), Some("ingress"));
-        assert_eq!(ingress_item.target.as_deref(), Some("wechat_official_account"));
+        assert_eq!(
+            ingress_item.target.as_deref(),
+            Some("wechat_official_account")
+        );
         assert!(
             ingress_item
                 .action
@@ -4018,7 +4063,14 @@ mod tests {
         let create_payload = response_json(create_response).await?;
         assert_eq!(create_payload["receipt"]["surface"], "ingress");
         assert_eq!(create_payload["receipt"]["target"], "feishu");
-        assert_eq!(create_payload["receipt"]["status"], "ready");
+        assert_eq!(create_payload["receipt"]["status"], "action_required");
+        assert!(
+            create_payload["receipt"]["missingEnvKeys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "FEISHU_EVENT_ENCRYPT_KEY")
+        );
 
         let list_response = app
             .clone()

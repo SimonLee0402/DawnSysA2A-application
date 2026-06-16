@@ -1583,17 +1583,26 @@ pub async fn invoke_remote_agent_card(
         "parentTaskId": request.parent_task_id,
         "instruction": request.instruction
     });
-    let create_url = remote_task_create_url(&card.card.url);
-    let client = Client::new();
+    let create_url = crate::security::validate_public_http_url(
+        &remote_task_create_url(&card.card.url),
+        "remote task URL",
+    )?;
+    let create_url_display = create_url.to_string();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(
+            request.timeout_seconds.unwrap_or(30).max(1),
+        ))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let response = client
-        .post(&create_url)
+        .post(create_url)
         .json(&remote_task_request)
         .send()
         .await
         .with_context(|| {
             format!(
                 "failed to invoke remote agent card {} at {}",
-                card.card_id, create_url
+                card.card_id, create_url_display
             )
         })?;
     let status = response.status();
@@ -1602,7 +1611,9 @@ pub async fn invoke_remote_agent_card(
         Value::Null
     } else {
         serde_json::from_str::<Value>(&raw_body).with_context(|| {
-            format!("remote agent invocation at {create_url} returned non-JSON body: {raw_body}")
+            format!(
+                "remote agent invocation at {create_url_display} returned non-JSON body: {raw_body}"
+            )
         })?
     };
 
@@ -1704,10 +1715,17 @@ async fn poll_remote_agent_task(
     timeout_seconds: u64,
     poll_interval_ms: u64,
 ) -> anyhow::Result<RemoteAgentInvocationRecord> {
-    let detail_url = remote_task_detail_url(remote_agent_url, remote_task_id);
+    let detail_url = crate::security::validate_public_http_url(
+        &remote_task_detail_url(remote_agent_url, remote_task_id),
+        "remote task detail URL",
+    )?;
+    let detail_url_display = detail_url.to_string();
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
     let poll_interval = Duration::from_millis(poll_interval_ms.max(100));
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds.max(1)))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
 
     loop {
         if Instant::now() > deadline {
@@ -1722,7 +1740,7 @@ async fn poll_remote_agent_task(
         }
 
         let response = client
-            .get(&detail_url)
+            .get(detail_url.clone())
             .send()
             .await
             .with_context(|| format!("failed polling remote task {}", remote_task_id))?;
@@ -1732,7 +1750,9 @@ async fn poll_remote_agent_task(
             Value::Null
         } else {
             serde_json::from_str::<Value>(&raw_body).with_context(|| {
-                format!("remote task poll at {detail_url} returned non-JSON body: {raw_body}")
+                format!(
+                    "remote task poll at {detail_url_display} returned non-JSON body: {raw_body}"
+                )
             })?
         };
 
@@ -2344,7 +2364,22 @@ async fn attempt_settlement_receipt_delivery(
             };
         }
     };
-    let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
+    let target_url =
+        match crate::security::validate_public_http_url(&record.target_url, "receipt target URL") {
+            Ok(url) => url,
+            Err(error) => {
+                return DeliveryAttemptResult::PermanentFailure {
+                    http_status: None,
+                    error: format!("invalid settlement receipt target URL: {error}"),
+                    acknowledgment: None,
+                };
+            }
+        };
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             return DeliveryAttemptResult::PermanentFailure {
@@ -2355,7 +2390,7 @@ async fn attempt_settlement_receipt_delivery(
         }
     };
     match client
-        .post(&record.target_url)
+        .post(target_url)
         .json(&record.payload_json)
         .send()
         .await
@@ -2448,7 +2483,24 @@ async fn attempt_settlement_receipt_delivery(
 }
 
 async fn attempt_quote_state_delivery(record: &DeliveryOutboxRecord) -> DeliveryAttemptResult {
-    let client = match Client::builder().timeout(Duration::from_secs(5)).build() {
+    let target_url = match crate::security::validate_public_http_url(
+        &record.target_url,
+        "quote-state target URL",
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return DeliveryAttemptResult::PermanentFailure {
+                http_status: None,
+                error: format!("invalid quote-state target URL: {error}"),
+                acknowledgment: None,
+            };
+        }
+    };
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             return DeliveryAttemptResult::PermanentFailure {
@@ -2459,7 +2511,7 @@ async fn attempt_quote_state_delivery(record: &DeliveryOutboxRecord) -> Delivery
         }
     };
     match client
-        .post(&record.target_url)
+        .post(target_url)
         .json(&record.payload_json)
         .send()
         .await
@@ -2559,30 +2611,44 @@ async fn apply_settlement_receipt_delivery_outcome(
 }
 
 async fn fetch_remote_agent_card(raw_url: &str) -> anyhow::Result<(String, AgentCard)> {
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let mut last_error: Option<anyhow::Error> = None;
     for candidate in discovery_candidates(raw_url) {
-        match client.get(&candidate).send().await {
+        let candidate_url =
+            match crate::security::validate_public_http_url(&candidate, "agent card URL") {
+                Ok(url) => url,
+                Err(error) => {
+                    last_error = Some(anyhow!("agent card URL {candidate} was rejected: {error}"));
+                    continue;
+                }
+            };
+        let candidate_display = candidate_url.to_string();
+        match client.get(candidate_url).send().await {
             Ok(response) => {
                 let status = response.status();
                 let body = response.text().await?;
                 if !status.is_success() {
                     last_error = Some(anyhow!(
-                        "agent card fetch from {candidate} failed with status {status}: {body}"
+                        "agent card fetch from {candidate_display} failed with status {status}: {body}"
                     ));
                     continue;
                 }
                 match serde_json::from_str::<AgentCard>(&body) {
-                    Ok(card) => return Ok((candidate, card)),
+                    Ok(card) => return Ok((candidate_display, card)),
                     Err(error) => {
                         last_error = Some(anyhow!(
-                            "agent card payload from {candidate} was invalid JSON for AgentCard: {error}"
+                            "agent card payload from {candidate_display} was invalid JSON for AgentCard: {error}"
                         ));
                     }
                 }
             }
             Err(error) => {
-                last_error = Some(anyhow!("agent card fetch from {candidate} failed: {error}"));
+                last_error = Some(anyhow!(
+                    "agent card fetch from {candidate_display} failed: {error}"
+                ));
             }
         }
     }
@@ -5128,9 +5194,20 @@ fn default_quote_ttl_seconds() -> u64 {
 fn quote_signing_key() -> anyhow::Result<SigningKey> {
     let bytes = match std::env::var("DAWN_QUOTE_SIGNING_SEED_HEX") {
         Ok(value) => decode_fixed_hex::<32>(&value, "quote signing seed")?,
-        Err(_) => [41_u8; 32],
+        Err(_) if allow_insecure_dev_quote_key() => [41_u8; 32],
+        Err(_) => anyhow::bail!(
+            "DAWN_QUOTE_SIGNING_SEED_HEX must be set before issuing signed quotes, quote states, receipts, or acknowledgments"
+        ),
     };
     Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn allow_insecure_dev_quote_key() -> bool {
+    cfg!(test)
+        || std::env::var("DAWN_ALLOW_INSECURE_DEV_QUOTE_KEY")
+            .ok()
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
 }
 
 fn quote_issuer_did_from_public_key_hex(public_key_hex: &str) -> anyhow::Result<String> {
@@ -5541,21 +5618,23 @@ async fn fetch_remote_quote_state(
     let Some(state_url) = resolve_quote_state_url(card, &terms, quote_id) else {
         return Ok(None);
     };
+    let state_url = crate::security::validate_public_http_url(&state_url, "quote state URL")?;
+    let state_url_display = state_url.to_string();
 
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout_seconds.max(1)))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client
-        .get(&state_url)
-        .send()
-        .await
-        .with_context(|| format!("failed requesting remote quote state at {state_url}"))?;
+    let response =
+        client.get(state_url).send().await.with_context(|| {
+            format!("failed requesting remote quote state at {state_url_display}")
+        })?;
     let status = response.status();
     let raw_body = response.text().await?;
     if !status.is_success() {
         anyhow::bail!(
             "remote quote state endpoint {} returned status {}: {}",
-            state_url,
+            state_url_display,
             status,
             raw_body
         );
@@ -5564,7 +5643,7 @@ async fn fetch_remote_quote_state(
         Value::Null
     } else {
         serde_json::from_str::<Value>(&raw_body).with_context(|| {
-            format!("remote quote state endpoint {state_url} returned non-JSON body")
+            format!("remote quote state endpoint {state_url_display} returned non-JSON body")
         })?
     };
     parse_remote_quote_state(card, quote_id, raw_value).map(Some)
@@ -5767,11 +5846,8 @@ fn normalize_quote_state_inbox_url(raw: Option<&str>) -> anyhow::Result<Option<S
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let url = Url::parse(trimmed).context("stateInboxUrl must be an absolute http(s) URL")?;
-    match url.scheme() {
-        "http" | "https" => Ok(Some(trimmed.trim_end_matches('/').to_string())),
-        scheme => anyhow::bail!("stateInboxUrl must use http or https, got '{scheme}'"),
-    }
+    let url = crate::security::validate_public_http_url(trimmed, "stateInboxUrl")?;
+    Ok(Some(url.as_str().trim_end_matches('/').to_string()))
 }
 
 fn quote_state_inbox_url() -> Option<String> {
@@ -6104,16 +6180,29 @@ async fn fetch_remote_settlement_quote(
         );
     };
 
+    let quote_url = match crate::security::validate_public_http_url(&quote_url, "quote URL") {
+        Ok(url) => url,
+        Err(error) if allow_metadata_fallback => {
+            let mut fallback = metadata_quote;
+            fallback.warning = Some(format!(
+                "remote quote URL was rejected and metadata quote was used instead: {error}"
+            ));
+            return Ok(fallback);
+        }
+        Err(error) => return Err(error).context("unsafe remote quote URL"),
+    };
+    let quote_url_display = quote_url.to_string();
     let method = terms
         .quote_method
         .clone()
         .unwrap_or_else(|| "GET".to_string());
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout_seconds.max(1)))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let response = if method == "POST" {
         client
-            .post(&quote_url)
+            .post(quote_url.clone())
             .json(&json!({
                 "cardId": card.card_id,
                 "requestedAmount": requested_amount,
@@ -6126,7 +6215,7 @@ async fn fetch_remote_settlement_quote(
             .await
     } else {
         client
-            .get(&quote_url)
+            .get(quote_url.clone())
             .query(&[
                 (
                     "requestedAmount",
@@ -6150,13 +6239,13 @@ async fn fetch_remote_settlement_quote(
             let mut fallback = metadata_quote;
             fallback.warning = Some(format!(
                 "remote quote fetch failed at {} and metadata quote was used instead: {}",
-                quote_url, error
+                quote_url_display, error
             ));
             return Ok(fallback);
         }
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("failed requesting remote settlement quote at {quote_url}")
+                format!("failed requesting remote settlement quote at {quote_url_display}")
             });
         }
     };
@@ -6168,13 +6257,13 @@ async fn fetch_remote_settlement_quote(
             let mut fallback = metadata_quote;
             fallback.warning = Some(format!(
                 "remote quote endpoint {} returned status {}; metadata quote was used instead",
-                quote_url, status
+                quote_url_display, status
             ));
             return Ok(fallback);
         }
         anyhow::bail!(
             "remote quote endpoint {} returned status {}: {}",
-            quote_url,
+            quote_url_display,
             status,
             raw_body
         );
@@ -6183,10 +6272,11 @@ async fn fetch_remote_settlement_quote(
     let raw_value = if raw_body.trim().is_empty() {
         Value::Null
     } else {
-        serde_json::from_str::<Value>(&raw_body)
-            .with_context(|| format!("remote quote endpoint {quote_url} returned non-JSON body"))?
+        serde_json::from_str::<Value>(&raw_body).with_context(|| {
+            format!("remote quote endpoint {quote_url_display} returned non-JSON body")
+        })?
     };
-    parse_remote_settlement_quote(card, &quote_url, &raw_value, metadata_quote)
+    parse_remote_settlement_quote(card, &quote_url_display, &raw_value, metadata_quote)
 }
 
 fn parse_remote_settlement_quote(

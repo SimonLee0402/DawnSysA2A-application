@@ -136,7 +136,7 @@ pub async fn request_payment_authorization(
         description: req.description.clone(),
         status: PaymentStatus::PendingPhysicalAuth,
         verification_message: "waiting for hardware approval".to_string(),
-        mcu_public_did: None,
+        mcu_public_did: req.mcu_public_did.clone(),
         created_at_unix_ms: unix_timestamp_ms(),
         updated_at_unix_ms: unix_timestamp_ms(),
     };
@@ -299,7 +299,9 @@ async fn process_signed_payment_authorization(
         &payment.description,
     );
     let resume_task_id = payment.task_id;
-    let verification_message = match verify_signature(&public_did, &signature, &payload) {
+    let verification_message = match authorize_mcu_did(&payment, &public_did)
+        .and_then(|()| verify_signature(&public_did, &signature, &payload))
+    {
         Ok(()) => {
             payment.status = PaymentStatus::Authorized;
             payment.verification_message =
@@ -415,6 +417,46 @@ fn verify_signature(public_did: &str, signature_hex: &str, payload: &str) -> any
 
     verifying_key.verify(payload.as_bytes(), &signature)?;
     Ok(())
+}
+
+fn authorize_mcu_did(payment: &PaymentRecord, public_did: &str) -> anyhow::Result<()> {
+    if let Some(expected) = payment.mcu_public_did.as_deref() {
+        if expected.eq_ignore_ascii_case(public_did) {
+            return Ok(());
+        }
+        anyhow::bail!("mcuPublicDid does not match the payment's expected hardware signer");
+    }
+
+    if trusted_mcu_dids().any(|trusted| trusted.eq_ignore_ascii_case(public_did)) {
+        return Ok(());
+    }
+
+    if allow_untrusted_mcu_for_development() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "mcuPublicDid is not trusted; set the expected mcuPublicDid when creating the payment or configure DAWN_TRUSTED_MCU_DIDS"
+    )
+}
+
+fn trusted_mcu_dids() -> impl Iterator<Item = String> {
+    std::env::var("DAWN_TRUSTED_MCU_DIDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn allow_untrusted_mcu_for_development() -> bool {
+    cfg!(test)
+        || std::env::var("DAWN_AP2_ALLOW_UNTRUSTED_MCU")
+            .ok()
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
 }
 
 async fn resolve_approval_request(

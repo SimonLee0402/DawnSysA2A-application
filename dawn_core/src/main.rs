@@ -1,4 +1,4 @@
-use axum::{Router, routing::get};
+use axum::{Router, middleware, routing::get};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -19,7 +19,9 @@ mod identity;
 mod marketplace;
 mod node_attestation;
 mod policy;
+mod qgis;
 mod sandbox;
+mod security;
 mod skill_registry;
 
 #[tokio::main]
@@ -42,11 +44,15 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_app(state);
 
-    // Define the address to run on
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
+    let bind_addr = security::bind_addr_from_env();
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!("DawnCore listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -56,6 +62,11 @@ async fn health_check() -> &'static str {
 }
 
 pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
+    let protected_protocol_apis = Router::new()
+        .nest("/api/ap2", ap2::router())
+        .nest("/api/a2a", a2a::router())
+        .route_layer(middleware::from_fn(security::require_local_or_admin_token));
+
     Router::new()
         .route("/health", get(health_check))
         .nest("/app", control_ui::router())
@@ -75,8 +86,7 @@ pub fn build_app(state: std::sync::Arc<app_state::AppState>) -> Router {
         )
         .nest("/marketplace", marketplace::page_router())
         .nest("/api/gateway", gateway::router())
-        .nest("/api/ap2", ap2::router())
-        .nest("/api/a2a", a2a::router())
+        .merge(protected_protocol_apis)
         .with_state(state)
 }
 

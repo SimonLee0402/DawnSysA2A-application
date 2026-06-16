@@ -595,7 +595,10 @@ async fn build_federated_catalog(
         })
         .collect::<Vec<_>>();
     let mut snapshots = Vec::new();
-    let client = Client::builder().timeout(Duration::from_secs(8)).build()?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
 
     for peer in state.list_marketplace_peers().await? {
         let mut peer_for_snapshot = peer.clone();
@@ -671,7 +674,7 @@ async fn fetch_peer_catalog(
     peer: &MarketplacePeerRecord,
     query: &CatalogQuery,
 ) -> anyhow::Result<MarketplaceCatalog> {
-    let mut url = Url::parse(&peer.catalog_url)
+    let mut url = crate::security::validate_public_http_url(&peer.catalog_url, "peer catalog url")
         .with_context(|| format!("invalid peer catalog url '{}'", peer.catalog_url))?;
     {
         let mut pairs = url.query_pairs_mut();
@@ -847,13 +850,8 @@ fn normalize_http_url(raw: &str, field_name: &str) -> anyhow::Result<String> {
     if trimmed.is_empty() {
         anyhow::bail!("{field_name} must not be empty");
     }
-    let url = Url::parse(trimmed)
-        .with_context(|| format!("{field_name} must be an absolute http(s) URL"))?;
-    match url.scheme() {
-        "http" | "https" => {}
-        scheme => anyhow::bail!("{field_name} must use http or https, got '{scheme}'"),
-    }
-    Ok(trimmed.trim_end_matches('/').to_string())
+    let url = crate::security::validate_public_http_url(trimmed, field_name)?;
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 fn default_peer_catalog_url(base_url: &str) -> String {

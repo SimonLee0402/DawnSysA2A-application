@@ -25,7 +25,7 @@ use crate::{
     connectors::{self, ChatDispatchRequest, OpenAIResponseRequest},
     control_plane,
     policy::{self, PolicyEffect},
-    sandbox, skill_registry,
+    qgis, sandbox, skill_registry,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -239,6 +239,12 @@ struct WasmInstructionBinding {
     function_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct NativeInstructionBinding {
+    skill_id: String,
+    envelope: qgis::QgisSkillInvocationEnvelope,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct OrchestrationPlan {
@@ -394,6 +400,7 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
         .await?;
 
     let orchestration_plan = parse_orchestration_plan(&task.instruction)?;
+    let native_binding = parse_native_instruction(&task.instruction)?;
     let wasm_binding = parse_wasm_instruction(&task.instruction)?;
 
     let sandbox_status = if let Some(plan) = orchestration_plan {
@@ -416,6 +423,52 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
         spawn_orchestration_resume(state.clone(), task_id);
 
         "task accepted; orchestration execution was queued".to_string()
+    } else if let Some(binding) = native_binding {
+        match skill_registry::find_skill(&state, &binding.skill_id, None).await? {
+            Some(skill) if skill_registry::is_native_builtin_skill(&skill) => {
+                match qgis::execute_native_skill_task(state.clone(), task_id, binding.envelope)
+                    .await
+                {
+                    Ok(detail) => detail,
+                    Err(error) => {
+                        let detail = format!("native skill execution failed: {error}");
+                        state
+                            .update_task(task_id, TaskStatus::Failed, &detail, None)
+                            .await?;
+                        state
+                            .record_task_event(task_id, "native_skill_execution_failed", &detail)
+                            .await?;
+                        detail
+                    }
+                }
+            }
+            Some(skill) => {
+                let detail = format!(
+                    "native instruction resolved to non-native skill {}@{}",
+                    skill.skill_id, skill.version
+                );
+                state
+                    .update_task(task_id, TaskStatus::Failed, &detail, None)
+                    .await?;
+                state
+                    .record_task_event(task_id, "native_skill_execution_failed", &detail)
+                    .await?;
+                detail
+            }
+            None => {
+                let detail = format!(
+                    "native instruction referenced unknown builtin skill {}",
+                    binding.skill_id
+                );
+                state
+                    .update_task(task_id, TaskStatus::Failed, &detail, None)
+                    .await?;
+                state
+                    .record_task_event(task_id, "native_skill_execution_failed", &detail)
+                    .await?;
+                detail
+            }
+        }
     } else if let Some(binding) = wasm_binding {
         match skill_registry::find_skill(&state, &binding.skill_id, binding.version.as_deref())
             .await?
@@ -618,6 +671,27 @@ fn parse_wasm_instruction(instruction: &str) -> anyhow::Result<Option<WasmInstru
         skill_id,
         version,
         function_name,
+    }))
+}
+
+fn parse_native_instruction(instruction: &str) -> anyhow::Result<Option<NativeInstructionBinding>> {
+    let Some(raw_binding) = instruction.strip_prefix("native:") else {
+        return Ok(None);
+    };
+    if raw_binding.trim().is_empty() {
+        anyhow::bail!("native instruction requires a JSON envelope");
+    }
+    let envelope: qgis::QgisSkillInvocationEnvelope = serde_json::from_str(raw_binding)
+        .map_err(|error| anyhow::anyhow!("invalid native instruction envelope: {error}"))?;
+    if !qgis::is_qgis_native_skill(&envelope.skill_id) {
+        anyhow::bail!(
+            "unsupported native instruction skill '{}'",
+            envelope.skill_id
+        );
+    }
+    Ok(Some(NativeInstructionBinding {
+        skill_id: envelope.skill_id.clone(),
+        envelope,
     }))
 }
 
@@ -1136,7 +1210,38 @@ fn task_event_to_message(event: &TaskEventRecord) -> A2aMessage {
 }
 
 fn build_task_artifacts(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2aArtifact> {
-    vec![A2aArtifact {
+    let mut qgis_artifacts = qgis::qgis_artifacts_from_events(events).unwrap_or_default();
+    qgis_artifacts.sort_by(|left, right| {
+        let left_rank = if left.name == "qgis-output.json" {
+            1
+        } else {
+            0
+        };
+        let right_rank = if right.name == "qgis-output.json" {
+            1
+        } else {
+            0
+        };
+        left_rank
+            .cmp(&right_rank)
+            .then_with(|| left.created_at_unix_ms.cmp(&right.created_at_unix_ms))
+    });
+    let mut artifacts = qgis_artifacts
+        .into_iter()
+        .map(|artifact| A2aArtifact {
+            name: artifact.name,
+            mime_type: artifact.mime_type,
+            parts: vec![A2aPart::Data {
+                data: json!({
+                    "storagePath": artifact.storage_path,
+                    "byteLen": artifact.byte_len,
+                    "createdAtUnixMs": artifact.created_at_unix_ms,
+                    "metadata": artifact.metadata,
+                }),
+            }],
+        })
+        .collect::<Vec<_>>();
+    artifacts.push(A2aArtifact {
         name: "task-summary".to_string(),
         mime_type: "application/json".to_string(),
         parts: vec![A2aPart::Data {
@@ -1148,7 +1253,8 @@ fn build_task_artifacts(task: &StoredTask, events: &[TaskEventRecord]) -> Vec<A2
                 "updatedAtUnixMs": task.updated_at_unix_ms,
             }),
         }],
-    }]
+    });
+    artifacts
 }
 
 fn build_task_updates(events: &[TaskEventRecord]) -> Vec<A2aTaskUpdate> {
@@ -1607,9 +1713,10 @@ mod tests {
         StoredTask, TaskEventRecord, TaskStatus, TemplateContext, WasmInstructionBinding,
         build_task_artifacts, build_task_messages, build_task_result, build_task_state,
         build_task_stream, build_task_updates, classify_task_stream_event, extract_text_from_value,
-        parse_orchestration_plan, parse_wasm_instruction, resolve_json_templates,
-        resolve_template_string, summarize_remote_status,
+        parse_native_instruction, parse_orchestration_plan, parse_wasm_instruction,
+        resolve_json_templates, resolve_template_string, summarize_remote_status,
     };
+    use crate::qgis;
     use uuid::Uuid;
 
     #[test]
@@ -1747,6 +1854,19 @@ mod tests {
                 function_name: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_native_qgis_instruction() {
+        let raw = r#"native:{"skillId":"qgis.render.exportMap","projectId":"demo-map","auth":{"actor":"alice","scopes":["qgis.render.export"]},"outputKinds":["image"]}"#;
+        let binding = parse_native_instruction(raw)
+            .expect("native instruction should parse")
+            .expect("instruction should be treated as native");
+
+        assert_eq!(binding.skill_id, "qgis.render.exportMap");
+        assert_eq!(binding.envelope.project_id, "demo-map");
+        assert_eq!(binding.envelope.auth.actor, "alice");
+        assert!(qgis::is_qgis_native_skill(&binding.skill_id));
     }
 
     #[test]

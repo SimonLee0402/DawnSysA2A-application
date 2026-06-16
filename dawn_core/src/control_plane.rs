@@ -1000,6 +1000,17 @@ fn requires_command_approval(command_type: &str, payload: &Value) -> bool {
         || command_type.starts_with("browser_")
         || command_type.starts_with("desktop_")
         || command_type.starts_with("system_")
+        || matches!(
+            command_type,
+            "process_snapshot"
+                | "list_directory"
+                | "directory_tree_preview"
+                | "read_file_preview"
+                | "tail_file_preview"
+                | "read_file_range"
+                | "find_paths"
+                | "grep_files"
+        )
         || payload
             .get("approvalRequired")
             .and_then(Value::as_bool)
@@ -1274,6 +1285,9 @@ mod tests {
         assert!(requires_command_approval("desktop_screenshot", &json!({})));
         assert!(requires_command_approval("system_lock", &json!({})));
         assert!(requires_command_approval("system_sleep", &json!({})));
+        assert!(requires_command_approval("read_file_range", &json!({})));
+        assert!(requires_command_approval("grep_files", &json!({})));
+        assert!(requires_command_approval("process_snapshot", &json!({})));
         assert!(requires_command_approval(
             "desktop_accessibility_snapshot",
             &json!({})

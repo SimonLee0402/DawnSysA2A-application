@@ -4738,6 +4738,53 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         ON task_events(task_id, created_at_unix_ms)
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS qgis_projects (
+            project_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            description TEXT,
+            owner_actor TEXT NOT NULL,
+            published_version_id TEXT,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS qgis_project_versions (
+            version_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            parent_version_id TEXT,
+            status TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_reason TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_qgis_project_versions_project_status_created_at
+        ON qgis_project_versions(project_id, status, created_at_unix_ms DESC)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS qgis_remote_connections (
+            connection_id TEXT PRIMARY KEY,
+            project_id TEXT,
+            display_name TEXT NOT NULL,
+            connection_kind TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            secret_ref TEXT,
+            created_by TEXT NOT NULL,
+            updated_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_qgis_remote_connections_project_kind_updated_at
+        ON qgis_remote_connections(project_id, connection_kind, updated_at_unix_ms DESC)
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS payments (
             transaction_id TEXT PRIMARY KEY,
             task_id TEXT,

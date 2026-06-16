@@ -865,22 +865,22 @@ fn channel_next_action_hint(
     }
     if is_default && supports_ingress {
         return Some(match platform {
-            "feishu" => {
-                "先确认群机器人 webhook 可达；随后直接发 `帮助` 或 `@机器人 /help`。".to_string()
-            }
-            "dingtalk" => {
-                "先补齐 callback token / 加签配置；随后直接发 `帮助` 或 `@机器人 /help`。"
+                "feishu" => {
+                    "先补齐 Feishu Event Encrypt Key 并确认回调签名通过；随后直接发 `帮助` 或 `@机器人 /help`。".to_string()
+                }
+                "dingtalk" => {
+                "先补齐 DingTalk callback token 和 EncodingAESKey；随后直接发 `帮助` 或 `@机器人 /help`。"
                     .to_string()
-            }
-            "wechat_official_account" => {
-                "先补齐公众号 callback token；随后直接发 `帮助` 或 `／skills`。".to_string()
-            }
-            "qq" => "先补齐 QQ callback secret；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
-            "wecom" => {
-                "先补齐企业微信 callback token；随后直接发 `帮助` 或 `@机器人 /help`。".to_string()
-            }
-            _ => "先完成 ingress 配置，再直接发送命令做 live 测试。".to_string(),
-        });
+                }
+                "wechat_official_account" => {
+                    "先补齐公众号 callback token；安全模式还要补齐 EncodingAESKey；随后直接发 `帮助` 或 `／skills`。".to_string()
+                }
+            "qq" => "先补齐 QQ callback secret 并通过 Ed25519 验签；随后直接发 `帮助` 或 `@机器人 /help`。".to_string(),
+                "wecom" => {
+                    "先补齐企业微信 callback token 和 EncodingAESKey；随后直接发 `帮助` 或 `@机器人 /help`。".to_string()
+                }
+                _ => "先完成 ingress 配置，再直接发送命令做 live 测试。".to_string(),
+            });
     }
     None
 }

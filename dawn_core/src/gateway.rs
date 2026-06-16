@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{Json, Router, extract::State, http::StatusCode, middleware, routing::get};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tracing::error;
 
 use crate::{
     agent_cards, app_state::AppState, approval_center, chat_ingress, connectors, control_plane,
-    end_user_approvals, evolution, identity, marketplace, policy, skill_registry,
+    end_user_approvals, evolution, identity, marketplace, policy, qgis, skill_registry,
 };
 
 #[derive(Debug, Serialize)]
@@ -31,9 +31,7 @@ struct GatewayCapabilities {
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/status", get(status))
-        .route("/capabilities", get(capabilities))
+    let protected = Router::new()
         .route("/policy", get(get_policy).put(update_policy))
         .route("/policy/distribution", get(get_policy_distribution))
         .route("/policy/signed", axum::routing::put(activate_signed_policy))
@@ -45,13 +43,22 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/approvals", approval_center::router())
         .nest("/control-plane", control_plane::router())
         .nest("/connectors", connectors::router())
-        .nest("/end-user", end_user_approvals::api_router())
         .nest("/evolution", evolution::router())
         .nest("/identity", identity::router())
-        .nest("/ingress", chat_ingress::router())
         .nest("/marketplace", marketplace::router())
         .nest("/agent-cards", agent_cards::router())
+        .nest("/qgis", qgis::router())
         .nest("/skills", skill_registry::router())
+        .route_layer(middleware::from_fn(
+            crate::security::require_local_or_admin_token,
+        ));
+
+    Router::new()
+        .route("/status", get(status))
+        .route("/capabilities", get(capabilities))
+        .nest("/end-user", end_user_approvals::api_router())
+        .nest("/ingress", chat_ingress::router())
+        .merge(protected)
 }
 
 async fn status() -> Json<GatewayStatus> {

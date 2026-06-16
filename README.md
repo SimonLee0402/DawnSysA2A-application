@@ -154,6 +154,64 @@ cargo test --manifest-path dawn_node/Cargo.toml
 - 健康检查: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 - Agent Card: [http://127.0.0.1:8000/.well-known/agent-card.json](http://127.0.0.1:8000/.well-known/agent-card.json)
 
+### 安全启动配置
+
+网关默认只监听 `127.0.0.1:8000`。如果确实需要让公网聊天平台回调进来，可以设置 `DAWN_GATEWAY_BIND=0.0.0.0:8000`，但同时必须给控制面配置 `DAWN_GATEWAY_ADMIN_TOKEN`。非本机访问受保护 API 时需要带：
+
+```powershell
+Authorization: Bearer <DAWN_GATEWAY_ADMIN_TOKEN>
+```
+
+或 `x-dawn-admin-token: <DAWN_GATEWAY_ADMIN_TOKEN>`。受保护范围包括 `/api/gateway` 下的控制面、连接器、Marketplace、skills、Agent Cards、审批接口，以及根路径 `/api/a2a`、`/api/ap2` 的任务和支付接口。公开保留的入口是健康检查、公开 Agent Card、终端用户审批页、Marketplace 页面，以及 `/api/gateway/ingress/...` 聊天平台 webhook。
+
+聊天 webhook 默认失败关闭：
+
+```powershell
+$env:DAWN_TELEGRAM_WEBHOOK_SECRET = "telegram-webhook-secret"
+$env:DAWN_SIGNAL_CALLBACK_SECRET = "signal-callback-secret"
+$env:DAWN_BLUEBUBBLES_CALLBACK_SECRET = "bluebubbles-callback-secret"
+$env:DAWN_WECHAT_OFFICIAL_ACCOUNT_TOKEN = "wechat-official-account-token"
+```
+
+生产环境暴露聊天平台 webhook 时，还应按平台启用正式签名/加密配置：
+
+```powershell
+$env:FEISHU_EVENT_ENCRYPT_KEY = "feishu-event-encrypt-key"
+$env:FEISHU_VERIFICATION_TOKEN = "optional-feishu-verification-token"
+
+$env:DAWN_DINGTALK_CALLBACK_TOKEN = "dingtalk-callback-token"
+$env:DAWN_DINGTALK_ENCODING_AES_KEY = "dingtalk-43-character-encoding-aes-key"
+
+$env:DAWN_WECOM_CALLBACK_TOKEN = "wecom-callback-token"
+$env:DAWN_WECOM_ENCODING_AES_KEY = "wecom-43-character-encoding-aes-key"
+
+$env:WECHAT_OFFICIAL_ACCOUNT_ENCODING_AES_KEY = "optional-wechat-safe-mode-encoding-aes-key"
+
+$env:DAWN_QQ_BOT_CALLBACK_SECRET = "qq-bot-secret"
+```
+
+签名规则：
+
+- Telegram: `DAWN_TELEGRAM_WEBHOOK_SECRET` 同时兼容旧的路径 secret，并支持官方 `X-Telegram-Bot-Api-Secret-Token` header。
+- Feishu: 校验 `X-Lark-Request-Timestamp`、`X-Lark-Request-Nonce`、`X-Lark-Signature`，并支持 `encrypt` 事件体解密。
+- DingTalk: 支持 callback token + `signature/timestamp/nonce` 校验和 AES 回调解密，密文回调返回加密 `success`。
+- WeCom: 支持 `msg_signature/timestamp/nonce` 校验、URL 验证 `echostr` 解密和消息体 `Encrypt` 解密。
+- WeChat Official Account: 明文模式校验 `signature/timestamp/nonce`；安全模式支持 `msg_signature` + `Encrypt` + `EncodingAESKey`。
+- QQ: 校验 `X-Signature-Ed25519` 和 `X-Signature-Timestamp`，URL validation 返回签名后的 `plain_token`。
+- Signal / BlueBubbles: 通过本地桥接回调路径 secret 保护。
+
+只在本地开发或受控内网测试时使用无验签兼容模式：
+
+```powershell
+$env:DAWN_ALLOW_UNAUTHENTICATED_INGRESS = "1"
+```
+
+远程 Marketplace、远程 Agent Card、远程报价和技能包下载默认只允许公网 `http/https` URL，并拒绝 localhost、私网、链路本地和云 metadata 地址。开发测试本机回环 URL 时可显式设置：
+
+```powershell
+$env:DAWN_ALLOW_LOCAL_OUTBOUND_URLS = "1"
+```
+
 ### 常用命令
 
 ```powershell

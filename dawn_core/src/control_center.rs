@@ -2347,8 +2347,9 @@ async fn dashboard() -> Html<&'static str> {
       const configuredChatCount = supportedChats.filter((platform) => readConfiguredConnector(configured, platform.platform)).length;
       const ingressSecretsCount = [
         ingressStatus?.telegramWebhookSecretConfigured,
-        ingressStatus?.dingtalkCallbackTokenConfigured,
-        ingressStatus?.wecomCallbackTokenConfigured,
+        ingressStatus?.feishuEventSignatureConfigured,
+        ingressStatus?.dingtalkCallbackTokenConfigured && ingressStatus?.dingtalkCallbackEncryptionConfigured,
+        ingressStatus?.wecomCallbackTokenConfigured && ingressStatus?.wecomCallbackEncryptionConfigured,
         ingressStatus?.wechatOfficialAccountTokenConfigured,
         ingressStatus?.qqBotCallbackSecretConfigured
       ].filter(Boolean).length;
@@ -2378,11 +2379,11 @@ async fn dashboard() -> Html<&'static str> {
           subtitle: "Inbound gateway route",
           active: Boolean({
             telegram: ingressStatus?.telegramWebhookSecretConfigured,
-            dingtalk: ingressStatus?.dingtalkCallbackTokenConfigured,
-            wecom: ingressStatus?.wecomCallbackTokenConfigured,
+            feishu: ingressStatus?.feishuEventSignatureConfigured,
+            dingtalk: ingressStatus?.dingtalkCallbackTokenConfigured && ingressStatus?.dingtalkCallbackEncryptionConfigured,
+            wecom: ingressStatus?.wecomCallbackTokenConfigured && ingressStatus?.wecomCallbackEncryptionConfigured,
             wechat_official_account: ingressStatus?.wechatOfficialAccountTokenConfigured,
-            qq: ingressStatus?.qqBotCallbackSecretConfigured,
-            feishu: true
+            qq: ingressStatus?.qqBotCallbackSecretConfigured
           }[platform]),
           type: "Ingress"
         }))
@@ -2415,9 +2416,9 @@ async fn dashboard() -> Html<&'static str> {
       }
       const ingressMap = {
         telegram: ingressStatus?.telegramWebhookSecretConfigured,
-        feishu: true,
-        dingtalk: ingressStatus?.dingtalkCallbackTokenConfigured,
-        wecom: ingressStatus?.wecomCallbackTokenConfigured,
+        feishu: ingressStatus?.feishuEventSignatureConfigured,
+        dingtalk: ingressStatus?.dingtalkCallbackTokenConfigured && ingressStatus?.dingtalkCallbackEncryptionConfigured,
+        wecom: ingressStatus?.wecomCallbackTokenConfigured && ingressStatus?.wecomCallbackEncryptionConfigured,
         wechat_official_account: ingressStatus?.wechatOfficialAccountTokenConfigured,
         qq: ingressStatus?.qqBotCallbackSecretConfigured
       };

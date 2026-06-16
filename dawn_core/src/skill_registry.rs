@@ -565,21 +565,26 @@ pub async fn install_skill_package_from_url(
     state: &Arc<AppState>,
     request: InstallSkillPackageRequest,
 ) -> anyhow::Result<SkillActivationResponse> {
-    let package = reqwest::Client::new()
-        .get(&request.package_url)
+    let package_url =
+        crate::security::validate_public_http_url(&request.package_url, "packageUrl")?;
+    let package_url_display = package_url.to_string();
+    let package = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .get(package_url)
         .send()
         .await
-        .with_context(|| format!("failed to fetch skill package {}", request.package_url))?
+        .with_context(|| format!("failed to fetch skill package {}", package_url_display))?
         .error_for_status()
         .with_context(|| {
             format!(
                 "skill package endpoint returned an error {}",
-                request.package_url
+                package_url_display
             )
         })?
         .json::<SkillPackageResponse>()
         .await
-        .with_context(|| format!("failed to decode skill package {}", request.package_url))?;
+        .with_context(|| format!("failed to decode skill package {}", package_url_display))?;
 
     if package.skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND {
         return Ok(SkillActivationResponse {
@@ -1191,6 +1196,9 @@ fn validate_skill_segment(value: &str, label: &str) -> anyhow::Result<()> {
     if value.is_empty() {
         anyhow::bail!("{label} cannot be empty");
     }
+    if matches!(value, "." | "..") {
+        anyhow::bail!("{label} cannot be a path traversal segment");
+    }
     if value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
@@ -1283,13 +1291,36 @@ async fn persist_skill_artifact(
     version: &str,
     wasm_bytes: &[u8],
 ) -> anyhow::Result<PathBuf> {
-    let artifact_dir = skill_artifact_root_dir().join(skill_id).join(version);
+    let artifact_root = skill_artifact_root_dir();
+    fs::create_dir_all(&artifact_root)
+        .await
+        .with_context(|| format!("failed to create artifact root {}", artifact_root.display()))?;
+    let artifact_root = fs::canonicalize(&artifact_root).await.with_context(|| {
+        format!(
+            "failed to canonicalize artifact root {}",
+            artifact_root.display()
+        )
+    })?;
+    let artifact_dir = artifact_root.join(skill_id).join(version);
     fs::create_dir_all(&artifact_dir).await.with_context(|| {
         format!(
             "failed to create artifact directory {}",
             artifact_dir.display()
         )
     })?;
+    let artifact_dir = fs::canonicalize(&artifact_dir).await.with_context(|| {
+        format!(
+            "failed to canonicalize artifact directory {}",
+            artifact_dir.display()
+        )
+    })?;
+    if !artifact_dir.starts_with(&artifact_root) {
+        anyhow::bail!(
+            "skill artifact directory {} escaped artifact root {}",
+            artifact_dir.display(),
+            artifact_root.display()
+        );
+    }
     let artifact_path = artifact_dir.join("module.wasm");
     fs::write(&artifact_path, wasm_bytes)
         .await
