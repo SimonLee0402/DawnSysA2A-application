@@ -505,8 +505,13 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
                             skill.artifact_path
                         )
                     })?;
-                match sandbox::execute_skill(&state.engine, &wasm_bytes, &execution_function) {
-                    Ok(msg) => {
+                match sandbox::execute_skill_with_metadata(
+                    &state.engine,
+                    &wasm_bytes,
+                    &execution_function,
+                ) {
+                    Ok(result) => {
+                        let event_detail = wasm_skill_execution_event_detail(&result)?;
                         state
                             .update_task(
                                 task_id,
@@ -516,9 +521,9 @@ pub async fn submit_task(state: Arc<AppState>, task: Task) -> anyhow::Result<Tas
                             )
                             .await?;
                         state
-                            .record_task_event(task_id, "skill_executed", &msg)
+                            .record_task_event(task_id, "skill_executed", &event_detail)
                             .await?;
-                        msg
+                        result.message
                     }
                     Err(error) => {
                         let detail =
@@ -640,6 +645,22 @@ pub async fn get_task_detail(
         artifacts,
         updates,
     })
+}
+
+fn wasm_skill_execution_event_detail(
+    result: &sandbox::SkillExecutionResult,
+) -> anyhow::Result<String> {
+    if let Some(adapter_metadata) = result.adapter_metadata.as_ref() {
+        serde_json::to_string(&json!({
+            "message": &result.message,
+            "adapterMetadata": adapter_metadata,
+        }))
+        .map_err(|error| {
+            anyhow::anyhow!("failed to serialize Wasm skill execution metadata: {error}")
+        })
+    } else {
+        Ok(result.message.clone())
+    }
 }
 
 fn parse_wasm_instruction(instruction: &str) -> anyhow::Result<Option<WasmInstructionBinding>> {
@@ -1703,7 +1724,7 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::agent_cards::{RemoteAgentInvocationRecord, RemoteInvocationStatus};
 
@@ -1715,8 +1736,9 @@ mod tests {
         build_task_stream, build_task_updates, classify_task_stream_event, extract_text_from_value,
         parse_native_instruction, parse_orchestration_plan, parse_wasm_instruction,
         resolve_json_templates, resolve_template_string, summarize_remote_status,
+        wasm_skill_execution_event_detail,
     };
-    use crate::qgis;
+    use crate::{qgis, sandbox};
     use uuid::Uuid;
 
     #[test]
@@ -1853,6 +1875,40 @@ mod tests {
                 version: None,
                 function_name: None,
             }
+        );
+    }
+
+    #[test]
+    fn renders_wasm_skill_execution_event_detail_with_optional_metadata() {
+        let legacy = sandbox::SkillExecutionResult {
+            message: "Skill executed successfully.".to_string(),
+            adapter_metadata: None,
+        };
+        assert_eq!(
+            wasm_skill_execution_event_detail(&legacy).expect("legacy event detail should render"),
+            "Skill executed successfully."
+        );
+
+        let result = sandbox::SkillExecutionResult {
+            message: "Skill executed successfully.".to_string(),
+            adapter_metadata: Some(sandbox::WasmAdapterMetadata {
+                version: 1,
+                raw_json: r#"{"skillId":"demo.skill"}"#.to_string(),
+                parsed_json: json!({
+                    "skillId": "demo.skill",
+                    "abi": "dawn.skill.intake.adapter.metadata.v1"
+                }),
+            }),
+        };
+        let detail = wasm_skill_execution_event_detail(&result)
+            .expect("metadata event detail should render");
+        let parsed: Value = serde_json::from_str(&detail).expect("detail should be JSON");
+
+        assert_eq!(parsed["message"], "Skill executed successfully.");
+        assert_eq!(parsed["adapterMetadata"]["version"], 1);
+        assert_eq!(
+            parsed["adapterMetadata"]["parsedJson"]["skillId"],
+            "demo.skill"
         );
     }
 

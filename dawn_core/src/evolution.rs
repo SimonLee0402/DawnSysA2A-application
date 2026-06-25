@@ -1382,6 +1382,11 @@ fn build_skill_implementation_plan(
     let created_by = optional_label(Some(created_by.to_string()), "implementation-planner")?;
     let skill_id = proposal.suggested_skill_id.clone();
     let risk_level = proposal.risk_level.clone();
+    if is_skill_intake_proposal(&proposal) {
+        return Ok(build_skill_intake_implementation_plan(
+            proposal, created_by, now,
+        ));
+    }
     Ok(SkillImplementationPlanRecord {
         plan_id: Uuid::new_v4(),
         proposal_id: proposal.proposal_id,
@@ -1448,6 +1453,185 @@ fn build_skill_implementation_plan(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
     })
+}
+
+fn is_skill_intake_proposal(proposal: &SkillProposalRecord) -> bool {
+    proposal.source == "skill-intake"
+        || proposal.tags.iter().any(|tag| tag == "skill-intake")
+        || proposal.evidence.get("conversionPlan").is_some()
+}
+
+fn build_skill_intake_implementation_plan(
+    proposal: SkillProposalRecord,
+    created_by: String,
+    now: u128,
+) -> SkillImplementationPlanRecord {
+    let skill_id = proposal.suggested_skill_id.clone();
+    let risk_level = proposal.risk_level.clone();
+    let source_kind = intake_source_kind(&proposal.evidence).to_string();
+    let source_url = proposal
+        .evidence
+        .pointer("/intake/sourceUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let source_sha256 = proposal
+        .evidence
+        .pointer("/intake/sourceSha256")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let source_preview = proposal
+        .evidence
+        .pointer("/intake/sourcePreview")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let recommended_action = proposal
+        .evidence
+        .pointer("/conversionPlan/recommendedAction")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            proposal
+                .evidence
+                .pointer("/intake/recommendedAction")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Build a reviewed Dawn skill adapter from the intake source.");
+    let required_steps = proposal
+        .evidence
+        .pointer("/conversionPlan/requiredSteps")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let warnings = proposal
+        .evidence
+        .pointer("/conversionPlan/warnings")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let conversion_spec = proposal
+        .evidence
+        .pointer("/conversionPlan/conversionSpec")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    SkillImplementationPlanRecord {
+        plan_id: Uuid::new_v4(),
+        proposal_id: proposal.proposal_id,
+        suggested_skill_id: skill_id.clone(),
+        title: format!("Convert online source into Dawn skill {skill_id}"),
+        summary: format!(
+            "Review-only conversion plan for `{source_kind}` source `{}`. The plan prepares a safe adapter and tests, but does not run fetched code, register a skill, or activate permissions.",
+            truncate_summary(&source_url, 180)
+        ),
+        status: "draft".to_string(),
+        steps: json!([
+            {
+                "order": 1,
+                "name": "Freeze and fingerprint the source",
+                "detail": "Resolve the exact source URL, capture content type, hash the fetched manifest or package, and record publisher identity if present.",
+                "sourceUrl": source_url.clone(),
+                "sourceKind": source_kind.clone()
+            },
+            {
+                "order": 2,
+                "name": "Derive the Dawn skill contract",
+                "detail": "Define a narrow JSON input/output contract, capability list, allowed filesystem/network scope, and user-visible failure messages before writing adapter code."
+            },
+            {
+                "order": 3,
+                "name": "Select the adapter strategy",
+                "detail": intake_adapter_strategy(&source_kind),
+                "recommendedAction": recommended_action
+            },
+            {
+                "order": 4,
+                "name": "Create sandbox verification",
+                "detail": "Add deterministic tests for successful execution, invalid inputs, permission denial, missing dependencies, and non-execution of install-time or untrusted code."
+            },
+            {
+                "order": 5,
+                "name": "Package as a reviewed Dawn artifact",
+                "detail": "Produce either a signed Wasm skill package or a native workflow draft with metadata, version, artifact hash, required capabilities, and rollback notes."
+            },
+            {
+                "order": 6,
+                "name": "Verify existing skill and chat paths",
+                "detail": "Run skill-registry, marketplace, chat ingress, and node-command checks so direct package install and phone-triggered workflows remain intact."
+            }
+        ]),
+        acceptance_criteria: json!([
+            "The exact online source URL, detected kind, content type, and source hash are captured in review evidence.",
+            "The proposed skill has a documented JSON input/output contract and least-privilege capability list.",
+            "Sandbox tests cover success, invalid input, permission denial, missing dependency, and untrusted install/runtime code paths.",
+            "The conversion output is a signed Dawn Wasm package or a native skill draft; it is not activated or published automatically.",
+            "Existing direct signed package install, unsigned development install, marketplace search, QQ/Telegram/WeChat chat ingress, and desktop-control approval behavior remain unchanged.",
+            "Rollback scope and generated artifacts are listed before any implementation patch can be applied."
+        ]),
+        guardrails: json!({
+            "autonomousCodeMutation": false,
+            "autonomousPublish": false,
+            "requiresHumanReviewBeforeActivation": true,
+            "requiresExistingApprovalGates": true,
+            "conversionSourceKind": source_kind.clone(),
+            "conversionSourceUrl": source_url.clone(),
+            "sourceSha256": source_sha256,
+            "sourcePreview": source_preview,
+            "sourceWarnings": warnings,
+            "sourceRequiredSteps": required_steps,
+            "sourceConversionSpec": conversion_spec,
+            "riskLevel": risk_level,
+            "sourceProposalId": proposal.proposal_id,
+            "sourceProposalStatus": proposal.status,
+            "sourceSuggestedSkillId": proposal.suggested_skill_id,
+            "sourceProposalEvidence": proposal.evidence,
+            "forbiddenWithoutSeparateApproval": [
+                "executing fetched code",
+                "installing dependencies globally",
+                "skill activation",
+                "release publication",
+                "credential changes",
+                "destructive filesystem operations",
+                "bypassing chat pairing or approval gates"
+            ]
+        }),
+        created_by,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+    }
+}
+
+fn intake_source_kind(evidence: &Value) -> &str {
+    evidence
+        .pointer("/conversionPlan/sourceKind")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            evidence
+                .pointer("/intake/detectedKind")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("unknown_online_resource")
+}
+
+fn intake_adapter_strategy(source_kind: &str) -> &'static str {
+    match source_kind {
+        "codex_skill_markdown" => {
+            "Convert SKILL.md instructions into a Dawn native workflow spec, then implement only explicit commands through existing approved APIs."
+        }
+        "mcp_server_project" => {
+            "Wrap the MCP server behind a supervised connector with tool allowlisting, dependency pinning, health checks, and no direct skill activation."
+        }
+        "python_tooling_project" => {
+            "Create a sandboxed Python runner or a narrow Wasm-compatible wrapper; never execute setup hooks during intake or planning."
+        }
+        "browser_extension" => {
+            "Extract the browser workflow and permissions into Dawn browser-control commands instead of installing the extension directly."
+        }
+        "git_repository" => {
+            "Inspect the repository for an exact Dawn package, SKILL.md, MCP manifest, or Python manifest, then rerun intake on that precise raw file."
+        }
+        _ => {
+            "Perform manual review and create a narrow Dawn adapter only after the source type and trust boundary are understood."
+        }
+    }
 }
 
 fn apply_skill_implementation_plan_review(
@@ -1533,6 +1717,9 @@ fn build_skill_implementation_run(
         ));
     }
     let created_by = optional_label(Some(created_by.to_string()), "implementation-runner")?;
+    if is_skill_intake_implementation_plan(&plan) {
+        return Ok(build_skill_intake_implementation_run(plan, created_by, now));
+    }
     let suggested_skill_id = plan.suggested_skill_id.clone();
     Ok(SkillImplementationRunRecord {
         run_id: Uuid::new_v4(),
@@ -1609,6 +1796,211 @@ fn build_skill_implementation_run(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
     })
+}
+
+fn is_skill_intake_implementation_plan(plan: &SkillImplementationPlanRecord) -> bool {
+    plan.guardrails
+        .get("conversionSourceKind")
+        .and_then(Value::as_str)
+        .is_some()
+        || plan
+            .guardrails
+            .get("sourceProposalEvidence")
+            .and_then(|evidence| evidence.get("conversionPlan"))
+            .is_some()
+}
+
+fn build_skill_intake_implementation_run(
+    plan: SkillImplementationPlanRecord,
+    created_by: String,
+    now: u128,
+) -> SkillImplementationRunRecord {
+    let suggested_skill_id = plan.suggested_skill_id.clone();
+    let artifact_slug = slugify_skill_id_component(&suggested_skill_id);
+    let docs_base = format!("docs/skill-intake/{artifact_slug}");
+    let native_skill_path = format!("workflow/native_skills/{artifact_slug}/SKILL.md");
+    let source_kind = plan
+        .guardrails
+        .get("conversionSourceKind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_online_resource")
+        .to_string();
+    let source_url = plan
+        .guardrails
+        .get("conversionSourceUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let source_warnings = plan
+        .guardrails
+        .get("sourceWarnings")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let source_required_steps = plan
+        .guardrails
+        .get("sourceRequiredSteps")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let source_guardrails = plan.guardrails.clone();
+
+    SkillImplementationRunRecord {
+        run_id: Uuid::new_v4(),
+        plan_id: plan.plan_id,
+        proposal_id: plan.proposal_id,
+        suggested_skill_id: suggested_skill_id.clone(),
+        status: "prepared".to_string(),
+        execution_mode: "guarded_conversion_draft_only".to_string(),
+        change_package: json!({
+            "kind": "skill_intake_conversion_draft_package",
+            "sourcePlanId": plan.plan_id,
+            "sourceProposalId": plan.proposal_id,
+            "suggestedSkillId": suggested_skill_id,
+            "objective": plan.summary,
+            "conversionSourceKind": source_kind,
+            "conversionSourceUrl": source_url,
+            "sourceWarnings": source_warnings,
+            "sourceRequiredSteps": source_required_steps,
+            "allowedTargetAreas": [
+                "dawn_core/src/skill_registry.rs",
+                "dawn_core/src/evolution.rs",
+                "workflow/native_skills",
+                "docs/skill-intake"
+            ],
+            "protectedAreas": [
+                "existing chat connector behavior",
+                "Telegram, QQ, WeChat connector secrets",
+                "pairing records and user approval state",
+                "QGIS files unless explicitly approved",
+                "credentials and environment files",
+                "user-created files outside the task scope"
+            ],
+            "draftArtifacts": [
+                {
+                    "kind": "skill_contract",
+                    "path": format!("{docs_base}/contract.json"),
+                    "purpose": "Reviewable JSON input, output, and least-privilege capability contract.",
+                    "status": "draft_only"
+                },
+                {
+                    "kind": "sandbox_tests",
+                    "path": format!("{docs_base}/sandbox-tests.md"),
+                    "purpose": "Success, invalid input, permission denial, missing dependency, and untrusted-code test matrix.",
+                    "status": "draft_only"
+                },
+                {
+                    "kind": "package_manifest",
+                    "path": format!("{docs_base}/package-manifest.json"),
+                    "purpose": "Draft manifest for a signed Dawn Wasm package or reviewed native skill artifact.",
+                    "status": "draft_only"
+                },
+                {
+                    "kind": "native_skill_draft",
+                    "path": native_skill_path,
+                    "purpose": "Native workflow draft path when Wasm packaging is not the right target.",
+                    "status": "not_written"
+                }
+            ],
+            "sandboxTestSkeleton": {
+                "status": "draft_only",
+                "cases": [
+                    {
+                        "name": "success_contract",
+                        "purpose": "Valid input produces the documented output without extra capabilities.",
+                        "expected": "pass before activation"
+                    },
+                    {
+                        "name": "invalid_input",
+                        "purpose": "Malformed or incomplete input is rejected with a safe error.",
+                        "expected": "pass before activation"
+                    },
+                    {
+                        "name": "permission_denied",
+                        "purpose": "Requests outside declared capabilities are denied.",
+                        "expected": "pass before activation"
+                    },
+                    {
+                        "name": "missing_dependency",
+                        "purpose": "Unavailable local tools fail closed with actionable diagnostics.",
+                        "expected": "pass before activation"
+                    },
+                    {
+                        "name": "untrusted_code",
+                        "purpose": "Fetched source code and install hooks are not executed during intake or preparation.",
+                        "expected": "pass before activation"
+                    }
+                ],
+                "forbiddenDuringPreparation": [
+                    "executing fetched code",
+                    "installing dependencies globally",
+                    "activating the converted skill",
+                    "publishing artifacts"
+                ]
+            },
+            "signingManifestDraft": {
+                "status": "draft_only",
+                "artifactHashRequired": true,
+                "trustedPublisherSignatureRequired": true,
+                "unsignedDevelopmentInstallRequiresAllowUnsigned": true,
+                "activationPolicy": "separate_review_required",
+                "targetArtifactKinds": [
+                    "signed_wasm_skill_package",
+                    "reviewed_native_skill_draft"
+                ]
+            },
+            "implementationSteps": plan.steps,
+            "acceptanceCriteria": plan.acceptance_criteria,
+            "workspacePolicy": "inspect current diff first; do not revert unrelated user changes"
+        }),
+        verification: json!({
+            "requiredCommands": [
+                "cargo check --manifest-path dawn_core/Cargo.toml",
+                "cargo test --manifest-path dawn_core/Cargo.toml skill_registry -- --test-threads=1",
+                "cargo test --manifest-path dawn_core/Cargo.toml evolution -- --test-threads=1"
+            ],
+            "runtimeSmoke": [
+                "GET /api/gateway/evolution/status",
+                "GET /api/gateway/ingress/status",
+                "one ordinary chat route and one task-creation route remain healthy when the gateway is running"
+            ],
+            "artifactReviewRequired": true,
+            "evidenceRequiredBeforeActivation": true
+        }),
+        rollback: json!({
+            "strategy": "draft-only preparation; no generated artifact is written or activated by this run package",
+            "requiredNotes": [
+                "list draft artifact paths",
+                "list changed files before any later patch is applied",
+                "record commands used for verification",
+                "do not use destructive git reset against user changes"
+            ],
+            "manualRollbackOnly": true
+        }),
+        guardrails: json!({
+            "autonomousCodeMutation": false,
+            "autonomousPublish": false,
+            "execution": "not_executed",
+            "activation": "not_activated",
+            "draftArtifactsOnly": true,
+            "fetchedCodeExecution": "forbidden",
+            "requiresSeparateExecutionApproval": true,
+            "requiresSeparateSkillActivationApproval": true,
+            "sourcePlanStatus": plan.status,
+            "sourcePlanGuardrails": source_guardrails,
+            "forbiddenWithoutSeparateApproval": [
+                "modifying files outside the reviewed patch",
+                "executing fetched code",
+                "installing dependencies globally",
+                "skill activation",
+                "release publication",
+                "credential changes",
+                "destructive filesystem operations",
+                "bypassing chat pairing or approval gates"
+            ]
+        }),
+        created_by,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+    }
 }
 
 fn apply_skill_implementation_run_review(
@@ -2234,14 +2626,28 @@ fn build_skill_implementation_patch(
             "skill implementation execution must be verification_succeeded before a patch candidate can be created"
         ));
     }
-    let created_by = optional_label(request.created_by, "patch-candidate-planner")?;
-    let summary = optional_summary(request.summary).unwrap_or_else(|| {
+    let CreateImplementationPatchRequest {
+        created_by,
+        summary,
+        changed_files,
+        patch_manifest,
+    } = request;
+    let created_by = optional_label(created_by, "patch-candidate-planner")?;
+    let auto_conversion_draft = changed_files.is_none()
+        && patch_manifest.is_none()
+        && is_skill_intake_conversion_execution(&execution);
+    let summary = optional_summary(summary).unwrap_or_else(|| {
+        if auto_conversion_draft {
+            return format!(
+                "Review-only skill-intake conversion draft for `{}`. This record prepares draft files but does not apply files, activate skills, execute fetched code, or publish releases.",
+                execution.suggested_skill_id
+            );
+        }
         format!(
             "Review-only patch candidate for `{}`. This record does not apply files, activate skills, or publish releases.",
             execution.suggested_skill_id
         )
     });
-    let changed_files = normalize_patch_changed_files(request.changed_files)?;
     let allowed_target_areas = execution
         .command_plan
         .get("allowedTargetAreas")
@@ -2257,7 +2663,23 @@ fn build_skill_implementation_patch(
         .get("requiredCommands")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    let mut patch_manifest = request.patch_manifest.unwrap_or_else(|| json!({}));
+    let (changed_files, patch_manifest, patch_kind) = if auto_conversion_draft {
+        let (changed_files, patch_manifest) =
+            build_skill_intake_conversion_patch_draft(&execution, &allowed_target_areas)?;
+        (
+            changed_files,
+            patch_manifest,
+            "skill_intake_conversion_draft_candidate".to_string(),
+        )
+    } else {
+        (
+            normalize_patch_changed_files(changed_files)?,
+            patch_manifest.unwrap_or_else(|| json!({})),
+            "review_only_candidate".to_string(),
+        )
+    };
+    let api_generated_patch = auto_conversion_draft;
+    let mut patch_manifest = patch_manifest;
     patch_manifest = normalize_patch_manifest(
         patch_manifest,
         execution.execution_id,
@@ -2275,7 +2697,7 @@ fn build_skill_implementation_patch(
         proposal_id: execution.proposal_id,
         suggested_skill_id: execution.suggested_skill_id,
         status: "draft".to_string(),
-        patch_kind: "review_only_candidate".to_string(),
+        patch_kind,
         summary,
         changed_files,
         patch_manifest,
@@ -2300,7 +2722,7 @@ fn build_skill_implementation_patch(
         guardrails: json!({
             "autonomousCodeMutation": false,
             "autonomousPublish": false,
-            "apiGeneratedPatch": false,
+            "apiGeneratedPatch": api_generated_patch,
             "apiAppliedPatch": false,
             "apiRollbackExecuted": false,
             "activation": "not_activated",
@@ -2320,6 +2742,944 @@ fn build_skill_implementation_patch(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
     })
+}
+
+fn is_skill_intake_conversion_execution(execution: &SkillImplementationExecutionRecord) -> bool {
+    execution
+        .guardrails
+        .pointer("/sourceRunGuardrails/sourcePlanGuardrails/conversionSourceKind")
+        .and_then(Value::as_str)
+        .is_some()
+        || execution
+            .guardrails
+            .pointer(
+                "/sourceRunGuardrails/sourcePlanGuardrails/sourceProposalEvidence/conversionPlan",
+            )
+            .is_some()
+}
+
+fn build_skill_intake_conversion_patch_draft(
+    execution: &SkillImplementationExecutionRecord,
+    allowed_target_areas: &Value,
+) -> anyhow::Result<(Value, Value)> {
+    let skill_id = execution.suggested_skill_id.as_str();
+    let artifact_slug = slugify_skill_id_component(skill_id);
+    let docs_base = format!("docs/skill-intake/{artifact_slug}");
+    let contract_path = format!("{docs_base}/contract.json");
+    let sandbox_path = format!("{docs_base}/sandbox-tests.md");
+    let package_manifest_path = format!("{docs_base}/package-manifest.json");
+    let preflight_checklist_path = format!("{docs_base}/preflight-checklist.json");
+    let wasm_adapter_readme_path = format!("{docs_base}/wasm-adapter/README.md");
+    let wasm_adapter_cargo_path = format!("{docs_base}/wasm-adapter/Cargo.toml");
+    let wasm_adapter_lib_path = format!("{docs_base}/wasm-adapter/src/lib.rs");
+    let native_skill_path = format!("workflow/native_skills/{artifact_slug}/SKILL.md");
+    let source_kind = skill_intake_execution_source_field(
+        execution,
+        "/sourceRunGuardrails/sourcePlanGuardrails/conversionSourceKind",
+        "/sourceRunGuardrails/sourcePlanGuardrails/sourceProposalEvidence/conversionPlan/sourceKind",
+        "unknown_online_resource",
+    );
+    let source_url = skill_intake_execution_source_field(
+        execution,
+        "/sourceRunGuardrails/sourcePlanGuardrails/conversionSourceUrl",
+        "/sourceRunGuardrails/sourcePlanGuardrails/sourceProposalEvidence/intake/sourceUrl",
+        "unknown",
+    );
+    let source_sha256 = skill_intake_execution_source_field(
+        execution,
+        "/sourceRunGuardrails/sourcePlanGuardrails/sourceSha256",
+        "/sourceRunGuardrails/sourcePlanGuardrails/sourceProposalEvidence/intake/sourceSha256",
+        "unknown",
+    );
+    let source_preview = skill_intake_execution_optional_source_field(
+        execution,
+        "/sourceRunGuardrails/sourcePlanGuardrails/sourcePreview",
+        "/sourceRunGuardrails/sourcePlanGuardrails/sourceProposalEvidence/intake/sourcePreview",
+    );
+    let warnings = execution
+        .guardrails
+        .pointer("/sourceRunGuardrails/sourcePlanGuardrails/sourceWarnings")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let required_steps = execution
+        .guardrails
+        .pointer("/sourceRunGuardrails/sourcePlanGuardrails/sourceRequiredSteps")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let conversion_spec =
+        skill_intake_execution_conversion_spec(execution, &source_kind, &source_url);
+    let adapter_kind = conversion_spec
+        .get("adapterKind")
+        .and_then(Value::as_str)
+        .unwrap_or("manual_review_adapter")
+        .to_string();
+    let required_commands = execution
+        .command_plan
+        .get("requiredCommands")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    let contract = json!({
+        "kind": "dawn_skill_contract_draft",
+        "status": "review_required",
+        "suggestedSkillId": skill_id,
+        "source": {
+            "kind": source_kind,
+            "url": source_url,
+            "sha256": source_sha256.clone(),
+            "preview": source_preview.clone()
+        },
+        "adapterKind": adapter_kind,
+        "conversionSpec": conversion_spec.clone(),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["instruction"],
+            "properties": {
+                "instruction": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "User-visible instruction to be handled by the reviewed Dawn adapter."
+                },
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Optional structured arguments accepted only after contract review."
+                }
+            }
+        },
+        "outputSchema": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["status", "summary"],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["succeeded", "failed", "requires_approval"]
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "artifacts": {
+                    "type": "array",
+                    "items": { "type": "object" }
+                }
+            }
+        },
+        "capabilities": {
+            "requested": [],
+            "mustBeReviewedBeforeActivation": true,
+            "forbiddenDuringDraft": [
+                "execute fetched source code",
+                "install dependencies globally",
+                "access credentials",
+                "bypass chat pairing or approval gates",
+                "publish or activate the skill"
+            ]
+        },
+        "chatIngressCompatibility": {
+            "preserveExistingRoutes": true,
+            "coveredPlatforms": ["telegram", "qq", "wechat", "wecom", "feishu", "dingtalk", "signal", "bluebubbles"]
+        },
+        "reviewEvidence": {
+            "sourceWarnings": warnings,
+            "sourceRequiredSteps": required_steps,
+            "requiredVerificationCommands": required_commands
+        }
+    });
+    let package_manifest = json!({
+        "kind": "dawn_skill_package_manifest_draft",
+        "status": "review_required",
+        "suggestedSkillId": skill_id,
+        "version": "0.0.0-review",
+        "source": {
+            "kind": source_kind,
+            "url": source_url,
+            "sha256": source_sha256.clone()
+        },
+        "artifact": {
+            "targetKinds": ["signed_wasm_skill_package", "reviewed_native_skill"],
+            "artifactHashRequired": true,
+            "trustedPublisherSignatureRequired": true,
+            "unsignedDevelopmentInstallRequiresAllowUnsigned": true,
+            "wasmAdapterScaffold": {
+                "cargoToml": wasm_adapter_cargo_path,
+                "libRs": wasm_adapter_lib_path,
+                "readme": wasm_adapter_readme_path,
+                "entryFunction": "run_skill",
+                "metadataExports": [
+                    "dawn_adapter_metadata_ptr",
+                    "dawn_adapter_metadata_len",
+                    "dawn_adapter_metadata_version"
+                ],
+                "status": "draft_only"
+            }
+        },
+        "activation": {
+            "automatic": false,
+            "requiresSeparateSkillActivationApproval": true
+        },
+        "verification": {
+            "requiredCommands": required_commands,
+            "sandboxTests": sandbox_path,
+            "preflightChecklist": preflight_checklist_path
+        },
+        "conversion": conversion_spec.clone(),
+        "rollback": {
+            "manualRollbackOnly": true,
+            "mustListGeneratedArtifacts": true
+        }
+    });
+    let preflight_checklist = json!({
+        "kind": "dawn_skill_intake_preflight_checklist",
+        "status": "review_required",
+        "suggestedSkillId": skill_id,
+        "version": "0.0.0-review",
+        "source": {
+            "kind": source_kind,
+            "url": source_url,
+            "sha256": source_sha256.clone(),
+            "previewRecorded": source_preview.is_some()
+        },
+        "evidenceFiles": {
+            "contract": contract_path,
+            "sandboxTests": sandbox_path,
+            "packageManifest": package_manifest_path,
+            "wasmAdapterReadme": wasm_adapter_readme_path,
+            "wasmAdapterCargoToml": wasm_adapter_cargo_path,
+            "wasmAdapterLibRs": wasm_adapter_lib_path,
+            "nativeSkillDraft": native_skill_path
+        },
+        "gates": [
+            {
+                "id": "source_hash",
+                "status": "pending",
+                "requiredBefore": ["pack_wasm", "install_url", "activate"],
+                "mustVerify": [
+                    "source URL and content SHA-256 match the reviewed proposal",
+                    "changed source content creates a new proposal key"
+                ]
+            },
+            {
+                "id": "contract_schema",
+                "status": "pending",
+                "requiredBefore": ["pack_wasm", "install_url", "activate"],
+                "mustVerify": [
+                    "inputSchema rejects malformed requests",
+                    "outputSchema includes status and summary",
+                    "declared capabilities are least privilege"
+                ]
+            },
+            {
+                "id": "sandbox_cases",
+                "status": "pending",
+                "requiredBefore": ["pack_wasm", "install_url", "activate"],
+                "mustVerify": [
+                    "success_contract",
+                    "invalid_input",
+                    "permission_denied",
+                    "missing_dependency",
+                    "untrusted_code",
+                    "chat_regression"
+                ]
+            },
+            {
+                "id": "metadata_abi",
+                "status": "pending",
+                "requiredBefore": ["install_url", "activate"],
+                "mustVerify": [
+                    "Wasm exports dawn_adapter_metadata_ptr",
+                    "Wasm exports dawn_adapter_metadata_len",
+                    "Wasm exports dawn_adapter_metadata_version",
+                    "runtime metadata JSON matches contract.json"
+                ]
+            },
+            {
+                "id": "package_integrity",
+                "status": "pending",
+                "requiredBefore": ["install_url", "activate"],
+                "mustVerify": [
+                    "packed artifact hash is recorded",
+                    "signed publisher envelope is present for normal distribution",
+                    "unsigned installation is limited to explicit --allow-unsigned development use"
+                ]
+            },
+            {
+                "id": "activation_approval",
+                "status": "pending",
+                "requiredBefore": ["activate"],
+                "mustVerify": [
+                    "operator approved the package after tests",
+                    "chat ingress compatibility remains intact",
+                    "rollback plan lists generated artifacts"
+                ]
+            }
+        ],
+        "installPolicy": {
+            "automaticInstall": false,
+            "automaticActivation": false,
+            "signedPackageRequiredForNormalUse": true,
+            "allowUnsignedOnlyWithExplicitDevelopmentFlag": true
+        },
+        "runtimePolicy": {
+            "fetchedCodeExecution": "forbidden",
+            "globalDependencyInstall": "forbidden",
+            "credentialAccess": "forbidden",
+            "desktopControlRequiresApproval": true,
+            "chatIngressGatesMustRemainEnabled": true
+        },
+        "requiredVerificationCommands": required_commands,
+        "conversion": conversion_spec.clone()
+    });
+    let contract_content = pretty_json_file(&contract)?;
+    let package_manifest_content = pretty_json_file(&package_manifest)?;
+    let preflight_checklist_content = pretty_json_file(&preflight_checklist)?;
+    let sandbox_content = render_skill_intake_sandbox_tests(
+        skill_id,
+        &source_kind,
+        &source_url,
+        &required_commands,
+        &conversion_spec,
+    );
+    let native_skill_content = render_skill_intake_native_skill_draft(
+        skill_id,
+        &source_kind,
+        &source_url,
+        &conversion_spec,
+    );
+    let wasm_adapter_readme_content = render_skill_intake_wasm_adapter_readme(
+        skill_id,
+        &artifact_slug,
+        &source_kind,
+        &source_url,
+        &source_sha256,
+        &conversion_spec,
+    );
+    let wasm_adapter_cargo_content = render_skill_intake_wasm_adapter_cargo(&artifact_slug);
+    let wasm_adapter_lib_content =
+        render_skill_intake_wasm_adapter_lib(skill_id, &source_kind, &source_url, &conversion_spec);
+
+    let changed_files = json!([
+        contract_path,
+        sandbox_path,
+        package_manifest_path,
+        preflight_checklist_path,
+        wasm_adapter_readme_path,
+        wasm_adapter_cargo_path,
+        wasm_adapter_lib_path,
+        native_skill_path
+    ]);
+    let patch_manifest = json!({
+        "kind": "skill_intake_conversion_draft_candidate",
+        "sourceExecutionId": execution.execution_id,
+        "suggestedSkillId": skill_id,
+        "allowedTargetAreas": allowed_target_areas,
+        "draftOnly": true,
+        "apiAppliedPatch": false,
+        "activation": "not_activated",
+        "fetchedCodeExecution": "forbidden",
+        "fileChanges": [
+            {
+                "path": contract_path,
+                "newContent": contract_content
+            },
+            {
+                "path": sandbox_path,
+                "newContent": sandbox_content
+            },
+            {
+                "path": package_manifest_path,
+                "newContent": package_manifest_content
+            },
+            {
+                "path": preflight_checklist_path,
+                "newContent": preflight_checklist_content
+            },
+            {
+                "path": wasm_adapter_readme_path,
+                "newContent": wasm_adapter_readme_content
+            },
+            {
+                "path": wasm_adapter_cargo_path,
+                "newContent": wasm_adapter_cargo_content
+            },
+            {
+                "path": wasm_adapter_lib_path,
+                "newContent": wasm_adapter_lib_content
+            },
+            {
+                "path": native_skill_path,
+                "newContent": native_skill_content
+            }
+        ]
+    });
+    Ok((changed_files, patch_manifest))
+}
+
+fn skill_intake_execution_conversion_spec(
+    execution: &SkillImplementationExecutionRecord,
+    source_kind: &str,
+    source_url: &str,
+) -> Value {
+    execution
+        .guardrails
+        .pointer("/sourceRunGuardrails/sourcePlanGuardrails/sourceConversionSpec")
+        .cloned()
+        .or_else(|| {
+            execution
+                .guardrails
+                .pointer("/sourceRunGuardrails/sourcePlanGuardrails/sourceProposalEvidence/conversionPlan/conversionSpec")
+                .cloned()
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "adapterKind": "manual_review_adapter",
+                "sourceKind": source_kind,
+                "sourceUrl": source_url,
+                "reviewRequired": true,
+                "automaticActivation": false,
+                "runtimeBoundary": "No execution until a reviewed adapter and sandbox test plan exist.",
+                "extractionTargets": [],
+                "permissionReview": [],
+                "sandboxCases": []
+            })
+        })
+}
+
+fn skill_intake_execution_source_field(
+    execution: &SkillImplementationExecutionRecord,
+    primary_pointer: &str,
+    fallback_pointer: &str,
+    default_value: &str,
+) -> String {
+    execution
+        .guardrails
+        .pointer(primary_pointer)
+        .and_then(Value::as_str)
+        .or_else(|| {
+            execution
+                .guardrails
+                .pointer(fallback_pointer)
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(default_value)
+        .to_string()
+}
+
+fn skill_intake_execution_optional_source_field(
+    execution: &SkillImplementationExecutionRecord,
+    primary_pointer: &str,
+    fallback_pointer: &str,
+) -> Option<String> {
+    execution
+        .guardrails
+        .pointer(primary_pointer)
+        .and_then(Value::as_str)
+        .or_else(|| {
+            execution
+                .guardrails
+                .pointer(fallback_pointer)
+                .and_then(Value::as_str)
+        })
+        .map(ToString::to_string)
+}
+
+fn pretty_json_file(value: &Value) -> anyhow::Result<String> {
+    let mut content =
+        serde_json::to_string_pretty(value).context("failed to render skill-intake draft JSON")?;
+    content.push('\n');
+    Ok(content)
+}
+
+fn markdown_inline(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars().take(500) {
+        match ch {
+            '\r' | '\n' | '\t' => output.push(' '),
+            '`' => output.push('\''),
+            _ => output.push(ch),
+        }
+    }
+    if output.is_empty() {
+        "unknown".to_string()
+    } else {
+        output
+    }
+}
+
+fn markdown_bullet_list(value: Option<&Value>, empty_message: &str) -> String {
+    let items = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(markdown_inline)
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        format!("- {}", markdown_inline(empty_message))
+    } else {
+        items.join("\n")
+    }
+}
+
+fn render_skill_intake_sandbox_tests(
+    skill_id: &str,
+    source_kind: &str,
+    source_url: &str,
+    required_commands: &Value,
+    conversion_spec: &Value,
+) -> String {
+    let commands = required_commands
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|command| format!("- `{}`", markdown_inline(command)))
+        .collect::<Vec<_>>();
+    let commands = if commands.is_empty() {
+        "- No verification command recorded yet; add one before activation.".to_string()
+    } else {
+        commands.join("\n")
+    };
+    let adapter_kind = conversion_spec
+        .get("adapterKind")
+        .and_then(Value::as_str)
+        .unwrap_or("manual_review_adapter");
+    let runtime_boundary = conversion_spec
+        .get("runtimeBoundary")
+        .and_then(Value::as_str)
+        .unwrap_or("No execution until the adapter is reviewed.");
+    let extraction_targets = markdown_bullet_list(
+        conversion_spec.get("extractionTargets"),
+        "No extraction targets recorded.",
+    );
+    let permission_review = markdown_bullet_list(
+        conversion_spec.get("permissionReview"),
+        "No permission review entries recorded.",
+    );
+    let source_specific_cases = markdown_bullet_list(
+        conversion_spec.get("sandboxCases"),
+        "No source-specific sandbox cases recorded.",
+    );
+    format!(
+        r#"# Sandbox Tests for {skill_id}
+
+Status: draft, review required.
+
+Source kind: `{source_kind}`
+Source URL: `{source_url}`
+Adapter kind: `{adapter_kind}`
+
+Runtime boundary: {runtime_boundary}
+
+## Source Extraction Targets
+
+{extraction_targets}
+
+## Permission Review
+
+{permission_review}
+
+## Required Verification Commands
+
+{commands}
+
+## Source-Specific Sandbox Cases
+
+{source_specific_cases}
+
+## Test Matrix
+
+| Case | Purpose | Required Result |
+| --- | --- | --- |
+| success_contract | Valid input returns the documented output shape. | Pass before activation. |
+| invalid_input | Malformed or incomplete input is rejected safely. | Pass before activation. |
+| permission_denied | Requests outside declared capabilities are denied. | Pass before activation. |
+| missing_dependency | Missing local tools fail closed with actionable diagnostics. | Pass before activation. |
+| untrusted_code | Fetched source code and install hooks are not executed during intake, preparation, or tests. | Pass before activation. |
+| metadata_exports | Wasm adapter exports `dawn_adapter_metadata_ptr`, `dawn_adapter_metadata_len`, and `dawn_adapter_metadata_version`; metadata matches `contract.json`. | Pass before activation. |
+| package_integrity | Packaged Wasm artifact hash, metadata ABI, and signature policy are verified against the preflight checklist. | Pass before installation. |
+| activation_approval | Installation does not activate the skill unless the operator explicitly confirms the reviewed skill version. | Manual approval required. |
+| chat_regression | Existing Telegram, QQ, WeChat, and other chat ingress routes still create replies or tasks according to current policy. | Pass before activation. |
+
+## Notes
+
+This file is a draft artifact. It is not evidence of test success until the listed commands and sandbox cases have been run and attached to the implementation record.
+"#,
+        skill_id = markdown_inline(skill_id),
+        source_kind = markdown_inline(source_kind),
+        source_url = markdown_inline(source_url),
+        adapter_kind = markdown_inline(adapter_kind),
+        runtime_boundary = markdown_inline(runtime_boundary),
+        extraction_targets = extraction_targets,
+        permission_review = permission_review,
+        commands = commands,
+        source_specific_cases = source_specific_cases
+    )
+}
+
+fn render_skill_intake_native_skill_draft(
+    skill_id: &str,
+    source_kind: &str,
+    source_url: &str,
+    conversion_spec: &Value,
+) -> String {
+    let adapter_kind = conversion_spec
+        .get("adapterKind")
+        .and_then(Value::as_str)
+        .unwrap_or("manual_review_adapter");
+    let adapter_goal = conversion_spec
+        .get("adapterGoal")
+        .and_then(Value::as_str)
+        .unwrap_or("Create a reviewed Dawn adapter from this online source.");
+    let runtime_boundary = conversion_spec
+        .get("runtimeBoundary")
+        .and_then(Value::as_str)
+        .unwrap_or("No execution until the adapter is reviewed.");
+    let extraction_targets = markdown_bullet_list(
+        conversion_spec.get("extractionTargets"),
+        "No extraction targets recorded.",
+    );
+    let packaging_plan = markdown_bullet_list(
+        conversion_spec.get("packagingPlan"),
+        "No packaging plan recorded.",
+    );
+    format!(
+        r#"# {skill_id}
+
+Status: draft, review required.
+
+This is a Dawn native skill draft generated from an online skill-intake conversion plan. It is not active and must not be loaded as a trusted skill until the contract, sandbox tests, and package manifest are reviewed.
+
+## Source
+
+- Kind: `{source_kind}`
+- URL: `{source_url}`
+- Adapter: `{adapter_kind}`
+
+## Adapter Goal
+
+{adapter_goal}
+
+## Runtime Boundary
+
+{runtime_boundary}
+
+## Source Extraction Targets
+
+{extraction_targets}
+
+## Contract
+
+- Input: JSON object with `instruction` and optional `arguments`.
+- Output: JSON object with `status`, `summary`, and optional `artifacts`.
+- Capabilities: none are granted by this draft. Add least-privilege capabilities only after review.
+
+## Packaging Plan
+
+{packaging_plan}
+
+## Guardrails
+
+- Do not execute fetched source code.
+- Do not install dependencies globally.
+- Do not read credentials or environment secret files.
+- Do not bypass chat pairing, platform signature checks, or approval gates.
+- Do not activate or publish this skill from the draft alone.
+
+## Activation Checklist
+
+- Source hash and publisher identity are recorded.
+- Input/output contract is reviewed.
+- Sandbox tests pass.
+- Existing chat ingress behavior is verified.
+- Artifact hash and trusted publisher signature are attached when packaged.
+"#,
+        skill_id = markdown_inline(skill_id),
+        source_kind = markdown_inline(source_kind),
+        source_url = markdown_inline(source_url),
+        adapter_kind = markdown_inline(adapter_kind),
+        adapter_goal = markdown_inline(adapter_goal),
+        runtime_boundary = markdown_inline(runtime_boundary),
+        extraction_targets = extraction_targets,
+        packaging_plan = packaging_plan,
+    )
+}
+
+fn render_skill_intake_wasm_adapter_readme(
+    skill_id: &str,
+    artifact_slug: &str,
+    source_kind: &str,
+    source_url: &str,
+    source_sha256: &str,
+    conversion_spec: &Value,
+) -> String {
+    let adapter_kind = conversion_spec
+        .get("adapterKind")
+        .and_then(Value::as_str)
+        .unwrap_or("manual_review_adapter");
+    let runtime_boundary = conversion_spec
+        .get("runtimeBoundary")
+        .and_then(Value::as_str)
+        .unwrap_or("No execution until the adapter is reviewed.");
+    let packaging_plan = markdown_bullet_list(
+        conversion_spec.get("packagingPlan"),
+        "Review, build, pack, sign, and install after sandbox tests pass.",
+    );
+    format!(
+        r#"# Wasm Adapter Scaffold for {skill_id}
+
+Status: draft, review required.
+
+This scaffold is a minimal Rust/Wasm adapter boundary for the online skill-intake source. It does not execute fetched source code and does not grant filesystem, network, desktop, or credential access.
+
+## Source
+
+- Kind: `{source_kind}`
+- URL: `{source_url}`
+- SHA-256: `{source_sha256}`
+- Adapter: `{adapter_kind}`
+
+## Runtime Boundary
+
+{runtime_boundary}
+
+## Draft Check
+
+Run this before building or packing the adapter:
+
+```powershell
+dawn-node skills check-draft docs/skill-intake/{artifact_slug}
+```
+
+## Build
+
+From the workspace root, prefer the guarded draft builder:
+
+```powershell
+rustup target add wasm32-unknown-unknown
+dawn-node skills build-draft docs/skill-intake/{artifact_slug}
+```
+
+Manual cargo build is only for reviewed adapters that still satisfy the draft safety checks:
+
+```powershell
+cargo build --release --target wasm32-unknown-unknown
+```
+
+## Metadata ABI
+
+The scaffold exports:
+
+- `run_skill`
+- `dawn_adapter_metadata_ptr`
+- `dawn_adapter_metadata_len`
+- `dawn_adapter_metadata_version`
+
+Review tooling can read the static metadata bytes from Wasm memory and compare them with `contract.json` before any real adapter behavior is added.
+
+## Package From Draft
+
+From the workspace root, prefer the governed draft packer:
+
+```powershell
+dawn-node skills pack-draft docs/skill-intake/{artifact_slug} --wasm-path docs/skill-intake/{artifact_slug}/wasm-adapter/target/wasm32-unknown-unknown/release/{artifact_slug}.wasm --signing-key-hex <publisher-private-key-hex> --verification-report docs/skill-intake/{artifact_slug}/verification-report.json
+```
+
+For local development only, replace signing with `--allow-unsigned-development`; do not distribute unsigned packages.
+
+## Test Draft
+
+Run the safe sandbox matrix after building and packing:
+
+```powershell
+dawn-node skills test-draft docs/skill-intake/{artifact_slug} --wasm-path docs/skill-intake/{artifact_slug}/wasm-adapter/target/wasm32-unknown-unknown/release/{artifact_slug}.wasm --package-path docs/skill-intake/{artifact_slug}/{artifact_slug}.skill-package.json --report docs/skill-intake/{artifact_slug}/sandbox-report.json
+```
+
+For unsigned local development packages, add `--allow-unsigned-development`.
+
+## Install Checked Draft
+
+After `check-draft`, `pack-draft`, and `test-draft` all pass, install the reviewed package through the draft evidence gate:
+
+```powershell
+dawn-node skills install-draft docs/skill-intake/{artifact_slug} --package-path docs/skill-intake/{artifact_slug}/{artifact_slug}.skill-package.json --sandbox-report docs/skill-intake/{artifact_slug}/sandbox-report.json
+```
+
+This installs the package inactive by default. Activation requires a separate operator decision and explicit confirmation:
+
+```powershell
+dawn-node skills install-draft docs/skill-intake/{artifact_slug} --package-path docs/skill-intake/{artifact_slug}/{artifact_slug}.skill-package.json --sandbox-report docs/skill-intake/{artifact_slug}/sandbox-report.json --activate --confirm-activation {skill_id}@0.0.0-review
+```
+
+## Manual Package
+
+```powershell
+dawn-node skills pack-wasm target/wasm32-unknown-unknown/release/{artifact_slug}.wasm --skill-id {skill_id} --version 0.0.0-review --output ../{artifact_slug}.skill-package.json --display-name "{skill_id}" --preflight-checklist ../preflight-checklist.json --require-adapter-metadata
+dawn-node skills verify-package ../{artifact_slug}.skill-package.json --preflight-checklist ../preflight-checklist.json --require-adapter-metadata
+```
+
+For normal distribution, sign the package and add `--require-signed` to verification.
+
+## Packaging Plan
+
+{packaging_plan}
+
+## Required Review Before Real Use
+
+- Replace the placeholder `run_skill` implementation with reviewed adapter logic.
+- Keep all source-specific permissions in `contract.json`.
+- Run sandbox tests before packing.
+- Prefer signed packages and trusted publisher roots for normal installation.
+"#,
+        skill_id = markdown_inline(skill_id),
+        artifact_slug = markdown_inline(artifact_slug),
+        source_kind = markdown_inline(source_kind),
+        source_url = markdown_inline(source_url),
+        source_sha256 = markdown_inline(source_sha256),
+        adapter_kind = markdown_inline(adapter_kind),
+        runtime_boundary = markdown_inline(runtime_boundary),
+        packaging_plan = packaging_plan,
+    )
+}
+
+fn render_skill_intake_wasm_adapter_cargo(artifact_slug: &str) -> String {
+    format!(
+        r#"[package]
+name = "{artifact_slug}"
+version = "0.0.0-review"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+"#,
+        artifact_slug = markdown_inline(artifact_slug),
+    )
+}
+
+fn render_skill_intake_wasm_adapter_lib(
+    skill_id: &str,
+    source_kind: &str,
+    source_url: &str,
+    conversion_spec: &Value,
+) -> String {
+    let adapter_kind = conversion_spec
+        .get("adapterKind")
+        .and_then(Value::as_str)
+        .unwrap_or("manual_review_adapter");
+    let runtime_boundary = conversion_spec
+        .get("runtimeBoundary")
+        .and_then(Value::as_str)
+        .unwrap_or("No execution until the adapter is reviewed.");
+    let metadata = json!({
+        "abi": "dawn.skill.intake.adapter.metadata.v1",
+        "skillId": skill_id,
+        "sourceKind": source_kind,
+        "sourceUrl": source_url,
+        "adapterKind": adapter_kind,
+        "runtimeBoundary": runtime_boundary,
+        "status": "review_required",
+        "fetchedCodeExecution": "forbidden",
+        "automaticActivation": false
+    });
+    let metadata_json = serde_json::to_string(&metadata)
+        .unwrap_or_else(|_| "{\"abi\":\"dawn.skill.intake.adapter.metadata.v1\"}".to_string());
+    format!(
+        r#"#![no_std]
+
+// Draft Dawn Wasm adapter scaffold.
+// Review contract.json and sandbox-tests.md before adding real adapter behavior.
+// This placeholder intentionally performs no I/O and does not execute fetched source code.
+
+const SKILL_ID: &str = {skill_id_literal};
+const SOURCE_KIND: &str = {source_kind_literal};
+const SOURCE_URL: &str = {source_url_literal};
+const ADAPTER_KIND: &str = {adapter_kind_literal};
+const RUNTIME_BOUNDARY: &str = {runtime_boundary_literal};
+static DAWN_ADAPTER_METADATA: &[u8] = {metadata_literal};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_skill() {{
+    let _ = (
+        SKILL_ID,
+        SOURCE_KIND,
+        SOURCE_URL,
+        ADAPTER_KIND,
+        RUNTIME_BOUNDARY,
+        DAWN_ADAPTER_METADATA,
+    );
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dawn_adapter_metadata_ptr() -> *const u8 {{
+    DAWN_ADAPTER_METADATA.as_ptr()
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dawn_adapter_metadata_len() -> usize {{
+    DAWN_ADAPTER_METADATA.len()
+}}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dawn_adapter_metadata_version() -> u32 {{
+    1
+}}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {{
+    loop {{}}
+}}
+"#,
+        skill_id_literal = rust_string_literal(skill_id),
+        source_kind_literal = rust_string_literal(source_kind),
+        source_url_literal = rust_string_literal(source_url),
+        adapter_kind_literal = rust_string_literal(adapter_kind),
+        runtime_boundary_literal = rust_string_literal(runtime_boundary),
+        metadata_literal = rust_byte_string_literal(&metadata_json),
+    )
+}
+
+fn rust_byte_string_literal(value: &str) -> String {
+    let mut output = String::from("b\"");
+    for byte in value.bytes().take(2000) {
+        match byte {
+            b'\\' => output.push_str("\\\\"),
+            b'"' => output.push_str("\\\""),
+            b'\n' => output.push_str("\\n"),
+            b'\r' => output.push_str("\\r"),
+            b'\t' => output.push_str("\\t"),
+            0x20..=0x7e => output.push(byte as char),
+            _ => output.push('?'),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn rust_string_literal(value: &str) -> String {
+    let mut output = String::from("\"");
+    for ch in value.chars().take(1000) {
+        match ch {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_ascii_graphic() || ch == ' ' => output.push(ch),
+            _ => output.push('?'),
+        }
+    }
+    output.push('"');
+    output
 }
 
 fn normalize_patch_manifest(
@@ -3622,7 +4982,7 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
     use super::{
@@ -3964,6 +5324,88 @@ mod tests {
     }
 
     #[test]
+    fn builds_conversion_plan_for_approved_skill_intake_proposal() {
+        let now = unix_timestamp_ms();
+        let proposal_id = Uuid::new_v4();
+        let proposal = SkillProposalRecord {
+            proposal_id,
+            proposal_key: "skill-intake:abc123".to_string(),
+            title: "Convert codex skill".to_string(),
+            summary: "Convert online source.".to_string(),
+            rationale: "Needs reviewed conversion.".to_string(),
+            suggested_skill_id: "import.codex-skill-markdown.skill".to_string(),
+            source: "skill-intake".to_string(),
+            status: "approved".to_string(),
+            confidence: 0.9,
+            evidence: json!({
+                "intake": {
+                    "sourceUrl": "https://raw.githubusercontent.com/example/repo/main/SKILL.md",
+                    "sourceSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "sourcePreview": "Sample Skill markdown preview",
+                    "detectedKind": "codex_skill_markdown",
+                    "recommendedAction": "Convert this Codex SKILL.md into a Dawn native workflow."
+                },
+                "conversionPlan": {
+                    "planKind": "online_skill_source_conversion",
+                    "sourceKind": "codex_skill_markdown",
+                    "installability": "conversion_required",
+                    "recommendedAction": "Convert this Codex SKILL.md into a Dawn native workflow.",
+                    "requiredSteps": ["Extract allowed commands", "Generate tests"],
+                    "warnings": ["Instruction files are not executable Dawn skill artifacts."],
+                    "conversionSpec": {
+                        "adapterKind": "codex_skill_markdown_adapter",
+                        "runtimeBoundary": "Dawn executes only reviewed adapter commands.",
+                        "extractionTargets": ["allowed commands or APIs"],
+                        "permissionReview": ["shell commands"],
+                        "sandboxCases": ["forbidden command is denied"]
+                    }
+                }
+            }),
+            tags: vec![
+                "skill-intake".to_string(),
+                "conversion-required".to_string(),
+            ],
+            risk_level: "guarded".to_string(),
+            created_by: "test".to_string(),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+
+        let plan = build_skill_implementation_plan(proposal, "operator", now + 1)
+            .expect("approved intake proposal should produce conversion plan");
+
+        assert_eq!(plan.status, "draft");
+        assert_eq!(plan.created_by, "operator");
+        assert_eq!(plan.suggested_skill_id, "import.codex-skill-markdown.skill");
+        assert!(plan.summary.contains("codex_skill_markdown"));
+        assert_eq!(
+            plan.guardrails["conversionSourceKind"],
+            "codex_skill_markdown"
+        );
+        assert_eq!(plan.guardrails["sourceProposalId"], proposal_id.to_string());
+        assert_eq!(
+            plan.guardrails["sourceConversionSpec"]["adapterKind"],
+            "codex_skill_markdown_adapter"
+        );
+        assert_eq!(
+            plan.guardrails["sourceSha256"],
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(plan.guardrails["autonomousPublish"], false);
+        assert!(plan.steps.to_string().contains("SKILL.md"));
+        assert!(
+            plan.acceptance_criteria
+                .to_string()
+                .contains("Sandbox tests")
+        );
+        assert!(
+            plan.guardrails["forbiddenWithoutSeparateApproval"]
+                .to_string()
+                .contains("executing fetched code")
+        );
+    }
+
+    #[test]
     fn rejects_implementation_plan_for_unapproved_proposal() {
         let now = unix_timestamp_ms();
         let proposal = SkillProposalRecord {
@@ -4077,6 +5519,73 @@ mod tests {
             run.rollback["manualRollbackOnly"]
                 .as_bool()
                 .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn builds_conversion_draft_run_from_approved_skill_intake_plan() {
+        let now = unix_timestamp_ms();
+        let plan = SkillImplementationPlanRecord {
+            plan_id: Uuid::new_v4(),
+            proposal_id: Uuid::new_v4(),
+            suggested_skill_id: "import.codex-skill-markdown.skill".to_string(),
+            title: "Draft conversion plan".to_string(),
+            summary: "Convert codex_skill_markdown source into a reviewed skill.".to_string(),
+            status: "approved".to_string(),
+            steps: json!([
+                {"order": 1, "name": "Freeze source and fingerprint"},
+                {"order": 2, "name": "Generate sandbox tests"}
+            ]),
+            acceptance_criteria: json!(["Sandbox tests pass before activation."]),
+            guardrails: json!({
+                "autonomousCodeMutation": false,
+                "requiresHumanReviewBeforeActivation": true,
+                "conversionSourceKind": "codex_skill_markdown",
+                "conversionSourceUrl": "https://raw.githubusercontent.com/example/repo/main/SKILL.md",
+                "sourceWarnings": ["Instruction files are not executable Dawn skill artifacts."],
+                "sourceRequiredSteps": ["Extract allowed commands", "Generate tests"]
+            }),
+            created_by: "test".to_string(),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+
+        let run = build_skill_implementation_run(plan, "operator", now + 1)
+            .expect("approved intake conversion plan should produce a draft run package");
+
+        assert_eq!(run.status, "prepared");
+        assert_eq!(run.execution_mode, "guarded_conversion_draft_only");
+        assert_eq!(
+            run.change_package["kind"],
+            "skill_intake_conversion_draft_package"
+        );
+        assert_eq!(
+            run.change_package["conversionSourceKind"],
+            "codex_skill_markdown"
+        );
+        assert!(
+            run.change_package["draftArtifacts"]
+                .as_array()
+                .expect("draft artifacts should be listed")
+                .len()
+                >= 4
+        );
+        assert!(
+            run.change_package["sandboxTestSkeleton"]["cases"]
+                .to_string()
+                .contains("permission_denied")
+        );
+        assert_eq!(
+            run.change_package["signingManifestDraft"]["activationPolicy"],
+            "separate_review_required"
+        );
+        assert_eq!(run.guardrails["draftArtifactsOnly"], true);
+        assert_eq!(run.guardrails["execution"], "not_executed");
+        assert_eq!(run.guardrails["activation"], "not_activated");
+        assert!(
+            run.verification["requiredCommands"]
+                .to_string()
+                .contains("skill_registry")
         );
     }
 
@@ -4453,6 +5962,249 @@ mod tests {
         assert_eq!(patch.guardrails["apiAppliedPatch"], false);
         assert_eq!(patch.guardrails["activation"], "not_activated");
         assert_eq!(patch.rollback_plan["manualRollbackOnly"], true);
+    }
+
+    #[tokio::test]
+    async fn builds_skill_intake_conversion_patch_draft_and_apply_dry_run() {
+        let now = unix_timestamp_ms();
+        let execution = SkillImplementationExecutionRecord {
+            execution_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            plan_id: Uuid::new_v4(),
+            proposal_id: Uuid::new_v4(),
+            suggested_skill_id: "import.codex-skill-markdown.skill".to_string(),
+            status: "verification_succeeded".to_string(),
+            executor: "gateway-verification".to_string(),
+            preflight_report: json!({"status": "passed"}),
+            command_plan: json!({
+                "requiredCommands": [
+                    "cargo check --manifest-path dawn_core/Cargo.toml",
+                    "cargo test --manifest-path dawn_core/Cargo.toml skill_registry -- --test-threads=1"
+                ],
+                "allowedTargetAreas": ["docs/skill-intake", "workflow/native_skills"],
+                "protectedAreas": ["credentials and environment files"]
+            }),
+            result: json!({
+                "execution": "verification_succeeded",
+                "apiExecutedMutationCommands": false
+            }),
+            guardrails: json!({
+                "autonomousCodeMutation": false,
+                "activation": "not_activated",
+                "sourceRunGuardrails": {
+                    "sourcePlanGuardrails": {
+                        "conversionSourceKind": "codex_skill_markdown",
+                        "conversionSourceUrl": "https://raw.githubusercontent.com/example/repo/main/SKILL.md",
+                        "sourceSha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                        "sourcePreview": "Sample SKILL.md preview",
+                        "sourceWarnings": ["Instruction files are not executable Dawn skill artifacts."],
+                        "sourceRequiredSteps": ["Extract allowed commands", "Generate tests"],
+                        "sourceConversionSpec": {
+                            "adapterKind": "codex_skill_markdown_adapter",
+                            "adapterGoal": "Translate Codex SKILL.md operational instructions into a Dawn native workflow draft.",
+                            "runtimeBoundary": "Dawn executes only reviewed adapter commands.",
+                            "extractionTargets": ["allowed commands or APIs"],
+                            "permissionReview": ["shell commands"],
+                            "sandboxCases": ["forbidden command is denied"],
+                            "packagingPlan": ["pack adapter Wasm with dawn-node skills pack-wasm"]
+                        }
+                    }
+                }
+            }),
+            created_by: "test".to_string(),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+
+        let patch = build_skill_implementation_patch(
+            execution,
+            CreateImplementationPatchRequest {
+                created_by: Some("operator".to_string()),
+                summary: None,
+                changed_files: None,
+                patch_manifest: None,
+            },
+            now + 1,
+        )
+        .expect("verified intake conversion execution should produce a draft patch");
+
+        assert_eq!(patch.status, "draft");
+        assert_eq!(patch.patch_kind, "skill_intake_conversion_draft_candidate");
+        assert_eq!(
+            patch.patch_manifest["kind"],
+            "skill_intake_conversion_draft_candidate"
+        );
+        assert_eq!(patch.patch_manifest["draftOnly"], true);
+        assert_eq!(patch.guardrails["apiGeneratedPatch"], true);
+        assert_eq!(patch.guardrails["apiAppliedPatch"], false);
+        assert!(patch.changed_files.to_string().contains("contract.json"));
+        assert!(
+            patch
+                .changed_files
+                .to_string()
+                .contains("preflight-checklist.json")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .get("fileChanges")
+                .and_then(Value::as_array)
+                .expect("file changes should be generated")
+                .len()
+                >= 8
+        );
+        let preflight_change = patch
+            .patch_manifest
+            .get("fileChanges")
+            .and_then(Value::as_array)
+            .expect("file changes should be generated")
+            .iter()
+            .find(|change| {
+                change
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| path.ends_with("preflight-checklist.json"))
+            })
+            .expect("preflight checklist should be generated");
+        let preflight: Value = serde_json::from_str(
+            preflight_change
+                .get("newContent")
+                .and_then(Value::as_str)
+                .expect("preflight checklist should have JSON content"),
+        )
+        .expect("preflight checklist should be valid JSON");
+        assert_eq!(preflight["kind"], "dawn_skill_intake_preflight_checklist");
+        assert_eq!(preflight["installPolicy"]["automaticInstall"], false);
+        assert_eq!(
+            preflight["installPolicy"]["signedPackageRequiredForNormalUse"],
+            true
+        );
+        assert!(preflight["gates"].to_string().contains("metadata_abi"));
+        assert!(
+            preflight["gates"]
+                .to_string()
+                .contains("dawn_adapter_metadata_ptr")
+        );
+        assert!(patch.patch_manifest.to_string().contains("untrusted_code"));
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("codex_skill_markdown_adapter")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("forbidden command is denied")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("wasm-adapter/src/lib.rs")
+        );
+        assert!(patch.patch_manifest.to_string().contains("run_skill"));
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("dawn_adapter_metadata_ptr")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("dawn_adapter_metadata_len")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("dawn.skill.intake.adapter.metadata.v1")
+        );
+        assert!(patch.patch_manifest.to_string().contains("#![no_std]"));
+        assert!(patch.patch_manifest.to_string().contains("check-draft"));
+        assert!(patch.patch_manifest.to_string().contains("build-draft"));
+        assert!(patch.patch_manifest.to_string().contains("pack-draft"));
+        assert!(patch.patch_manifest.to_string().contains("test-draft"));
+        assert!(patch.patch_manifest.to_string().contains("install-draft"));
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("package_integrity")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("activation_approval")
+        );
+        assert!(patch.patch_manifest.to_string().contains("pack-wasm"));
+        assert!(patch.patch_manifest.to_string().contains("verify-package"));
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("--preflight-checklist ../preflight-checklist.json")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("--require-adapter-metadata")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+        );
+        assert!(
+            patch
+                .patch_manifest
+                .to_string()
+                .contains("Sample SKILL.md preview")
+        );
+
+        let patch_id = patch.patch_id;
+        let reviewed = apply_skill_implementation_patch_review(
+            patch,
+            SkillImplementationPatchReviewRequest {
+                status: "approved_for_apply".to_string(),
+                reviewer: Some("operator".to_string()),
+                note: Some("Dry-run generated conversion draft.".to_string()),
+            },
+            now + 2,
+        )
+        .expect("patch review should apply");
+
+        let workspace = temp_patch_workspace();
+        let applied = apply_skill_implementation_patch_candidate(
+            reviewed,
+            ApplyImplementationPatchRequest {
+                requested_by: Some("operator".to_string()),
+                confirm_patch_id: None,
+                dry_run: Some(true),
+            },
+            workspace.clone(),
+        )
+        .await
+        .expect("generated draft patch should be dry-run applyable");
+
+        assert_eq!(applied.patch_id, patch_id);
+        assert_eq!(applied.status, "apply_dry_run_succeeded");
+        assert_eq!(applied.guardrails["apiAppliedPatch"], false);
+        assert!(
+            !workspace
+                .join("docs")
+                .join("skill-intake")
+                .join("import-codex-skill-markdown-skill")
+                .join("contract.json")
+                .exists()
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

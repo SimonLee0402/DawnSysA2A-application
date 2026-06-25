@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, anyhow};
@@ -13,6 +13,8 @@ use axum::{
 };
 use base64::prelude::*;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use futures_util::StreamExt;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,10 +22,15 @@ use sqlx::FromRow;
 use tokio::fs;
 use wasmtime::Module;
 
-use crate::app_state::{AppState, SkillPublisherTrustRootRecord, unix_timestamp_ms};
+use crate::app_state::{
+    AppState, SkillProposalRecord, SkillPublisherTrustRootRecord, unix_timestamp_ms,
+};
+use uuid::Uuid;
 
 pub const SKILL_PUBLISHER_ISSUER_DID_PREFIX: &str = "did:dawn:skill-publisher:";
 pub const NATIVE_BUILTIN_SOURCE_KIND: &str = "native_builtin";
+const SKILL_INTAKE_MAX_BYTES: usize = 1_048_576;
+const SKILL_PACKAGE_MAX_BYTES: usize = 16 * 1_048_576;
 
 struct NativeBuiltinSkillSpec {
     skill_id: &'static str,
@@ -274,6 +281,50 @@ pub struct InstallSkillPackageRequest {
     pub allow_unsigned: Option<bool>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillIntakeRequest {
+    pub source_url: String,
+    pub source_kind_hint: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillIntakeProposalRequest {
+    pub source_url: String,
+    pub source_kind_hint: Option<String>,
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillIntakeResponse {
+    pub source_url: String,
+    pub content_type: Option<String>,
+    pub source_sha256: Option<String>,
+    pub source_preview: Option<String>,
+    pub detected_kind: String,
+    pub confidence: f32,
+    pub installability: String,
+    pub direct_install_url: Option<String>,
+    pub conversion_required: bool,
+    pub requires_trusted_publisher: bool,
+    pub allow_unsigned_supported: bool,
+    pub recommended_action: String,
+    pub findings: Vec<String>,
+    pub warnings: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillIntakeProposalResponse {
+    pub intake: SkillIntakeResponse,
+    pub proposal: Option<SkillProposalRecord>,
+    pub created: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillActivationResponse {
@@ -305,6 +356,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/register", post(register_skill))
         .route("/register/signed", post(register_signed_skill))
         .route("/install", post(install_skill_package))
+        .route("/intake", post(intake_skill_source))
+        .route("/intake/proposal", post(propose_skill_from_intake))
         .route(
             "/trust-roots",
             get(list_skill_publisher_trust_roots).post(upsert_skill_publisher_trust_root),
@@ -505,6 +558,25 @@ async fn install_skill_package(
         .map_err(internal_error)
 }
 
+async fn intake_skill_source(
+    Json(request): Json<SkillIntakeRequest>,
+) -> Result<Json<SkillIntakeResponse>, (StatusCode, Json<Value>)> {
+    inspect_skill_source_from_url(request)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn propose_skill_from_intake(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SkillIntakeProposalRequest>,
+) -> Result<Json<SkillIntakeProposalResponse>, (StatusCode, Json<Value>)> {
+    create_skill_intake_proposal(&state, request)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
 async fn activate_skill_version(
     State(state): State<Arc<AppState>>,
     AxumPath((skill_id, version)): AxumPath<(String, String)>,
@@ -570,8 +642,10 @@ pub async fn install_skill_package_from_url(
     let package_url_display = package_url.to_string();
     let package = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(20))
         .build()?
         .get(package_url)
+        .header(ACCEPT, "application/json")
         .send()
         .await
         .with_context(|| format!("failed to fetch skill package {}", package_url_display))?
@@ -581,9 +655,10 @@ pub async fn install_skill_package_from_url(
                 "skill package endpoint returned an error {}",
                 package_url_display
             )
-        })?
-        .json::<SkillPackageResponse>()
-        .await
+        })?;
+    let package_body =
+        read_limited_response_body(package, SKILL_PACKAGE_MAX_BYTES, "skill package").await?;
+    let package = serde_json::from_slice::<SkillPackageResponse>(&package_body)
         .with_context(|| format!("failed to decode skill package {}", package_url_display))?;
 
     if package.skill.source_kind == NATIVE_BUILTIN_SOURCE_KIND {
@@ -620,6 +695,934 @@ pub async fn install_skill_package_from_url(
     } else {
         anyhow::bail!("remote skill package is unsigned; set allowUnsigned=true to install it")
     }
+}
+
+pub async fn inspect_skill_source_from_url(
+    request: SkillIntakeRequest,
+) -> anyhow::Result<SkillIntakeResponse> {
+    let source_url = crate::security::validate_public_http_url(&request.source_url, "sourceUrl")?;
+    let source_url_display = source_url.to_string();
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(12))
+        .build()?
+        .get(source_url.clone())
+        .header(
+            ACCEPT,
+            "application/json, text/markdown, text/plain, text/x-python, text/x-toml, */*;q=0.2",
+        )
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch skill intake source {source_url_display}"))?
+        .error_for_status()
+        .with_context(|| {
+            format!("skill intake source endpoint returned an error {source_url_display}")
+        })?;
+
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body =
+        read_limited_response_body(response, SKILL_INTAKE_MAX_BYTES, "skill intake source").await?;
+
+    let source_sha256 = hex::encode(Sha256::digest(&body));
+    let text = String::from_utf8_lossy(&body);
+    Ok(inspect_skill_source_text_with_evidence(
+        &source_url_display,
+        content_type,
+        &text,
+        request.source_kind_hint.as_deref(),
+        source_sha256,
+        skill_source_preview(&text),
+    ))
+}
+
+async fn read_limited_response_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> anyhow::Result<Vec<u8>> {
+    if let Some(length) = response.content_length() {
+        if length > max_bytes as u64 {
+            anyhow::bail!("{label} is too large: {length} bytes exceeds {max_bytes}");
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("failed while reading {label}"))?;
+        if body.len() + chunk.len() > max_bytes {
+            anyhow::bail!("{label} exceeded {max_bytes} bytes while reading");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+pub async fn create_skill_intake_proposal(
+    state: &Arc<AppState>,
+    request: SkillIntakeProposalRequest,
+) -> anyhow::Result<SkillIntakeProposalResponse> {
+    let intake = inspect_skill_source_from_url(SkillIntakeRequest {
+        source_url: request.source_url,
+        source_kind_hint: request.source_kind_hint,
+    })
+    .await?;
+
+    if !intake.conversion_required {
+        return Ok(SkillIntakeProposalResponse {
+            intake,
+            proposal: None,
+            created: false,
+            message:
+                "No conversion proposal was created because this source is directly installable or already available."
+                    .to_string(),
+        });
+    }
+
+    let proposal_key = skill_intake_proposal_key(&intake);
+    if let Some(existing) = state.get_skill_proposal_by_key(&proposal_key).await? {
+        return Ok(SkillIntakeProposalResponse {
+            intake,
+            proposal: Some(existing),
+            created: false,
+            message: "Existing conversion proposal returned for this source URL and content hash."
+                .to_string(),
+        });
+    }
+
+    let proposal = build_skill_intake_conversion_proposal(
+        &intake,
+        request.actor.as_deref(),
+        Uuid::new_v4(),
+        unix_timestamp_ms(),
+    )
+    .ok_or_else(|| anyhow!("intake source did not require conversion"))?;
+    let proposal = state.upsert_skill_proposal(proposal).await?;
+    Ok(SkillIntakeProposalResponse {
+        intake,
+        proposal: Some(proposal),
+        created: true,
+        message: "Created a reviewed conversion proposal for this online skill source.".to_string(),
+    })
+}
+
+#[cfg(test)]
+fn inspect_skill_source_text(
+    source_url: &str,
+    content_type: Option<String>,
+    text: &str,
+    source_kind_hint: Option<&str>,
+) -> SkillIntakeResponse {
+    inspect_skill_source_text_with_evidence(
+        source_url,
+        content_type,
+        text,
+        source_kind_hint,
+        hex::encode(Sha256::digest(text.as_bytes())),
+        skill_source_preview(text),
+    )
+}
+
+fn inspect_skill_source_text_with_evidence(
+    source_url: &str,
+    content_type: Option<String>,
+    text: &str,
+    source_kind_hint: Option<&str>,
+    source_sha256: String,
+    source_preview: Option<String>,
+) -> SkillIntakeResponse {
+    let mut response = classify_skill_source_text(source_url, content_type, text, source_kind_hint);
+    response.source_sha256 = Some(source_sha256);
+    response.source_preview = source_preview;
+    response
+}
+
+fn classify_skill_source_text(
+    source_url: &str,
+    content_type: Option<String>,
+    text: &str,
+    source_kind_hint: Option<&str>,
+) -> SkillIntakeResponse {
+    let hint = source_kind_hint
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let parsed_json = serde_json::from_str::<Value>(text).ok();
+    if let Some(value) = parsed_json.as_ref() {
+        if looks_like_dawn_skill_package(value) {
+            return dawn_skill_package_intake_response(source_url, content_type, value);
+        }
+        if looks_like_marketplace_catalog(value) {
+            return skill_intake_response(
+                source_url,
+                content_type,
+                "dawn_marketplace_catalog",
+                0.96,
+                "catalog_select_then_install",
+                None,
+                true,
+                false,
+                false,
+                "Search the catalog and install a selected signed skill entry through `dawn-node skills install --federated` or the local marketplace UI.",
+                vec!["The source exposes a Dawn marketplace catalog.".to_string()],
+                vec![],
+                vec![
+                    "Add or enable the marketplace peer if this catalog is remote.".to_string(),
+                    "Run `dawn-node skills search <query> --federated` to select a concrete skill package.".to_string(),
+                ],
+            );
+        }
+        if looks_like_browser_extension_manifest(value) {
+            return skill_intake_response(
+                source_url,
+                content_type,
+                "browser_extension",
+                0.92,
+                "conversion_required",
+                None,
+                true,
+                false,
+                false,
+                "Convert the extension into a reviewed Dawn browser-control skill or keep it as a browser extension managed outside the skill registry.",
+                vec!["The source looks like a browser extension manifest.".to_string()],
+                vec![
+                    "Browser extensions are not safe to install as Dawn Wasm skills directly."
+                        .to_string(),
+                ],
+                vec![
+                    "Review requested browser permissions.".to_string(),
+                    "Wrap only the required workflow as a signed Dawn skill or native workflow."
+                        .to_string(),
+                ],
+            );
+        }
+        if looks_like_mcp_package_json(value) {
+            return skill_intake_response(
+                source_url,
+                content_type,
+                "mcp_server_project",
+                0.94,
+                "conversion_required",
+                None,
+                true,
+                false,
+                false,
+                "Create a Dawn adapter that runs this MCP server through an approved connector boundary, then publish the adapter as a signed skill.",
+                vec!["The source looks like a Node package for an MCP server.".to_string()],
+                vec!["MCP servers are long-running tools, not portable Wasm skills.".to_string()],
+                vec![
+                    "Pin dependencies and define allowed tools/resources.".to_string(),
+                    "Add sandbox startup and health checks.".to_string(),
+                    "Publish a signed Dawn wrapper skill after review.".to_string(),
+                ],
+            );
+        }
+    }
+
+    let normalized_url = source_url.to_ascii_lowercase();
+    let normalized_text = text.to_ascii_lowercase();
+    if hint.as_deref() == Some("codex-skill")
+        || normalized_url.ends_with("/skill.md")
+        || looks_like_codex_skill_markdown(text)
+    {
+        return skill_intake_response(
+            source_url,
+            content_type,
+            "codex_skill_markdown",
+            0.9,
+            "conversion_required",
+            None,
+            true,
+            false,
+            false,
+            "Convert this Codex SKILL.md into a Dawn native workflow or a signed Wasm skill package before activation.",
+            vec!["The source looks like a Codex-style SKILL.md instruction file.".to_string()],
+            vec!["Instruction files may contain operational guidance but are not executable Dawn skill artifacts.".to_string()],
+            vec![
+                "Extract allowed commands, inputs, outputs, and safety constraints.".to_string(),
+                "Generate tests for the workflow.".to_string(),
+                "Package the result as a signed Dawn skill or native builtin proposal.".to_string(),
+            ],
+        );
+    }
+    if hint.as_deref() == Some("mcp")
+        || normalized_text.contains("@modelcontextprotocol/sdk")
+        || normalized_text.contains("model context protocol")
+    {
+        return skill_intake_response(
+            source_url,
+            content_type,
+            "mcp_server_project",
+            0.82,
+            "conversion_required",
+            None,
+            true,
+            false,
+            false,
+            "Wrap this MCP project behind a Dawn-approved connector boundary before making it available as an agent skill.",
+            vec!["The source references MCP.".to_string()],
+            vec!["MCP projects need runtime supervision and tool allowlisting.".to_string()],
+            vec![
+                "Inspect the exposed MCP tools and resource templates.".to_string(),
+                "Define a least-privilege Dawn skill wrapper.".to_string(),
+            ],
+        );
+    }
+    if hint.as_deref() == Some("python")
+        || normalized_url.ends_with("pyproject.toml")
+        || normalized_url.ends_with("setup.py")
+        || normalized_url.ends_with("requirements.txt")
+        || normalized_text.contains("[project]")
+        || normalized_text.contains("setup(")
+    {
+        return skill_intake_response(
+            source_url,
+            content_type,
+            "python_tooling_project",
+            0.82,
+            "conversion_required",
+            None,
+            true,
+            false,
+            false,
+            "Build a sandboxed Python runner or compile a narrow Wasm-compatible wrapper instead of installing this project directly.",
+            vec!["The source looks like Python tooling or package metadata.".to_string()],
+            vec!["Python packages can execute arbitrary install-time or runtime code.".to_string()],
+            vec![
+                "Pin dependencies and choose a sandbox profile.".to_string(),
+                "Expose a small JSON input/output contract.".to_string(),
+                "Require review before activation.".to_string(),
+            ],
+        );
+    }
+    if normalized_url.contains("github.com/") || normalized_url.contains("gitlab.com/") {
+        return skill_intake_response(
+            source_url,
+            content_type,
+            "git_repository",
+            0.72,
+            "conversion_required",
+            None,
+            true,
+            false,
+            false,
+            "Inspect repository contents and generate a Dawn skill proposal; do not install repository code directly.",
+            vec!["The source is a Git hosting URL.".to_string()],
+            vec!["Repository pages are not Dawn skill packages and may contain multiple unrelated projects.".to_string()],
+            vec![
+                "Locate a Dawn package, SKILL.md, MCP manifest, pyproject.toml, or plugin manifest inside the repository.".to_string(),
+                "Run intake again on the exact raw manifest or package URL.".to_string(),
+            ],
+        );
+    }
+
+    skill_intake_response(
+        source_url,
+        content_type,
+        "unknown_online_resource",
+        0.35,
+        "unsupported_unknown",
+        None,
+        true,
+        false,
+        false,
+        "Manual review is required before this source can become a Dawn skill.",
+        vec!["The source did not match a known skill package or adapter pattern.".to_string()],
+        vec!["No automatic install path is available for this source.".to_string()],
+        vec![
+            "Provide a Dawn SkillPackage JSON URL for direct install.".to_string(),
+            "Or provide a raw SKILL.md, package.json, pyproject.toml, or browser manifest for conversion planning.".to_string(),
+        ],
+    )
+}
+
+fn dawn_skill_package_intake_response(
+    source_url: &str,
+    content_type: Option<String>,
+    value: &Value,
+) -> SkillIntakeResponse {
+    let skill_id = value
+        .pointer("/skill/skillId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let version = value
+        .pointer("/skill/version")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if value
+        .pointer("/skill/sourceKind")
+        .and_then(Value::as_str)
+        .is_some_and(|source_kind| source_kind == NATIVE_BUILTIN_SOURCE_KIND)
+    {
+        return skill_intake_response(
+            source_url,
+            content_type,
+            "dawn_native_builtin_reference",
+            0.99,
+            "already_available",
+            Some(source_url.to_string()),
+            false,
+            false,
+            false,
+            "No install is required; this native Dawn skill is already provided by the local gateway build.",
+            vec![format!(
+                "The source references Dawn native builtin skill {skill_id}@{version}."
+            )],
+            vec![],
+            vec!["Run `dawn-node skills search <skill-id> --all` or use `/skills` from chat to confirm availability.".to_string()],
+        );
+    }
+    let signed = value.get("envelope").is_some_and(|value| !value.is_null());
+    if signed {
+        skill_intake_response(
+            source_url,
+            content_type,
+            "dawn_signed_wasm_skill_package",
+            0.99,
+            "direct_install",
+            Some(source_url.to_string()),
+            false,
+            true,
+            false,
+            "Install with `dawn-node skills install-url <package-url>` after the publisher trust root is configured.",
+            vec![format!(
+                "The source is a Dawn signed Wasm skill package for {skill_id}@{version}."
+            )],
+            vec![],
+            vec![
+                "Confirm the skill publisher trust root exists locally.".to_string(),
+                "Run `dawn-node skills install-url <package-url>`.".to_string(),
+            ],
+        )
+    } else {
+        skill_intake_response(
+            source_url,
+            content_type,
+            "dawn_unsigned_wasm_skill_package",
+            0.96,
+            "direct_install_requires_allow_unsigned",
+            Some(source_url.to_string()),
+            false,
+            false,
+            true,
+            "Install only for development with `dawn-node skills install-url <package-url> --allow-unsigned`.",
+            vec![format!(
+                "The source is an unsigned Dawn Wasm skill package for {skill_id}@{version}."
+            )],
+            vec!["Unsigned remote skills should not be activated for normal users.".to_string()],
+            vec![
+                "Prefer asking the publisher for a signed package.".to_string(),
+                "Use `--allow-unsigned` only in a development or sandbox profile.".to_string(),
+            ],
+        )
+    }
+}
+
+fn skill_intake_response(
+    source_url: &str,
+    content_type: Option<String>,
+    detected_kind: &str,
+    confidence: f32,
+    installability: &str,
+    direct_install_url: Option<String>,
+    conversion_required: bool,
+    requires_trusted_publisher: bool,
+    allow_unsigned_supported: bool,
+    recommended_action: &str,
+    findings: Vec<String>,
+    warnings: Vec<String>,
+    next_steps: Vec<String>,
+) -> SkillIntakeResponse {
+    SkillIntakeResponse {
+        source_url: source_url.to_string(),
+        content_type,
+        source_sha256: None,
+        source_preview: None,
+        detected_kind: detected_kind.to_string(),
+        confidence,
+        installability: installability.to_string(),
+        direct_install_url,
+        conversion_required,
+        requires_trusted_publisher,
+        allow_unsigned_supported,
+        recommended_action: recommended_action.to_string(),
+        findings,
+        warnings,
+        next_steps,
+    }
+}
+
+fn build_skill_intake_conversion_proposal(
+    intake: &SkillIntakeResponse,
+    actor: Option<&str>,
+    proposal_id: Uuid,
+    now: u128,
+) -> Option<SkillProposalRecord> {
+    if !intake.conversion_required {
+        return None;
+    }
+    let suggested_skill_id = suggested_skill_id_for_intake(intake);
+    let risk_level = intake_conversion_risk_level(&intake.detected_kind).to_string();
+    let proposal_key = skill_intake_proposal_key(intake);
+    let conversion_spec = conversion_spec_for_intake(intake);
+    let tags = vec![
+        "skill-intake".to_string(),
+        "conversion-required".to_string(),
+        intake.detected_kind.clone(),
+        intake.installability.clone(),
+    ];
+    Some(SkillProposalRecord {
+        proposal_id,
+        proposal_key,
+        title: format!("Convert {} into a reviewed Dawn skill", intake.detected_kind),
+        summary: format!(
+            "Online source `{}` was classified as `{}` and requires a reviewed conversion before it can run as a Dawn skill.",
+            truncate_for_proposal(&intake.source_url, 160),
+            intake.detected_kind
+        ),
+        rationale: "This source is not a directly installable Dawn signed Wasm package. Convert it through a reviewed plan with sandbox tests, a narrow JSON contract, publisher signing, and explicit activation approval.".to_string(),
+        suggested_skill_id,
+        source: "skill-intake".to_string(),
+        status: "proposed".to_string(),
+        confidence: f64::from(intake.confidence),
+        evidence: json!({
+            "intake": intake,
+            "conversionPlan": {
+                "planKind": "online_skill_source_conversion",
+                "sourceKind": intake.detected_kind,
+                "installability": intake.installability,
+                "recommendedAction": intake.recommended_action,
+                "requiredSteps": intake.next_steps,
+                "warnings": intake.warnings,
+                "conversionSpec": conversion_spec,
+                "guardrails": [
+                    "no automatic activation",
+                    "sandbox tests required",
+                    "signed package or native builtin review required",
+                    "least privilege input/output contract required"
+                ]
+            }
+        }),
+        tags,
+        risk_level,
+        created_by: normalized_actor(actor),
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+    })
+}
+
+fn skill_intake_proposal_key(intake: &SkillIntakeResponse) -> String {
+    let mut key_material = intake.source_url.trim().to_string();
+    key_material.push('\n');
+    key_material.push_str(
+        intake
+            .source_sha256
+            .as_deref()
+            .unwrap_or("missing-source-sha256"),
+    );
+    let digest = Sha256::digest(key_material.as_bytes());
+    format!("skill-intake:{}", hex::encode(digest))
+}
+
+fn suggested_skill_id_for_intake(intake: &SkillIntakeResponse) -> String {
+    let source_part = reqwest::Url::parse(&intake.source_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|segments| {
+                    segments
+                        .rev()
+                        .find(|segment| !segment.trim().is_empty())
+                        .map(str::to_string)
+                })
+                .or_else(|| url.host_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| "online-source".to_string());
+    format!(
+        "import.{}.{}",
+        slugify_skill_component(&intake.detected_kind),
+        slugify_skill_component(&source_part)
+    )
+}
+
+fn slugify_skill_component(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            slug.push('-');
+            last_was_separator = true;
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "source".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn skill_source_preview(text: &str) -> Option<String> {
+    let preview = text
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\n' | '\t' => ' ',
+            ch if ch.is_control() => ' ',
+            ch => ch,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .take(80)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.is_empty() {
+        None
+    } else {
+        Some(preview.chars().take(800).collect())
+    }
+}
+
+fn intake_conversion_risk_level(detected_kind: &str) -> &'static str {
+    match detected_kind {
+        "unknown_online_resource" => "high",
+        "browser_extension"
+        | "mcp_server_project"
+        | "python_tooling_project"
+        | "git_repository" => "guarded",
+        _ => "guarded",
+    }
+}
+
+fn conversion_spec_for_intake(intake: &SkillIntakeResponse) -> Value {
+    let common = json!({
+        "sourceKind": intake.detected_kind,
+        "sourceUrl": intake.source_url,
+        "installability": intake.installability,
+        "reviewRequired": true,
+        "automaticActivation": false,
+        "artifactTargets": [
+            "reviewed_native_skill_draft",
+            "signed_wasm_skill_package"
+        ],
+        "sharedGuardrails": [
+            "do not execute fetched source code during intake or planning",
+            "do not install dependencies globally",
+            "preserve chat pairing, signature validation, and approval gates",
+            "require sandbox tests before activation",
+            "require trusted publisher signature before normal distribution"
+        ]
+    });
+    let mut spec = match intake.detected_kind.as_str() {
+        "codex_skill_markdown" => json!({
+            "adapterKind": "codex_skill_markdown_adapter",
+            "adapterGoal": "Translate Codex SKILL.md operational instructions into a Dawn native workflow draft, then optionally package a narrow Wasm wrapper after tests.",
+            "extractionTargets": [
+                "skill purpose and trigger phrases",
+                "allowed commands or APIs",
+                "required local files and environment variables",
+                "forbidden actions and approval boundaries",
+                "expected input and output examples"
+            ],
+            "inputContract": {
+                "required": ["instruction"],
+                "optional": ["arguments", "workspaceContext"]
+            },
+            "runtimeBoundary": "Dawn executes only reviewed adapter commands; SKILL.md text remains documentation and is never executed directly.",
+            "permissionReview": [
+                "filesystem reads/writes",
+                "network calls",
+                "shell commands",
+                "desktop control",
+                "credential access"
+            ],
+            "sandboxCases": [
+                "valid instruction follows allowed workflow",
+                "instruction requesting forbidden command is denied",
+                "missing local dependency fails closed",
+                "chat ingress regression remains healthy"
+            ],
+            "packagingPlan": [
+                "materialize contract.json and SKILL.md draft",
+                "implement reviewed adapter code if automation is needed",
+                "pack adapter Wasm with dawn-node skills pack-wasm",
+                "trust publisher and install signed package"
+            ]
+        }),
+        "mcp_server_project" => json!({
+            "adapterKind": "mcp_supervised_connector_adapter",
+            "adapterGoal": "Expose selected MCP tools through a supervised Dawn connector boundary instead of installing the server as a direct skill.",
+            "extractionTargets": [
+                "server startup command",
+                "transport type",
+                "tool names and JSON schemas",
+                "resource templates",
+                "dependency lockfiles",
+                "health check endpoint or handshake"
+            ],
+            "inputContract": {
+                "required": ["toolName", "arguments"],
+                "optional": ["resourceUri", "timeoutMs"]
+            },
+            "runtimeBoundary": "Dawn starts or connects to the MCP server only through an approved connector with tool allowlisting and timeout controls.",
+            "permissionReview": [
+                "allowed MCP tools",
+                "allowed resource URI patterns",
+                "network binding",
+                "process lifetime",
+                "dependency install location"
+            ],
+            "sandboxCases": [
+                "allowed tool invocation succeeds",
+                "unknown tool is denied",
+                "resource outside allowlist is denied",
+                "server startup failure is reported safely"
+            ],
+            "packagingPlan": [
+                "generate connector allowlist manifest",
+                "generate Dawn wrapper skill contract",
+                "add supervised startup and health checks",
+                "package wrapper only after dependency pin review"
+            ]
+        }),
+        "python_tooling_project" => json!({
+            "adapterKind": "python_sandbox_runner_adapter",
+            "adapterGoal": "Wrap selected Python functions or CLI entry points behind a sandboxed Dawn runner with pinned dependencies.",
+            "extractionTargets": [
+                "pyproject or setup metadata",
+                "console_scripts entry points",
+                "requirements and lockfiles",
+                "filesystem and network usage",
+                "sample commands and outputs"
+            ],
+            "inputContract": {
+                "required": ["operation", "arguments"],
+                "optional": ["workingDirectory", "timeoutMs"]
+            },
+            "runtimeBoundary": "Python code runs only in a reviewed sandbox or venv; setup hooks are not executed during intake.",
+            "permissionReview": [
+                "dependency source and hashes",
+                "filesystem scope",
+                "network scope",
+                "subprocess use",
+                "large output and artifact paths"
+            ],
+            "sandboxCases": [
+                "allowed operation succeeds",
+                "invalid operation is rejected",
+                "dependency missing fails closed",
+                "attempted credential read is blocked"
+            ],
+            "packagingPlan": [
+                "generate Python runner manifest",
+                "pin dependency hashes",
+                "write Dawn wrapper contract",
+                "package wrapper after sandbox tests"
+            ]
+        }),
+        "browser_extension" => json!({
+            "adapterKind": "browser_control_workflow_adapter",
+            "adapterGoal": "Convert extension behavior into explicit Dawn browser-control workflow steps without installing extension code.",
+            "extractionTargets": [
+                "manifest version",
+                "permissions and host_permissions",
+                "content script matches",
+                "background service worker",
+                "commands and user actions"
+            ],
+            "inputContract": {
+                "required": ["browserAction", "target"],
+                "optional": ["selectors", "hostPattern", "arguments"]
+            },
+            "runtimeBoundary": "Dawn uses reviewed browser automation commands; extension scripts are not loaded or executed as trusted skill code.",
+            "permissionReview": [
+                "host permissions",
+                "tab and scripting access",
+                "storage access",
+                "clipboard access",
+                "native messaging"
+            ],
+            "sandboxCases": [
+                "allowed host workflow succeeds",
+                "disallowed host is denied",
+                "selector not found fails safely",
+                "extension-only privileged action is rejected"
+            ],
+            "packagingPlan": [
+                "generate browser workflow contract",
+                "replace broad host permissions with explicit URL allowlist",
+                "write native skill workflow draft",
+                "package wrapper after browser regression tests"
+            ]
+        }),
+        "git_repository" => json!({
+            "adapterKind": "repository_probe_adapter",
+            "adapterGoal": "Identify a concrete package, SKILL.md, MCP manifest, Python manifest, or browser manifest inside the repository before conversion.",
+            "extractionTargets": [
+                "repository tree",
+                "README usage section",
+                "package manifests",
+                "license",
+                "release artifacts"
+            ],
+            "inputContract": {
+                "required": ["repositoryUrl", "selectedPath"],
+                "optional": ["revision"]
+            },
+            "runtimeBoundary": "Repository code is not executed; rerun intake on the exact selected raw file or package URL.",
+            "permissionReview": [
+                "selected artifact type",
+                "license",
+                "dependency sources",
+                "publisher identity"
+            ],
+            "sandboxCases": [
+                "repository source selection is deterministic",
+                "ambiguous repository requires operator choice",
+                "unsafe generated files are rejected"
+            ],
+            "packagingPlan": [
+                "select exact source file or release package",
+                "rerun intake on selected raw URL",
+                "continue through source-specific adapter plan"
+            ]
+        }),
+        _ => json!({
+            "adapterKind": "manual_review_adapter",
+            "adapterGoal": "Classify the source and create a narrow Dawn adapter only after the trust boundary is understood.",
+            "extractionTargets": [
+                "source format",
+                "publisher identity",
+                "expected runtime",
+                "required permissions"
+            ],
+            "inputContract": {
+                "required": ["instruction"],
+                "optional": ["arguments"]
+            },
+            "runtimeBoundary": "No execution until a reviewed adapter and sandbox test plan exist.",
+            "permissionReview": [
+                "filesystem",
+                "network",
+                "process execution",
+                "desktop control",
+                "credentials"
+            ],
+            "sandboxCases": [
+                "manual classification completed",
+                "unsafe runtime request is denied"
+            ],
+            "packagingPlan": [
+                "classify exact source",
+                "create source-specific adapter plan",
+                "package only after tests and signing"
+            ]
+        }),
+    };
+    if let (Some(spec_object), Some(common_object)) = (spec.as_object_mut(), common.as_object()) {
+        for (key, value) in common_object {
+            spec_object
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    spec
+}
+
+fn normalized_actor(actor: Option<&str>) -> String {
+    actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("skill-intake")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+fn truncate_for_proposal(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for ch in value.chars().take(max_chars) {
+        output.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
+}
+
+fn looks_like_dawn_skill_package(value: &Value) -> bool {
+    value.get("wasmBase64").and_then(Value::as_str).is_some()
+        && value
+            .pointer("/skill/skillId")
+            .and_then(Value::as_str)
+            .is_some()
+        && value
+            .pointer("/skill/version")
+            .and_then(Value::as_str)
+            .is_some()
+}
+
+fn looks_like_marketplace_catalog(value: &Value) -> bool {
+    value.get("skills").and_then(Value::as_array).is_some()
+        && value.get("agentCards").and_then(Value::as_array).is_some()
+}
+
+fn looks_like_mcp_package_json(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .get("dependencies")
+        .is_some_and(json_has_mcp_dependency)
+        || object
+            .get("devDependencies")
+            .is_some_and(json_has_mcp_dependency)
+    {
+        return true;
+    }
+    object
+        .get("keywords")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("mcp"))
+            })
+        })
+}
+
+fn json_has_mcp_dependency(value: &Value) -> bool {
+    value.as_object().is_some_and(|dependencies| {
+        dependencies
+            .keys()
+            .any(|key| key == "@modelcontextprotocol/sdk" || key.contains("mcp"))
+    })
+}
+
+fn looks_like_browser_extension_manifest(value: &Value) -> bool {
+    value
+        .get("manifest_version")
+        .and_then(Value::as_i64)
+        .is_some()
+        && (value.get("permissions").is_some()
+            || value.get("background").is_some()
+            || value.get("content_scripts").is_some())
+}
+
+fn looks_like_codex_skill_markdown(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("---")
+        && text.contains("\nname:")
+        && text.contains("\ndescription:")
+        && text.contains("#")
 }
 
 async fn list_skill_publisher_trust_roots(
@@ -1364,7 +2367,8 @@ mod tests {
     use super::{
         NATIVE_BUILTIN_SOURCE_KIND, RegisterSignedSkillRequest, SKILL_PUBLISHER_ISSUER_DID_PREFIX,
         SignedSkillDocument, SignedSkillEnvelope, SkillPublisherTrustRootUpsertRequest,
-        current_distribution, native_builtin_skill_usage, register_signed_skill_inner,
+        build_skill_intake_conversion_proposal, current_distribution, inspect_skill_source_text,
+        native_builtin_skill_usage, register_signed_skill_inner, skill_intake_proposal_key,
         skill_publisher_issuer_did_from_public_key_hex, upsert_skill_publisher_trust_root_inner,
         validate_skill_segment,
     };
@@ -1522,5 +2526,320 @@ mod tests {
         assert!(native_builtin_skill_usage("dawn-node-operator").is_some());
         assert!(native_builtin_skill_usage("dawn-approval-guard").is_some());
         assert!(native_builtin_skill_usage("dawn-marketplace-operator").is_some());
+    }
+
+    #[test]
+    fn intake_detects_signed_dawn_skill_package() {
+        let package = serde_json::json!({
+            "skill": {
+                "skillId": "echo-skill",
+                "version": "1.0.0",
+                "displayName": "Echo Skill",
+                "entryFunction": "run_skill",
+                "capabilities": ["echo"],
+                "sourceKind": "signed_publisher"
+            },
+            "envelope": {
+                "document": {
+                    "skillId": "echo-skill",
+                    "version": "1.0.0",
+                    "displayName": "Echo Skill",
+                    "entryFunction": "run_skill",
+                    "capabilities": ["echo"],
+                    "artifactSha256": "00",
+                    "issuerDid": "did:dawn:skill-publisher:00",
+                    "issuedAtUnixMs": 1
+                },
+                "signatureHex": "00"
+            },
+            "wasmBase64": "AGFzbQE="
+        });
+        let response = inspect_skill_source_text(
+            "https://example.com/skills/echo/package",
+            Some("application/json".to_string()),
+            &package.to_string(),
+            None,
+        );
+        assert_eq!(response.detected_kind, "dawn_signed_wasm_skill_package");
+        assert_eq!(response.installability, "direct_install");
+        assert_eq!(
+            response.direct_install_url.as_deref(),
+            Some("https://example.com/skills/echo/package")
+        );
+        assert!(response.requires_trusted_publisher);
+        assert!(!response.conversion_required);
+    }
+
+    #[test]
+    fn intake_detects_unsigned_dawn_skill_package() {
+        let package = serde_json::json!({
+            "skill": {
+                "skillId": "dev-skill",
+                "version": "0.1.0",
+                "displayName": "Dev Skill",
+                "entryFunction": "run_skill",
+                "capabilities": ["dev"],
+                "sourceKind": "unsigned_local"
+            },
+            "wasmBase64": "AGFzbQE="
+        });
+        let response = inspect_skill_source_text(
+            "https://example.com/skills/dev/package",
+            Some("application/json".to_string()),
+            &package.to_string(),
+            None,
+        );
+        assert_eq!(response.detected_kind, "dawn_unsigned_wasm_skill_package");
+        assert_eq!(
+            response.installability,
+            "direct_install_requires_allow_unsigned"
+        );
+        assert!(response.allow_unsigned_supported);
+        assert!(!response.requires_trusted_publisher);
+    }
+
+    #[test]
+    fn intake_detects_native_builtin_reference() {
+        let package = serde_json::json!({
+            "skill": {
+                "skillId": "dawn-desktop-control",
+                "version": "native",
+                "displayName": "Dawn Desktop Control",
+                "entryFunction": "native",
+                "capabilities": ["desktop_control"],
+                "sourceKind": "native_builtin"
+            },
+            "wasmBase64": ""
+        });
+        let response = inspect_skill_source_text(
+            "https://example.com/skills/dawn-desktop-control/native/package",
+            Some("application/json".to_string()),
+            &package.to_string(),
+            None,
+        );
+        assert_eq!(response.detected_kind, "dawn_native_builtin_reference");
+        assert_eq!(response.installability, "already_available");
+        assert!(!response.conversion_required);
+    }
+
+    #[test]
+    fn intake_detects_codex_skill_markdown() {
+        let text = r#"---
+name: sample-skill
+description: Sample Codex skill
+---
+
+# Sample Skill
+
+Use when a task needs a sample workflow.
+"#;
+        let response = inspect_skill_source_text(
+            "https://raw.githubusercontent.com/example/repo/main/SKILL.md",
+            Some("text/markdown".to_string()),
+            text,
+            None,
+        );
+        assert_eq!(response.detected_kind, "codex_skill_markdown");
+        assert_eq!(response.installability, "conversion_required");
+        assert!(response.conversion_required);
+    }
+
+    #[test]
+    fn intake_detects_mcp_package_json() {
+        let package = serde_json::json!({
+            "name": "filesystem-mcp",
+            "dependencies": {
+                "@modelcontextprotocol/sdk": "^1.0.0"
+            }
+        });
+        let response = inspect_skill_source_text(
+            "https://example.com/package.json",
+            Some("application/json".to_string()),
+            &package.to_string(),
+            None,
+        );
+        assert_eq!(response.detected_kind, "mcp_server_project");
+        assert!(response.conversion_required);
+    }
+
+    #[test]
+    fn intake_detects_python_project_metadata() {
+        let text = r#"[project]
+name = "gis-helper"
+version = "0.1.0"
+"#;
+        let response = inspect_skill_source_text(
+            "https://example.com/pyproject.toml",
+            Some("text/x-toml".to_string()),
+            text,
+            None,
+        );
+        assert_eq!(response.detected_kind, "python_tooling_project");
+        assert!(response.conversion_required);
+    }
+
+    #[test]
+    fn intake_detects_browser_extension_manifest() {
+        let manifest = serde_json::json!({
+            "manifest_version": 3,
+            "name": "Browser Helper",
+            "permissions": ["tabs"],
+            "background": { "service_worker": "background.js" }
+        });
+        let response = inspect_skill_source_text(
+            "https://example.com/manifest.json",
+            Some("application/json".to_string()),
+            &manifest.to_string(),
+            None,
+        );
+        assert_eq!(response.detected_kind, "browser_extension");
+        assert!(response.conversion_required);
+    }
+
+    #[test]
+    fn intake_conversion_builds_reviewable_skill_proposal() {
+        let text = r#"---
+name: sample-skill
+description: Sample Codex skill
+---
+
+# Sample Skill
+"#;
+        let intake = inspect_skill_source_text(
+            "https://raw.githubusercontent.com/example/repo/main/SKILL.md",
+            Some("text/markdown".to_string()),
+            text,
+            None,
+        );
+        let proposal_id = Uuid::new_v4();
+        let proposal =
+            build_skill_intake_conversion_proposal(&intake, Some("operator"), proposal_id, 42)
+                .expect("conversion intake should produce proposal");
+        assert_eq!(proposal.proposal_id, proposal_id);
+        assert_eq!(proposal.source, "skill-intake");
+        assert_eq!(proposal.status, "proposed");
+        assert_eq!(proposal.created_by, "operator");
+        assert!(proposal.suggested_skill_id.starts_with("import."));
+        assert!(proposal.tags.contains(&"skill-intake".to_string()));
+        let expected_source_sha256 = hex::encode(Sha256::digest(text.as_bytes()));
+        assert_eq!(
+            intake.source_sha256.as_deref(),
+            Some(expected_source_sha256.as_str())
+        );
+        assert!(
+            intake
+                .source_preview
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Sample Skill")
+        );
+        assert_eq!(
+            proposal.evidence["conversionPlan"]["planKind"],
+            "online_skill_source_conversion"
+        );
+        assert_eq!(
+            proposal.evidence["intake"]["sourceSha256"],
+            expected_source_sha256
+        );
+        assert_eq!(
+            proposal.evidence["intake"]["detectedKind"],
+            "codex_skill_markdown"
+        );
+        assert_eq!(
+            proposal.evidence["conversionPlan"]["conversionSpec"]["adapterKind"],
+            "codex_skill_markdown_adapter"
+        );
+        assert!(
+            proposal.evidence["conversionPlan"]["conversionSpec"]["extractionTargets"]
+                .to_string()
+                .contains("allowed commands")
+        );
+    }
+
+    #[test]
+    fn intake_proposal_key_tracks_source_content_hash() {
+        let source_url = "https://raw.githubusercontent.com/example/repo/main/SKILL.md";
+        let text_a = r#"---
+name: sample-skill
+description: Sample Codex skill
+---
+
+# Sample Skill
+
+Original workflow.
+"#;
+        let text_b = r#"---
+name: sample-skill
+description: Sample Codex skill
+---
+
+# Sample Skill
+
+Changed workflow.
+"#;
+        let intake_a =
+            inspect_skill_source_text(source_url, Some("text/markdown".to_string()), text_a, None);
+        let intake_a_again =
+            inspect_skill_source_text(source_url, Some("text/markdown".to_string()), text_a, None);
+        let intake_b =
+            inspect_skill_source_text(source_url, Some("text/markdown".to_string()), text_b, None);
+
+        assert_eq!(intake_a.source_url, intake_b.source_url);
+        assert_eq!(intake_a.source_sha256, intake_a_again.source_sha256);
+        assert_ne!(intake_a.source_sha256, intake_b.source_sha256);
+        assert_eq!(
+            skill_intake_proposal_key(&intake_a),
+            skill_intake_proposal_key(&intake_a_again)
+        );
+        assert_ne!(
+            skill_intake_proposal_key(&intake_a),
+            skill_intake_proposal_key(&intake_b)
+        );
+
+        let proposal_a =
+            build_skill_intake_conversion_proposal(&intake_a, Some("operator"), Uuid::new_v4(), 42)
+                .expect("first conversion intake should produce proposal");
+        let proposal_b =
+            build_skill_intake_conversion_proposal(&intake_b, Some("operator"), Uuid::new_v4(), 43)
+                .expect("changed conversion intake should produce proposal");
+        assert_ne!(proposal_a.proposal_key, proposal_b.proposal_key);
+    }
+
+    #[test]
+    fn intake_conversion_skips_direct_install_package() {
+        let package = serde_json::json!({
+            "skill": {
+                "skillId": "echo-skill",
+                "version": "1.0.0",
+                "displayName": "Echo Skill",
+                "entryFunction": "run_skill",
+                "capabilities": ["echo"],
+                "sourceKind": "signed_publisher"
+            },
+            "envelope": {
+                "document": {
+                    "skillId": "echo-skill",
+                    "version": "1.0.0",
+                    "displayName": "Echo Skill",
+                    "entryFunction": "run_skill",
+                    "capabilities": ["echo"],
+                    "artifactSha256": "00",
+                    "issuerDid": "did:dawn:skill-publisher:00",
+                    "issuedAtUnixMs": 1
+                },
+                "signatureHex": "00"
+            },
+            "wasmBase64": "AGFzbQE="
+        });
+        let intake = inspect_skill_source_text(
+            "https://example.com/skills/echo/package",
+            Some("application/json".to_string()),
+            &package.to_string(),
+            None,
+        );
+        assert!(
+            build_skill_intake_conversion_proposal(&intake, Some("operator"), Uuid::new_v4(), 42)
+                .is_none()
+        );
     }
 }

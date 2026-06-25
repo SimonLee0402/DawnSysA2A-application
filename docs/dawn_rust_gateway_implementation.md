@@ -737,6 +737,43 @@ Signed registration shape:
 }
 ```
 
+## Online Skill Intake And Draft Install
+
+Online skill sources are not installed directly unless they are already Dawn skill packages. The safe path is:
+
+1. Inspect and classify the URL:
+
+```powershell
+dawn-node skills intake https://example.com/SKILL.md
+```
+
+2. Generate a review-only conversion draft:
+
+```powershell
+dawn-node skills draft-url https://example.com/SKILL.md --write
+```
+
+3. Check, build, pack, and test the draft:
+
+```powershell
+dawn-node skills check-draft docs/skill-intake/import-demo
+dawn-node skills build-draft docs/skill-intake/import-demo
+dawn-node skills pack-draft docs/skill-intake/import-demo --wasm-path docs/skill-intake/import-demo/wasm-adapter/target/wasm32-unknown-unknown/release/import-demo.wasm --signing-key-hex <publisher-private-key-hex> --verification-report docs/skill-intake/import-demo/verification-report.json
+dawn-node skills test-draft docs/skill-intake/import-demo --package-path docs/skill-intake/import-demo/import-demo.skill-package.json --report docs/skill-intake/import-demo/sandbox-report.json
+```
+
+4. Install through the draft evidence gate:
+
+```powershell
+dawn-node skills install-draft docs/skill-intake/import-demo --package-path docs/skill-intake/import-demo/import-demo.skill-package.json --sandbox-report docs/skill-intake/import-demo/sandbox-report.json
+```
+
+`install-draft` verifies the draft manifests, preflight checklist, package hash/signature policy, adapter metadata ABI, sandbox report, and activation gate before it registers the package. It installs inactive by default. Activation requires an explicit operator confirmation:
+
+```powershell
+dawn-node skills install-draft docs/skill-intake/import-demo --package-path docs/skill-intake/import-demo/import-demo.skill-package.json --sandbox-report docs/skill-intake/import-demo/sandbox-report.json --activate --confirm-activation import.demo@0.0.0-review
+```
+
 ## Policy Layer
 
 The gateway now has a persisted, versioned policy profile plus audit history. The orchestration engine reads the active policy profile before risky steps execute. The policy layer now also supports signed policy distribution with Ed25519 issuer verification and an explicit trust-root allowlist.

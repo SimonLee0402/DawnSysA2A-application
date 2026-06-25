@@ -7,12 +7,18 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 use base64::Engine as _;
 use clap::{Args, Parser, Subcommand};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use futures_util::StreamExt;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::Digest;
-use std::{collections::BTreeMap, env, fs, path::PathBuf, process::Command as StdCommand};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command as StdCommand,
+};
 
 use crate::profile::{
     DawnCliProfile, default_gateway_base_url, load_profile_or_default, normalize_http_base_url,
@@ -37,6 +43,12 @@ const DEFAULT_REGION: &str = "global";
 const DEFAULT_WORKSPACE_DISPLAY_NAME: &str = "Dawn Agent Commerce";
 const DEFAULT_WORKSPACE_TENANT_ID: &str = "dawn-labs";
 const DEFAULT_WORKSPACE_PROJECT_ID: &str = "agent-commerce";
+const SKILL_PACKAGE_MAX_BYTES: usize = 16 * 1_048_576;
+const DAWN_ADAPTER_METADATA_EXPORTS: [&str; 3] = [
+    "dawn_adapter_metadata_ptr",
+    "dawn_adapter_metadata_len",
+    "dawn_adapter_metadata_version",
+];
 
 #[derive(Parser)]
 #[command(
@@ -537,6 +549,52 @@ struct SkillsArgs {
 enum SkillCommand {
     Search(SkillSearchArgs),
     Install(SkillInstallArgs),
+    InstallUrl(SkillInstallUrlArgs),
+    InstallFile(SkillInstallFileArgs),
+    #[command(name = "install-draft")]
+    InstallDraft(SkillInstallDraftArgs),
+    #[command(name = "verify-url")]
+    VerifyUrl(SkillVerifyUrlArgs),
+    #[command(name = "verify-package")]
+    VerifyPackage(SkillVerifyPackageArgs),
+    PackWasm(SkillPackWasmArgs),
+    #[command(name = "build-draft")]
+    BuildDraft(SkillBuildDraftArgs),
+    #[command(name = "test-draft")]
+    TestDraft(SkillTestDraftArgs),
+    #[command(name = "pack-draft")]
+    PackDraft(SkillPackDraftArgs),
+    TrustPublisher(SkillTrustPublisherArgs),
+    Intake(SkillIntakeArgs),
+    Propose(SkillProposeArgs),
+    #[command(name = "draft-url")]
+    DraftUrl(SkillDraftUrlArgs),
+    #[command(name = "check-draft")]
+    CheckDraft(SkillCheckDraftArgs),
+    #[command(name = "approve-proposal")]
+    ApproveProposal(SkillEvolutionReviewArgs),
+    #[command(name = "create-plan")]
+    CreatePlan(SkillEvolutionCreateArgs),
+    #[command(name = "approve-plan")]
+    ApprovePlan(SkillEvolutionReviewArgs),
+    #[command(name = "create-run")]
+    CreateRun(SkillEvolutionCreateArgs),
+    #[command(name = "approve-run")]
+    ApproveRun(SkillEvolutionReviewArgs),
+    #[command(name = "create-execution")]
+    CreateExecution(SkillEvolutionCreateArgs),
+    #[command(name = "approve-execution")]
+    ApproveExecution(SkillEvolutionReviewArgs),
+    #[command(name = "verify-execution")]
+    VerifyExecution(SkillEvolutionVerifyArgs),
+    #[command(name = "create-draft-patch")]
+    CreateDraftPatch(SkillEvolutionCreateArgs),
+    #[command(name = "approve-draft-patch")]
+    ApproveDraftPatch(SkillEvolutionReviewArgs),
+    #[command(name = "apply-draft-patch")]
+    ApplyDraftPatch(SkillEvolutionPatchRuntimeArgs),
+    #[command(name = "rollback-draft-patch")]
+    RollbackDraftPatch(SkillEvolutionPatchRuntimeArgs),
 }
 
 #[derive(Args)]
@@ -723,6 +781,309 @@ struct SkillInstallArgs {
     allow_unsigned: bool,
     #[arg(long)]
     no_activate: bool,
+    #[arg(long)]
+    verify_before_install: bool,
+    #[arg(long)]
+    preflight_checklist: Option<String>,
+    #[arg(long)]
+    require_adapter_metadata: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+}
+
+#[derive(Args)]
+struct SkillInstallUrlArgs {
+    package_url: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    allow_unsigned: bool,
+    #[arg(long)]
+    no_activate: bool,
+    #[arg(long)]
+    verify_before_install: bool,
+    #[arg(long)]
+    preflight_checklist: Option<String>,
+    #[arg(long)]
+    require_adapter_metadata: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+}
+
+#[derive(Args)]
+struct SkillInstallFileArgs {
+    package_path: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    allow_unsigned: bool,
+    #[arg(long)]
+    no_activate: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+}
+
+#[derive(Args)]
+struct SkillInstallDraftArgs {
+    draft_dir: String,
+    #[arg(long)]
+    package_path: Option<String>,
+    #[arg(long)]
+    sandbox_report: Option<String>,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    activate: bool,
+    #[arg(long)]
+    confirm_activation: Option<String>,
+    #[arg(long)]
+    allow_unsigned_development: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillVerifyUrlArgs {
+    package_url: String,
+    #[arg(long)]
+    preflight_checklist: Option<String>,
+    #[arg(long)]
+    require_adapter_metadata: bool,
+    #[arg(long)]
+    require_signed: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillVerifyPackageArgs {
+    package_path: String,
+    #[arg(long)]
+    preflight_checklist: Option<String>,
+    #[arg(long)]
+    require_adapter_metadata: bool,
+    #[arg(long)]
+    require_signed: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillPackWasmArgs {
+    wasm_path: String,
+    #[arg(long)]
+    skill_id: String,
+    #[arg(long)]
+    version: String,
+    #[arg(long)]
+    output: String,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long, default_value = "run_skill")]
+    entry_function: String,
+    #[arg(long = "capability")]
+    capabilities: Vec<String>,
+    #[arg(long)]
+    preflight_checklist: Option<String>,
+    #[arg(long)]
+    require_adapter_metadata: bool,
+    #[arg(long)]
+    signing_key_hex: Option<String>,
+    #[arg(long)]
+    issuer_did: Option<String>,
+    #[arg(long)]
+    issued_at_unix_ms: Option<u128>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillBuildDraftArgs {
+    draft_dir: String,
+    #[arg(long, default_value = "cargo")]
+    cargo: String,
+    #[arg(long, default_value = "wasm32-unknown-unknown")]
+    target: String,
+    #[arg(long)]
+    debug: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillTestDraftArgs {
+    draft_dir: String,
+    #[arg(long)]
+    wasm_path: Option<String>,
+    #[arg(long)]
+    package_path: Option<String>,
+    #[arg(long)]
+    allow_unsigned_development: bool,
+    #[arg(long)]
+    report: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillPackDraftArgs {
+    draft_dir: String,
+    #[arg(long)]
+    wasm_path: Option<String>,
+    #[arg(long)]
+    output: Option<String>,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long, default_value = "run_skill")]
+    entry_function: String,
+    #[arg(long = "capability")]
+    capabilities: Vec<String>,
+    #[arg(long)]
+    signing_key_hex: Option<String>,
+    #[arg(long)]
+    issuer_did: Option<String>,
+    #[arg(long)]
+    issued_at_unix_ms: Option<u128>,
+    #[arg(long)]
+    allow_unsigned_development: bool,
+    #[arg(long)]
+    verification_report: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillTrustPublisherArgs {
+    public_key_hex: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    issuer_did: Option<String>,
+    #[arg(long, default_value = "Local Skill Publisher")]
+    label: String,
+    #[arg(
+        long,
+        default_value = "operator configured local skill publisher trust root"
+    )]
+    reason: String,
+    #[arg(long, default_value = "desktop-operator")]
+    actor: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillIntakeArgs {
+    source_url: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    source_kind_hint: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillProposeArgs {
+    source_url: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    source_kind_hint: Option<String>,
+    #[arg(long, default_value = "skill-intake-cli")]
+    actor: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillDraftUrlArgs {
+    source_url: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long)]
+    source_kind_hint: Option<String>,
+    #[arg(long, default_value = "skill-intake-cli")]
+    actor: String,
+    #[arg(long, default_value = "desktop-operator")]
+    reviewer: String,
+    #[arg(long, default_value = "skill-intake-cli")]
+    requested_by: String,
+    #[arg(long)]
+    timeout_seconds: Option<u64>,
+    #[arg(long)]
+    write: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillCheckDraftArgs {
+    draft_dir: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillEvolutionCreateArgs {
+    record_id: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long, default_value = "skill-intake-cli")]
+    created_by: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillEvolutionReviewArgs {
+    record_id: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long, default_value = "desktop-operator")]
+    reviewer: String,
+    #[arg(long)]
+    note: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillEvolutionVerifyArgs {
+    execution_id: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long, default_value = "skill-intake-cli")]
+    requested_by: String,
+    #[arg(long)]
+    timeout_seconds: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SkillEvolutionPatchRuntimeArgs {
+    patch_id: String,
+    #[arg(long)]
+    gateway: Option<String>,
+    #[arg(long, default_value = "desktop-operator")]
+    requested_by: String,
+    #[arg(long)]
+    confirm_patch_id: Option<String>,
+    #[arg(long)]
+    write: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args, Clone)]
@@ -1217,20 +1578,147 @@ struct InstallSkillPackageRequest {
     allow_unsigned: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillIntakeRequest {
+    source_url: String,
+    source_kind_hint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillIntakeProposalRequest {
+    source_url: String,
+    source_kind_hint: Option<String>,
+    actor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillIntakeResponse {
+    source_url: String,
+    content_type: Option<String>,
+    #[serde(default)]
+    source_sha256: Option<String>,
+    #[serde(default)]
+    source_preview: Option<String>,
+    detected_kind: String,
+    confidence: f32,
+    installability: String,
+    direct_install_url: Option<String>,
+    conversion_required: bool,
+    requires_trusted_publisher: bool,
+    allow_unsigned_supported: bool,
+    recommended_action: String,
+    findings: Vec<String>,
+    warnings: Vec<String>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillIntakeProposalResponse {
+    intake: SkillIntakeResponse,
+    proposal: Option<Value>,
+    created: bool,
+    message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SkillActivationResponse {
     skill: InstalledSkillRecord,
     activated: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct InstalledSkillRecord {
     skill_id: String,
     version: String,
     active: bool,
     source_kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LocalSkillPackage {
+    skill: LocalSkillPackageRecord,
+    envelope: Option<LocalSignedSkillEnvelope>,
+    wasm_base64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LocalSkillPackageRecord {
+    skill_id: String,
+    version: String,
+    display_name: String,
+    description: Option<String>,
+    entry_function: String,
+    capabilities: Vec<String>,
+    artifact_path: String,
+    artifact_sha256: String,
+    source_kind: String,
+    issuer_did: Option<String>,
+    signature_hex: Option<String>,
+    document_hash: Option<String>,
+    issued_at_unix_ms: Option<u128>,
+    active: bool,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LocalSignedSkillDocument {
+    skill_id: String,
+    version: String,
+    display_name: String,
+    description: Option<String>,
+    entry_function: String,
+    capabilities: Vec<String>,
+    artifact_sha256: String,
+    issuer_did: String,
+    issued_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LocalSignedSkillEnvelope {
+    document: LocalSignedSkillDocument,
+    signature_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterUnsignedSkillRequest {
+    skill_id: String,
+    version: String,
+    display_name: Option<String>,
+    description: Option<String>,
+    entry_function: Option<String>,
+    capabilities: Option<Vec<String>>,
+    wasm_base64: String,
+    activate: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterSignedSkillRequest {
+    envelope: LocalSignedSkillEnvelope,
+    wasm_base64: String,
+    activate: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPublisherTrustRootUpsertRequest {
+    actor: String,
+    reason: String,
+    issuer_did: String,
+    label: String,
+    public_key_hex: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1912,6 +2400,10 @@ async fn setup(args: SetupArgs) -> anyhow::Result<()> {
             all: true,
             allow_unsigned: allow_unsigned_skills,
             no_activate: false,
+            verify_before_install: false,
+            preflight_checklist: None,
+            require_adapter_metadata: false,
+            verification_report: None,
         };
         install_skill(install_args).await?;
         installed_skills.push(skill.label.clone());
@@ -4890,6 +5382,99 @@ async fn handle_skills(args: SkillsArgs) -> anyhow::Result<()> {
     match args.command {
         SkillCommand::Search(search) => search_skills(search).await,
         SkillCommand::Install(install) => install_skill(install).await,
+        SkillCommand::InstallUrl(install) => install_skill_url(install).await,
+        SkillCommand::InstallFile(install) => install_skill_file(install).await,
+        SkillCommand::InstallDraft(install) => install_skill_draft(install).await,
+        SkillCommand::VerifyUrl(verify) => verify_skill_package_url(verify).await,
+        SkillCommand::VerifyPackage(verify) => verify_skill_package_file(verify),
+        SkillCommand::PackWasm(pack) => pack_wasm_skill(pack),
+        SkillCommand::BuildDraft(build) => build_skill_draft(build),
+        SkillCommand::TestDraft(test) => test_skill_draft(test),
+        SkillCommand::PackDraft(pack) => pack_skill_draft(pack),
+        SkillCommand::TrustPublisher(trust) => trust_skill_publisher(trust).await,
+        SkillCommand::Intake(intake) => intake_skill(intake).await,
+        SkillCommand::Propose(propose) => propose_skill_from_intake(propose).await,
+        SkillCommand::DraftUrl(draft) => draft_skill_from_url(draft).await,
+        SkillCommand::CheckDraft(check) => check_skill_draft(check),
+        SkillCommand::ApproveProposal(args) => {
+            review_skill_evolution_record(
+                args,
+                "proposal",
+                "/api/gateway/evolution/skill-proposals",
+            )
+            .await
+        }
+        SkillCommand::CreatePlan(args) => {
+            create_skill_evolution_record(
+                args,
+                "implementation plan",
+                "/api/gateway/evolution/skill-proposals",
+                "implementation-plan",
+            )
+            .await
+        }
+        SkillCommand::ApprovePlan(args) => {
+            review_skill_evolution_record(
+                args,
+                "implementation plan",
+                "/api/gateway/evolution/implementation-plans",
+            )
+            .await
+        }
+        SkillCommand::CreateRun(args) => {
+            create_skill_evolution_record(
+                args,
+                "implementation run",
+                "/api/gateway/evolution/implementation-plans",
+                "runs",
+            )
+            .await
+        }
+        SkillCommand::ApproveRun(args) => {
+            review_skill_evolution_record(
+                args,
+                "implementation run",
+                "/api/gateway/evolution/implementation-runs",
+            )
+            .await
+        }
+        SkillCommand::CreateExecution(args) => {
+            create_skill_evolution_record(
+                args,
+                "implementation execution",
+                "/api/gateway/evolution/implementation-runs",
+                "executions",
+            )
+            .await
+        }
+        SkillCommand::ApproveExecution(args) => {
+            review_skill_evolution_record(
+                args,
+                "implementation execution",
+                "/api/gateway/evolution/implementation-executions",
+            )
+            .await
+        }
+        SkillCommand::VerifyExecution(args) => verify_skill_execution(args).await,
+        SkillCommand::CreateDraftPatch(args) => {
+            create_skill_evolution_record(
+                args,
+                "draft patch",
+                "/api/gateway/evolution/implementation-executions",
+                "patch-candidates",
+            )
+            .await
+        }
+        SkillCommand::ApproveDraftPatch(args) => {
+            review_skill_evolution_record(
+                args,
+                "draft patch",
+                "/api/gateway/evolution/implementation-patch-candidates",
+            )
+            .await
+        }
+        SkillCommand::ApplyDraftPatch(args) => apply_skill_draft_patch(args).await,
+        SkillCommand::RollbackDraftPatch(args) => rollback_skill_draft_patch(args).await,
     }
 }
 
@@ -4948,6 +5533,36 @@ async fn install_skill(args: SkillInstallArgs) -> anyhow::Result<()> {
     let profile = load_profile_or_default();
     let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
     let selected = select_skill_entry(&client, &args).await?;
+    if args.verify_before_install
+        || args.preflight_checklist.is_some()
+        || args.require_adapter_metadata
+        || args.verification_report.is_some()
+    {
+        let preflight_checklist =
+            read_skill_pack_preflight_checklist(args.preflight_checklist.as_deref())?;
+        let package = fetch_skill_package_from_url(&selected.package_url).await?;
+        let verification = verify_local_skill_package(
+            &package,
+            &selected.package_url,
+            preflight_checklist.as_ref(),
+            args.require_adapter_metadata,
+            !args.allow_unsigned,
+        )?;
+        let report_path = write_local_skill_package_verification_report(
+            &verification,
+            args.verification_report.as_deref(),
+        )?;
+        println!(
+            "Pre-install verification: {}@{} signed={} artifactSha256={}",
+            verification.skill_id,
+            verification.version,
+            verification.signed,
+            verification.artifact_sha256
+        );
+        if let Some(report_path) = report_path.as_deref() {
+            println!("Verification report: {report_path}");
+        }
+    }
     let response: SkillActivationResponse = client
         .post_json(
             &selected.install_url,
@@ -4973,6 +5588,3144 @@ async fn install_skill(args: SkillInstallArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+async fn install_skill_url(args: SkillInstallUrlArgs) -> anyhow::Result<()> {
+    if args.verify_before_install
+        || args.preflight_checklist.is_some()
+        || args.require_adapter_metadata
+        || args.verification_report.is_some()
+    {
+        let preflight_checklist =
+            read_skill_pack_preflight_checklist(args.preflight_checklist.as_deref())?;
+        let package = fetch_skill_package_from_url(&args.package_url).await?;
+        let verification = verify_local_skill_package(
+            &package,
+            &args.package_url,
+            preflight_checklist.as_ref(),
+            args.require_adapter_metadata,
+            !args.allow_unsigned,
+        )?;
+        let report_path = write_local_skill_package_verification_report(
+            &verification,
+            args.verification_report.as_deref(),
+        )?;
+        println!(
+            "Pre-install verification: {}@{} signed={} artifactSha256={}",
+            verification.skill_id,
+            verification.version,
+            verification.signed,
+            verification.artifact_sha256
+        );
+        if let Some(report_path) = report_path.as_deref() {
+            println!("Verification report: {report_path}");
+        }
+    }
+
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let response: SkillActivationResponse = client
+        .post_json(
+            "/api/gateway/skills/install",
+            &InstallSkillPackageRequest {
+                package_url: args.package_url,
+                activate: Some(!args.no_activate),
+                allow_unsigned: Some(args.allow_unsigned),
+            },
+        )
+        .await?;
+
+    println!(
+        "Installed skill {}@{} activated={} sourceKind={} active={}",
+        response.skill.skill_id,
+        response.skill.version,
+        response.activated,
+        response.skill.source_kind,
+        response.skill.active
+    );
+    Ok(())
+}
+
+async fn install_skill_file(args: SkillInstallFileArgs) -> anyhow::Result<()> {
+    let package_path = PathBuf::from(&args.package_path);
+    let package = read_local_skill_package_file(&package_path)?;
+    let package_location = package_path.display().to_string();
+    let verification = verify_local_skill_package(
+        &package,
+        &package_location,
+        None,
+        false,
+        !args.allow_unsigned,
+    )?;
+    let report_path = write_local_skill_package_verification_report(
+        &verification,
+        args.verification_report.as_deref(),
+    )?;
+    if let Some(report_path) = report_path.as_deref() {
+        println!("Verification report: {report_path}");
+    }
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let response: SkillActivationResponse = if let Some(envelope) = package.envelope {
+        client
+            .post_json(
+                "/api/gateway/skills/register/signed",
+                &RegisterSignedSkillRequest {
+                    envelope,
+                    wasm_base64: package.wasm_base64,
+                    activate: Some(!args.no_activate),
+                },
+            )
+            .await?
+    } else {
+        if !args.allow_unsigned {
+            bail!("local skill package is unsigned; pass --allow-unsigned to install it");
+        }
+        client
+            .post_json(
+                "/api/gateway/skills/register",
+                &RegisterUnsignedSkillRequest {
+                    skill_id: package.skill.skill_id,
+                    version: package.skill.version,
+                    display_name: Some(package.skill.display_name),
+                    description: package.skill.description,
+                    entry_function: Some(package.skill.entry_function),
+                    capabilities: Some(package.skill.capabilities),
+                    wasm_base64: package.wasm_base64,
+                    activate: Some(!args.no_activate),
+                },
+            )
+            .await?
+    };
+    println!(
+        "Installed skill {}@{} activated={} sourceKind={} active={}",
+        response.skill.skill_id,
+        response.skill.version,
+        response.activated,
+        response.skill.source_kind,
+        response.skill.active
+    );
+    Ok(())
+}
+
+async fn install_skill_draft(args: SkillInstallDraftArgs) -> anyhow::Result<()> {
+    let evidence = build_skill_draft_install_evidence_report(&args)?;
+    let package = read_local_skill_package_file(&PathBuf::from(&evidence.package_path))?;
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let response = register_local_skill_package(
+        &client,
+        package,
+        args.activate,
+        args.allow_unsigned_development,
+    )
+    .await?;
+    let report = SkillDraftInstallReport { evidence, response };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Installed checked draft package {}@{} activated={} active={}",
+        report.response.skill.skill_id,
+        report.response.skill.version,
+        report.response.activated,
+        report.response.skill.active
+    );
+    println!("Package: {}", report.evidence.package_path);
+    println!("Sandbox report: {}", report.evidence.sandbox_report_path);
+    println!("Artifact SHA-256: {}", report.evidence.artifact_sha256);
+    if let Some(issuer_did) = report.evidence.issuer_did.as_deref() {
+        println!("Issuer DID: {issuer_did}");
+    } else {
+        println!("Unsigned development package was allowed explicitly for this install.");
+    }
+    if let Some(report_path) = report.evidence.verification_report_path.as_deref() {
+        println!("Verification report: {report_path}");
+    }
+    if !report.evidence.activation_requested {
+        println!(
+            "Activation was not requested. To activate after operator approval, rerun with --activate --confirm-activation {}@{}.",
+            report.evidence.skill_id, report.evidence.version
+        );
+    }
+    println!("No skill was published by this command.");
+    Ok(())
+}
+
+async fn register_local_skill_package(
+    client: &GatewayClient,
+    package: LocalSkillPackage,
+    activate: bool,
+    allow_unsigned: bool,
+) -> anyhow::Result<SkillActivationResponse> {
+    if let Some(envelope) = package.envelope {
+        client
+            .post_json(
+                "/api/gateway/skills/register/signed",
+                &RegisterSignedSkillRequest {
+                    envelope,
+                    wasm_base64: package.wasm_base64,
+                    activate: Some(activate),
+                },
+            )
+            .await
+    } else {
+        if !allow_unsigned {
+            bail!(
+                "local skill package is unsigned; pass --allow-unsigned-development to install a checked draft development package"
+            );
+        }
+        client
+            .post_json(
+                "/api/gateway/skills/register",
+                &RegisterUnsignedSkillRequest {
+                    skill_id: package.skill.skill_id,
+                    version: package.skill.version,
+                    display_name: Some(package.skill.display_name),
+                    description: package.skill.description,
+                    entry_function: Some(package.skill.entry_function),
+                    capabilities: Some(package.skill.capabilities),
+                    wasm_base64: package.wasm_base64,
+                    activate: Some(activate),
+                },
+            )
+            .await
+    }
+}
+
+fn build_skill_draft_install_evidence_report(
+    args: &SkillInstallDraftArgs,
+) -> anyhow::Result<SkillDraftInstallEvidenceReport> {
+    let draft_dir = PathBuf::from(&args.draft_dir);
+    let draft_report = build_skill_draft_check_report(&draft_dir)?;
+    if !draft_report.ready_for_packaging {
+        bail!(
+            "skill draft is not ready for install: missingFiles=[{}] mismatches=[{}]",
+            draft_report.missing_files.join(", "),
+            draft_report.mismatches.join("; ")
+        );
+    }
+    let skill_id = draft_report
+        .skill_id
+        .clone()
+        .ok_or_else(|| anyhow!("checked draft did not include suggestedSkillId"))?;
+    let version = draft_report
+        .version
+        .clone()
+        .ok_or_else(|| anyhow!("checked draft did not include a reviewed version"))?;
+    let artifact_slug = skill_draft_artifact_slug(&draft_dir, &skill_id);
+    let package_path = args
+        .package_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| draft_dir.join(format!("{artifact_slug}.skill-package.json")));
+    let sandbox_report_path = args
+        .sandbox_report
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| draft_dir.join("sandbox-report.json"));
+
+    let preflight_path = draft_dir.join("preflight-checklist.json");
+    let preflight_path_string = preflight_path.display().to_string();
+    let preflight_checklist = read_skill_pack_preflight_checklist(Some(&preflight_path_string))?;
+    let preflight_checklist = preflight_checklist
+        .as_ref()
+        .ok_or_else(|| anyhow!("preflight checklist was unexpectedly missing"))?;
+    let package = read_local_skill_package_file(&package_path)?;
+    let verification = verify_local_skill_package(
+        &package,
+        &package_path.display().to_string(),
+        Some(preflight_checklist),
+        true,
+        !args.allow_unsigned_development,
+    )?;
+    if verification.skill_id != skill_id {
+        bail!(
+            "draft skillId {} does not match package skillId {}",
+            skill_id,
+            verification.skill_id
+        );
+    }
+    if verification.version != version {
+        bail!(
+            "draft version {} does not match package version {}",
+            version,
+            verification.version
+        );
+    }
+
+    let expected_activation_confirmation =
+        format!("{}@{}", verification.skill_id, verification.version);
+    let activation_confirmed = if args.activate {
+        args.confirm_activation.as_deref() == Some(expected_activation_confirmation.as_str())
+    } else {
+        false
+    };
+    if args.activate && !activation_confirmed {
+        bail!(
+            "activation requires explicit confirmation: pass --confirm-activation {}",
+            expected_activation_confirmation
+        );
+    }
+
+    let sandbox_report = read_json_file(&sandbox_report_path, "skill draft sandbox report")?;
+    let sandbox_cases =
+        validate_skill_draft_install_sandbox_report(&sandbox_report, &package_path, &verification)?;
+    let verification_report_path = write_local_skill_package_verification_report(
+        &verification,
+        args.verification_report.as_deref(),
+    )?;
+
+    Ok(SkillDraftInstallEvidenceReport {
+        draft: draft_report,
+        sandbox_report_path: sandbox_report_path.display().to_string(),
+        package_path: package_path.display().to_string(),
+        skill_id: verification.skill_id.clone(),
+        version: verification.version.clone(),
+        signed: verification.signed,
+        issuer_did: verification.issuer_did.clone(),
+        artifact_sha256: verification.artifact_sha256.clone(),
+        activation_requested: args.activate,
+        activation_confirmed,
+        verification_report_path,
+        verification,
+        sandbox_cases,
+    })
+}
+
+fn validate_skill_draft_install_sandbox_report(
+    report: &Value,
+    package_path: &Path,
+    verification: &LocalSkillPackageVerification,
+) -> anyhow::Result<Vec<SkillDraftInstallCaseSummary>> {
+    if report.get("passed").and_then(Value::as_bool) != Some(true) {
+        bail!("sandbox report did not pass");
+    }
+    if report
+        .get("failedCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        != 0
+    {
+        bail!("sandbox report contains failed cases");
+    }
+    if report
+        .pointer("/draft/readyForPackaging")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        bail!("sandbox report draft check is not readyForPackaging=true");
+    }
+    if report.pointer("/draft/skillId").and_then(Value::as_str)
+        != Some(verification.skill_id.as_str())
+    {
+        bail!("sandbox report skillId does not match verified package");
+    }
+    if report.pointer("/draft/version").and_then(Value::as_str)
+        != Some(verification.version.as_str())
+    {
+        bail!("sandbox report version does not match verified package");
+    }
+    let reported_package_path = json_pointer_string(report, "/packagePath")
+        .ok_or_else(|| anyhow!("sandbox report is missing packagePath"))?;
+    if !local_paths_match(package_path, &reported_package_path) {
+        bail!(
+            "sandbox report packagePath {} does not match requested package {}",
+            reported_package_path,
+            package_path.display()
+        );
+    }
+    let cases = report
+        .get("cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("sandbox report cases must be an array"))?;
+    let required_passed_cases = [
+        "draft_check",
+        "success_contract",
+        "invalid_input",
+        "permission_denied",
+        "missing_dependency",
+        "untrusted_code",
+        "metadata_exports",
+        "package_integrity",
+    ];
+    for case_id in required_passed_cases {
+        require_sandbox_case_status(cases, case_id, "passed")?;
+    }
+    let package_integrity = sandbox_case_by_id(cases, "package_integrity")
+        .ok_or_else(|| anyhow!("sandbox report missing package_integrity case"))?;
+    if package_integrity
+        .pointer("/evidence/artifactSha256")
+        .and_then(Value::as_str)
+        != Some(verification.artifact_sha256.as_str())
+    {
+        bail!("sandbox package_integrity artifactSha256 does not match verified package");
+    }
+    if package_integrity
+        .pointer("/evidence/signed")
+        .and_then(Value::as_bool)
+        != Some(verification.signed)
+    {
+        bail!("sandbox package_integrity signed flag does not match verified package");
+    }
+    let activation_approval =
+        require_sandbox_case_status(cases, "activation_approval", "manual_required")?;
+    if activation_approval
+        .pointer("/evidence/automaticActivation")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || activation_approval
+            .pointer("/evidence/commandDidActivate")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        bail!("sandbox activation_approval case must prove the test command did not activate");
+    }
+    Ok(cases
+        .iter()
+        .filter_map(|case| {
+            Some(SkillDraftInstallCaseSummary {
+                case_id: case.get("caseId")?.as_str()?.to_string(),
+                status: case.get("status")?.as_str()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+fn require_sandbox_case_status<'a>(
+    cases: &'a [Value],
+    case_id: &str,
+    expected_status: &str,
+) -> anyhow::Result<&'a Value> {
+    let case = sandbox_case_by_id(cases, case_id)
+        .ok_or_else(|| anyhow!("sandbox report missing required case {case_id}"))?;
+    let status = case
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    if status != expected_status {
+        bail!("sandbox case {case_id} has status {status}, expected {expected_status}");
+    }
+    Ok(case)
+}
+
+fn sandbox_case_by_id<'a>(cases: &'a [Value], case_id: &str) -> Option<&'a Value> {
+    cases
+        .iter()
+        .find(|case| case.get("caseId").and_then(Value::as_str) == Some(case_id))
+}
+
+fn local_paths_match(expected: &Path, actual: &str) -> bool {
+    let actual_path = PathBuf::from(actual.trim());
+    if let (Ok(expected), Ok(actual)) = (fs::canonicalize(expected), fs::canonicalize(&actual_path))
+    {
+        return expected == actual;
+    }
+    normalize_cli_path(&expected.display().to_string()) == normalize_cli_path(actual)
+}
+
+fn read_json_file(path: &Path, label: &str) -> anyhow::Result<Value> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {label} {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {label} {}", path.display()))
+}
+
+async fn verify_skill_package_url(args: SkillVerifyUrlArgs) -> anyhow::Result<()> {
+    let package = fetch_skill_package_from_url(&args.package_url).await?;
+    let preflight_checklist =
+        read_skill_pack_preflight_checklist(args.preflight_checklist.as_deref())?;
+    let verification = verify_local_skill_package(
+        &package,
+        &args.package_url,
+        preflight_checklist.as_ref(),
+        args.require_adapter_metadata,
+        args.require_signed,
+    )?;
+    let report_path = write_local_skill_package_verification_report(
+        &verification,
+        args.verification_report.as_deref(),
+    )?;
+    print_local_skill_package_verification(&verification, args.json)
+        .and_then(|_| print_verification_report_path(report_path.as_deref(), args.json))
+}
+
+fn verify_skill_package_file(args: SkillVerifyPackageArgs) -> anyhow::Result<()> {
+    let package_path = PathBuf::from(&args.package_path);
+    let package = read_local_skill_package_file(&package_path)?;
+    let package_location = package_path.display().to_string();
+    let preflight_checklist =
+        read_skill_pack_preflight_checklist(args.preflight_checklist.as_deref())?;
+    let verification = verify_local_skill_package(
+        &package,
+        &package_location,
+        preflight_checklist.as_ref(),
+        args.require_adapter_metadata,
+        args.require_signed,
+    )?;
+    let report_path = write_local_skill_package_verification_report(
+        &verification,
+        args.verification_report.as_deref(),
+    )?;
+
+    print_local_skill_package_verification(&verification, args.json)
+        .and_then(|_| print_verification_report_path(report_path.as_deref(), args.json))
+}
+
+fn pack_wasm_skill(args: SkillPackWasmArgs) -> anyhow::Result<()> {
+    validate_cli_skill_segment(&args.skill_id, "skill-id")?;
+    validate_cli_skill_segment(&args.version, "version")?;
+    validate_cli_skill_segment(&args.entry_function, "entry-function")?;
+    let wasm_path = PathBuf::from(&args.wasm_path);
+    let wasm_bytes = fs::read(&wasm_path)
+        .with_context(|| format!("failed to read wasm artifact {}", wasm_path.display()))?;
+    if wasm_bytes.is_empty() {
+        bail!("wasm artifact cannot be empty");
+    }
+    let preflight_checklist =
+        read_skill_pack_preflight_checklist(args.preflight_checklist.as_deref())?;
+    let preflight_summary = validate_wasm_pack_preflight(
+        &wasm_bytes,
+        &args.entry_function,
+        args.require_adapter_metadata,
+        preflight_checklist.as_ref(),
+        &args.skill_id,
+    )?;
+    let capabilities = normalized_values(&args.capabilities);
+    let package = build_local_wasm_skill_package(
+        &args.skill_id,
+        &args.version,
+        args.display_name.as_deref(),
+        args.description.as_deref(),
+        &args.entry_function,
+        capabilities,
+        &wasm_path,
+        &wasm_bytes,
+        args.signing_key_hex.as_deref(),
+        args.issuer_did.as_deref(),
+        args.issued_at_unix_ms,
+    )?;
+    let rendered = serde_json::to_string_pretty(&package)?;
+    let output_path = PathBuf::from(&args.output);
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&output_path, rendered.as_bytes())
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "packagePath": output_path,
+                "skillId": package.skill.skill_id,
+                "version": package.skill.version,
+                "signed": package.envelope.is_some(),
+                "issuerDid": package.skill.issuer_did,
+                "artifactSha256": package.skill.artifact_sha256,
+                "preflight": preflight_summary
+            }))?
+        );
+    } else {
+        println!(
+            "Wrote {} skill package {}@{} to {}",
+            if package.envelope.is_some() {
+                "signed"
+            } else {
+                "unsigned"
+            },
+            package.skill.skill_id,
+            package.skill.version,
+            output_path.display()
+        );
+        println!("Artifact SHA-256: {}", package.skill.artifact_sha256);
+        if let Some(issuer_did) = package.skill.issuer_did.as_deref() {
+            println!("Issuer DID: {issuer_did}");
+            println!(
+                "Before installing on a gateway, trust the publisher public key with `dawn-node skills trust-publisher`."
+            );
+        } else {
+            println!(
+                "Unsigned package: install locally only with `dawn-node skills install-file <path> --allow-unsigned`."
+            );
+        }
+        if preflight_summary.adapter_metadata_required {
+            println!(
+                "Preflight: verified adapter metadata exports {}",
+                preflight_summary.checked_exports.join(", ")
+            );
+        }
+        if let Some(path) = preflight_summary.preflight_path.as_deref() {
+            println!("Preflight checklist: {path}");
+        }
+    }
+    Ok(())
+}
+
+fn build_skill_draft(args: SkillBuildDraftArgs) -> anyhow::Result<()> {
+    let report = run_skill_draft_build(&args)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Draft build: built={} status={:?}",
+        report.built, report.status_code
+    );
+    println!("Manifest: {}", report.cargo_manifest_path);
+    println!("Wasm: {}", report.wasm_path);
+    println!("Command: {}", report.command.join(" "));
+    if !report.stdout.trim().is_empty() {
+        println!("stdout:\n{}", report.stdout);
+    }
+    if !report.stderr.trim().is_empty() {
+        println!("stderr:\n{}", report.stderr);
+    }
+    println!("No skill was installed, activated, or published by this command.");
+    Ok(())
+}
+
+fn run_skill_draft_build(args: &SkillBuildDraftArgs) -> anyhow::Result<SkillDraftBuildReport> {
+    let draft_dir = PathBuf::from(&args.draft_dir);
+    let draft_report = build_skill_draft_check_report(&draft_dir)?;
+    if !draft_report.ready_for_packaging {
+        bail!(
+            "skill draft is not ready for build: missingFiles=[{}] mismatches=[{}]",
+            draft_report.missing_files.join(", "),
+            draft_report.mismatches.join("; ")
+        );
+    }
+    validate_cli_skill_segment(&args.target, "target")?;
+    validate_skill_draft_safe_cargo_project(&draft_dir)?;
+
+    let manifest_path = draft_dir.join("wasm-adapter").join("Cargo.toml");
+    let profile = if args.debug { "debug" } else { "release" };
+    let mut command_parts = vec![
+        args.cargo.clone(),
+        "build".to_string(),
+        "--target".to_string(),
+        args.target.clone(),
+        "--manifest-path".to_string(),
+        manifest_path.display().to_string(),
+    ];
+    if !args.debug {
+        command_parts.insert(2, "--release".to_string());
+    }
+
+    let mut command = StdCommand::new(&args.cargo);
+    command
+        .arg("build")
+        .arg("--target")
+        .arg(&args.target)
+        .arg("--manifest-path")
+        .arg(&manifest_path);
+    if !args.debug {
+        command.arg("--release");
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run {}", args.cargo))?;
+    let stdout = truncate_text(&String::from_utf8_lossy(&output.stdout), 4000);
+    let stderr = truncate_text(&String::from_utf8_lossy(&output.stderr), 4000);
+    if !output.status.success() {
+        bail!(
+            "skill draft cargo build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
+    }
+
+    let artifact_slug = skill_draft_artifact_slug(
+        &draft_dir,
+        draft_report.skill_id.as_deref().unwrap_or("skill-draft"),
+    );
+    let wasm_path =
+        inferred_skill_draft_wasm_path_with_profile(&draft_dir, &artifact_slug, profile);
+    if !wasm_path.is_file() {
+        bail!(
+            "cargo build succeeded but expected wasm artifact was not found at {}",
+            wasm_path.display()
+        );
+    }
+
+    Ok(SkillDraftBuildReport {
+        draft: draft_report,
+        cargo_manifest_path: manifest_path.display().to_string(),
+        command: command_parts,
+        wasm_path: wasm_path.display().to_string(),
+        built: true,
+        status_code: output.status.code(),
+        stdout,
+        stderr,
+    })
+}
+
+fn validate_skill_draft_safe_cargo_project(draft_dir: &Path) -> anyhow::Result<()> {
+    let adapter_dir = draft_dir.join("wasm-adapter");
+    let cargo_path = adapter_dir.join("Cargo.toml");
+    let cargo = fs::read_to_string(&cargo_path)
+        .with_context(|| format!("failed to read {}", cargo_path.display()))?;
+    let normalized = cargo.replace('\r', "");
+    let lower = normalized.to_ascii_lowercase();
+    for forbidden in [
+        "[dependencies]",
+        "[dependencies.",
+        "[build-dependencies]",
+        "[build-dependencies.",
+        "[dev-dependencies]",
+        "[dev-dependencies.",
+        "[target.",
+        "[workspace]",
+        "build =",
+        "path =",
+        "git =",
+        "registry =",
+        "replace =",
+        "patch.",
+    ] {
+        if lower.contains(forbidden) {
+            bail!(
+                "wasm-adapter/Cargo.toml contains forbidden build surface `{forbidden}` for build-draft"
+            );
+        }
+    }
+    if adapter_dir.join("build.rs").exists() {
+        bail!("wasm-adapter/build.rs is not allowed for build-draft");
+    }
+    if adapter_dir.join(".cargo").exists() {
+        bail!("wasm-adapter/.cargo is not allowed for build-draft");
+    }
+    Ok(())
+}
+
+fn test_skill_draft(args: SkillTestDraftArgs) -> anyhow::Result<()> {
+    let mut report = build_skill_draft_sandbox_report(&args)?;
+    if let Some(report_path) = args.report.as_deref() {
+        write_skill_draft_sandbox_report(&mut report, report_path)?;
+    }
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Draft sandbox: passed={} failed={} manualRequired={}",
+        report.passed, report.failed_count, report.manual_required_count
+    );
+    for case in &report.cases {
+        println!("{}: {} - {}", case.case_id, case.status, case.summary);
+    }
+    if let Some(path) = report.report_path.as_deref() {
+        println!("Sandbox report: {path}");
+    }
+    println!("No skill was installed, activated, or published by this command.");
+    Ok(())
+}
+
+fn build_skill_draft_sandbox_report(
+    args: &SkillTestDraftArgs,
+) -> anyhow::Result<SkillDraftSandboxReport> {
+    let draft_dir = PathBuf::from(&args.draft_dir);
+    let draft_report = build_skill_draft_check_report(&draft_dir)?;
+    let artifact_slug = skill_draft_artifact_slug(
+        &draft_dir,
+        draft_report.skill_id.as_deref().unwrap_or("skill-draft"),
+    );
+    let wasm_path = args
+        .wasm_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| inferred_skill_draft_wasm_path(&draft_dir, &artifact_slug));
+    let package_path = args
+        .package_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| draft_dir.join(format!("{artifact_slug}.skill-package.json")));
+    let contract = read_skill_draft_json_file(&draft_dir, "contract.json").ok();
+    let preflight = read_skill_draft_json_file(&draft_dir, "preflight-checklist.json").ok();
+    let mut cases = Vec::new();
+
+    cases.push(if draft_report.ready_for_packaging {
+        sandbox_case(
+            "draft_check",
+            "passed",
+            "Draft required files and governance manifests are internally consistent.",
+            json!({
+                "missingFiles": draft_report.missing_files,
+                "mismatches": draft_report.mismatches
+            }),
+        )
+    } else {
+        sandbox_case(
+            "draft_check",
+            "failed",
+            "Draft required files or governance manifests are incomplete.",
+            json!({
+                "missingFiles": draft_report.missing_files,
+                "mismatches": draft_report.mismatches
+            }),
+        )
+    });
+
+    cases.push(contract_success_case(contract.as_ref()));
+    cases.push(contract_invalid_input_case(contract.as_ref()));
+    cases.push(permission_denied_case(contract.as_ref()));
+    cases.push(match validate_skill_draft_safe_cargo_project(&draft_dir) {
+        Ok(()) => sandbox_case(
+            "missing_dependency",
+            "passed",
+            "Draft adapter has no dependency/build-script surface; missing tools fail before package activation.",
+            json!({"cargoPolicy": "no dependencies, build.rs, .cargo, path/git/registry overrides"}),
+        ),
+        Err(error) => sandbox_case(
+            "missing_dependency",
+            "failed",
+            "Draft adapter cargo project exposes dependency or build-script surface.",
+            json!({"error": error.to_string()}),
+        ),
+    });
+    cases.push(untrusted_code_case(contract.as_ref(), preflight.as_ref()));
+    cases.push(metadata_exports_case(
+        &wasm_path,
+        preflight.as_ref(),
+        draft_report.skill_id.as_deref(),
+    ));
+    cases.push(package_integrity_case(
+        &package_path,
+        preflight.as_ref(),
+        !args.allow_unsigned_development,
+    ));
+    cases.push(sandbox_case(
+        "activation_approval",
+        "manual_required",
+        "Activation requires separate operator approval after reviewing test evidence.",
+        json!({
+            "automaticActivation": false,
+            "commandDidActivate": false
+        }),
+    ));
+
+    let failed_count = cases.iter().filter(|case| case.status == "failed").count();
+    let manual_required_count = cases
+        .iter()
+        .filter(|case| case.status == "manual_required")
+        .count();
+    Ok(SkillDraftSandboxReport {
+        draft: draft_report,
+        wasm_path: Some(wasm_path.display().to_string()),
+        package_path: Some(package_path.display().to_string()),
+        passed: failed_count == 0,
+        activation_ready: false,
+        manual_required_count,
+        failed_count,
+        report_path: None,
+        cases,
+    })
+}
+
+fn contract_success_case(contract: Option<&Value>) -> SkillDraftSandboxCaseReport {
+    let Some(contract) = contract else {
+        return sandbox_case(
+            "success_contract",
+            "failed",
+            "contract.json is missing or invalid.",
+            json!({}),
+        );
+    };
+    let input_requires_instruction = contract
+        .pointer("/inputSchema/required")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str() == Some("instruction"))
+        });
+    let instruction_is_string = contract
+        .pointer("/inputSchema/properties/instruction/type")
+        .and_then(Value::as_str)
+        == Some("string");
+    let output_required = contract
+        .pointer("/outputSchema/required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            let values = items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<BTreeSet<_>>();
+            values.contains("status") && values.contains("summary")
+        })
+        .unwrap_or(false);
+    if input_requires_instruction && instruction_is_string && output_required {
+        sandbox_case(
+            "success_contract",
+            "passed",
+            "Contract declares valid instruction input and status/summary output shape.",
+            json!({
+                "inputRequiresInstruction": true,
+                "instructionType": "string",
+                "outputRequiresStatusAndSummary": true
+            }),
+        )
+    } else {
+        sandbox_case(
+            "success_contract",
+            "failed",
+            "Contract does not declare the minimum input/output shape.",
+            json!({
+                "inputRequiresInstruction": input_requires_instruction,
+                "instructionTypeString": instruction_is_string,
+                "outputRequiresStatusAndSummary": output_required
+            }),
+        )
+    }
+}
+
+fn contract_invalid_input_case(contract: Option<&Value>) -> SkillDraftSandboxCaseReport {
+    let Some(contract) = contract else {
+        return sandbox_case(
+            "invalid_input",
+            "failed",
+            "contract.json is missing or invalid.",
+            json!({}),
+        );
+    };
+    let rejects_extra = contract
+        .pointer("/inputSchema/additionalProperties")
+        .and_then(Value::as_bool)
+        == Some(false);
+    let min_length = contract
+        .pointer("/inputSchema/properties/instruction/minLength")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if rejects_extra && min_length >= 1 {
+        sandbox_case(
+            "invalid_input",
+            "passed",
+            "Contract rejects empty instructions and undeclared top-level inputs.",
+            json!({
+                "additionalProperties": false,
+                "instructionMinLength": min_length
+            }),
+        )
+    } else {
+        sandbox_case(
+            "invalid_input",
+            "failed",
+            "Contract does not fail closed for malformed input.",
+            json!({
+                "rejectsExtraProperties": rejects_extra,
+                "instructionMinLength": min_length
+            }),
+        )
+    }
+}
+
+fn permission_denied_case(contract: Option<&Value>) -> SkillDraftSandboxCaseReport {
+    let Some(contract) = contract else {
+        return sandbox_case(
+            "permission_denied",
+            "failed",
+            "contract.json is missing or invalid.",
+            json!({}),
+        );
+    };
+    let requested_empty = contract
+        .pointer("/capabilities/requested")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty);
+    let review_required = contract
+        .pointer("/capabilities/mustBeReviewedBeforeActivation")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let forbidden = contract
+        .pointer("/capabilities/forbiddenDuringDraft")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    if requested_empty && review_required && forbidden > 0 {
+        sandbox_case(
+            "permission_denied",
+            "passed",
+            "Draft grants no runtime capabilities and requires review before activation.",
+            json!({
+                "requestedCapabilities": [],
+                "mustBeReviewedBeforeActivation": true,
+                "forbiddenDuringDraftCount": forbidden
+            }),
+        )
+    } else {
+        sandbox_case(
+            "permission_denied",
+            "failed",
+            "Draft capability policy is not fail-closed.",
+            json!({
+                "requestedCapabilitiesEmpty": requested_empty,
+                "reviewRequired": review_required,
+                "forbiddenDuringDraftCount": forbidden
+            }),
+        )
+    }
+}
+
+fn untrusted_code_case(
+    contract: Option<&Value>,
+    preflight: Option<&Value>,
+) -> SkillDraftSandboxCaseReport {
+    let runtime_forbidden = preflight
+        .and_then(|value| value.pointer("/runtimePolicy/fetchedCodeExecution"))
+        .and_then(Value::as_str)
+        == Some("forbidden");
+    let global_install_forbidden = preflight
+        .and_then(|value| value.pointer("/runtimePolicy/globalDependencyInstall"))
+        .and_then(Value::as_str)
+        == Some("forbidden");
+    let contract_forbids = contract
+        .and_then(|value| value.pointer("/capabilities/forbiddenDuringDraft"))
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().filter_map(Value::as_str).any(|item| {
+                item.contains("execute fetched source code") || item.contains("credentials")
+            })
+        });
+    if runtime_forbidden && global_install_forbidden && contract_forbids {
+        sandbox_case(
+            "untrusted_code",
+            "passed",
+            "Draft policy forbids fetched source execution, global installs, and credential access.",
+            json!({
+                "fetchedCodeExecution": "forbidden",
+                "globalDependencyInstall": "forbidden",
+                "contractForbiddenDuringDraft": true
+            }),
+        )
+    } else {
+        sandbox_case(
+            "untrusted_code",
+            "failed",
+            "Draft policy does not fully forbid untrusted code execution surfaces.",
+            json!({
+                "runtimeFetchedCodeForbidden": runtime_forbidden,
+                "globalDependencyInstallForbidden": global_install_forbidden,
+                "contractForbiddenDuringDraft": contract_forbids
+            }),
+        )
+    }
+}
+
+fn metadata_exports_case(
+    wasm_path: &Path,
+    preflight: Option<&Value>,
+    skill_id: Option<&str>,
+) -> SkillDraftSandboxCaseReport {
+    let wasm_bytes = match fs::read(wasm_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return sandbox_case(
+                "metadata_exports",
+                "failed",
+                "Wasm artifact is missing or unreadable.",
+                json!({
+                    "path": wasm_path.display().to_string(),
+                    "error": error.to_string()
+                }),
+            );
+        }
+    };
+    let preflight = preflight.map(|document| SkillPackPreflightChecklist {
+        path: "preflight-checklist.json".to_string(),
+        document: document.clone(),
+    });
+    match validate_wasm_pack_preflight(
+        &wasm_bytes,
+        "run_skill",
+        true,
+        preflight.as_ref(),
+        skill_id.unwrap_or("skill-draft"),
+    ) {
+        Ok(summary) => sandbox_case(
+            "metadata_exports",
+            "passed",
+            "Wasm artifact exports run_skill and Dawn adapter metadata ABI.",
+            json!({
+                "path": wasm_path.display().to_string(),
+                "checkedExports": summary.checked_exports
+            }),
+        ),
+        Err(error) => sandbox_case(
+            "metadata_exports",
+            "failed",
+            "Wasm artifact does not satisfy metadata ABI preflight.",
+            json!({
+                "path": wasm_path.display().to_string(),
+                "error": error.to_string()
+            }),
+        ),
+    }
+}
+
+fn package_integrity_case(
+    package_path: &Path,
+    preflight: Option<&Value>,
+    require_signed: bool,
+) -> SkillDraftSandboxCaseReport {
+    let package = match read_local_skill_package_file(&package_path.to_path_buf()) {
+        Ok(package) => package,
+        Err(error) => {
+            return sandbox_case(
+                "package_integrity",
+                "failed",
+                "Skill package is missing or invalid.",
+                json!({
+                    "path": package_path.display().to_string(),
+                    "error": error.to_string()
+                }),
+            );
+        }
+    };
+    let preflight = preflight.map(|document| SkillPackPreflightChecklist {
+        path: "preflight-checklist.json".to_string(),
+        document: document.clone(),
+    });
+    match verify_local_skill_package(
+        &package,
+        &package_path.display().to_string(),
+        preflight.as_ref(),
+        true,
+        require_signed,
+    ) {
+        Ok(verification) => sandbox_case(
+            "package_integrity",
+            "passed",
+            "Skill package artifact hash, metadata ABI, and signature policy verified.",
+            json!({
+                "path": package_path.display().to_string(),
+                "signed": verification.signed,
+                "artifactSha256": verification.artifact_sha256
+            }),
+        ),
+        Err(error) => sandbox_case(
+            "package_integrity",
+            "failed",
+            "Skill package failed local verification.",
+            json!({
+                "path": package_path.display().to_string(),
+                "requireSigned": require_signed,
+                "error": error.to_string()
+            }),
+        ),
+    }
+}
+
+fn sandbox_case(
+    case_id: &str,
+    status: &str,
+    summary: &str,
+    evidence: Value,
+) -> SkillDraftSandboxCaseReport {
+    SkillDraftSandboxCaseReport {
+        case_id: case_id.to_string(),
+        status: status.to_string(),
+        summary: summary.to_string(),
+        evidence,
+    }
+}
+
+fn write_skill_draft_sandbox_report(
+    report: &mut SkillDraftSandboxReport,
+    report_path: &str,
+) -> anyhow::Result<()> {
+    let path = PathBuf::from(report_path);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    report.report_path = Some(path.display().to_string());
+    let rendered = serde_json::to_string_pretty(report)
+        .context("failed to serialize skill draft sandbox report")?;
+    fs::write(&path, rendered.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn pack_skill_draft(args: SkillPackDraftArgs) -> anyhow::Result<()> {
+    let report = build_skill_draft_package_report(&args)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Wrote {} draft skill package {}@{} to {}",
+        if report.signed { "signed" } else { "unsigned" },
+        report.skill_id,
+        report.version,
+        report.package_path
+    );
+    println!("Artifact SHA-256: {}", report.artifact_sha256);
+    if let Some(issuer_did) = report.issuer_did.as_deref() {
+        println!("Issuer DID: {issuer_did}");
+    } else {
+        println!(
+            "Unsigned development package: install only with explicit --allow-unsigned approval."
+        );
+    }
+    if let Some(report_path) = report.verification_report_path.as_deref() {
+        println!("Verification report: {report_path}");
+    }
+    println!("No skill was installed, activated, or published by this command.");
+    Ok(())
+}
+
+fn build_skill_draft_package_report(
+    args: &SkillPackDraftArgs,
+) -> anyhow::Result<SkillDraftPackageReport> {
+    let draft_dir = PathBuf::from(&args.draft_dir);
+    let draft_report = build_skill_draft_check_report(&draft_dir)?;
+    if !draft_report.ready_for_packaging {
+        bail!(
+            "skill draft is not ready for packaging: missingFiles=[{}] mismatches=[{}]",
+            draft_report.missing_files.join(", "),
+            draft_report.mismatches.join("; ")
+        );
+    }
+    if args.signing_key_hex.is_none() && !args.allow_unsigned_development {
+        bail!(
+            "pack-draft requires --signing-key-hex for normal packaging; pass --allow-unsigned-development only for local development packages"
+        );
+    }
+
+    let skill_id = draft_report
+        .skill_id
+        .clone()
+        .ok_or_else(|| anyhow!("checked draft did not include suggestedSkillId"))?;
+    let version = draft_report
+        .version
+        .clone()
+        .unwrap_or_else(|| "0.0.0-review".to_string());
+    validate_cli_skill_segment(&skill_id, "skill-id")?;
+    validate_cli_skill_segment(&version, "version")?;
+    validate_cli_skill_segment(&args.entry_function, "entry-function")?;
+
+    let artifact_slug = skill_draft_artifact_slug(&draft_dir, &skill_id);
+    let wasm_path = args
+        .wasm_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| inferred_skill_draft_wasm_path(&draft_dir, &artifact_slug));
+    let wasm_bytes = fs::read(&wasm_path)
+        .with_context(|| format!("failed to read wasm artifact {}", wasm_path.display()))?;
+    if wasm_bytes.is_empty() {
+        bail!("wasm artifact cannot be empty");
+    }
+
+    let preflight_path = draft_dir.join("preflight-checklist.json");
+    let preflight_path_string = preflight_path.display().to_string();
+    let preflight_checklist = read_skill_pack_preflight_checklist(Some(&preflight_path_string))?;
+    let preflight_checklist = preflight_checklist
+        .as_ref()
+        .ok_or_else(|| anyhow!("preflight checklist was unexpectedly missing"))?;
+
+    validate_wasm_pack_preflight(
+        &wasm_bytes,
+        &args.entry_function,
+        true,
+        Some(preflight_checklist),
+        &skill_id,
+    )?;
+
+    let capabilities = normalized_values(&args.capabilities);
+    let description = args.description.clone().or_else(|| {
+        Some(format!(
+            "Review package generated from Dawn skill draft {}",
+            draft_dir.display()
+        ))
+    });
+    let package = build_local_wasm_skill_package(
+        &skill_id,
+        &version,
+        args.display_name.as_deref(),
+        description.as_deref(),
+        &args.entry_function,
+        capabilities,
+        &wasm_path,
+        &wasm_bytes,
+        args.signing_key_hex.as_deref(),
+        args.issuer_did.as_deref(),
+        args.issued_at_unix_ms,
+    )?;
+    let output_path = args
+        .output
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| draft_dir.join(format!("{artifact_slug}.skill-package.json")));
+    write_local_skill_package_file(&output_path, &package)?;
+
+    let require_signed = !args.allow_unsigned_development;
+    let verification = verify_local_skill_package(
+        &package,
+        &output_path.display().to_string(),
+        Some(preflight_checklist),
+        true,
+        require_signed,
+    )?;
+    let verification_report_path = write_local_skill_package_verification_report(
+        &verification,
+        args.verification_report.as_deref(),
+    )?;
+
+    Ok(SkillDraftPackageReport {
+        draft: draft_report,
+        wasm_path: wasm_path.display().to_string(),
+        package_path: output_path.display().to_string(),
+        skill_id: verification.skill_id.clone(),
+        version: verification.version.clone(),
+        signed: verification.signed,
+        issuer_did: verification.issuer_did.clone(),
+        artifact_sha256: verification.artifact_sha256.clone(),
+        verification_report_path,
+        verification,
+    })
+}
+
+fn write_local_skill_package_file(
+    output_path: &Path,
+    package: &LocalSkillPackage,
+) -> anyhow::Result<()> {
+    let rendered =
+        serde_json::to_string_pretty(package).context("failed to serialize local skill package")?;
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(output_path, rendered.as_bytes())
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(())
+}
+
+fn skill_draft_artifact_slug(draft_dir: &Path, skill_id: &str) -> String {
+    draft_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToString::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| skill_id.replace('.', "-"))
+}
+
+fn inferred_skill_draft_wasm_path(draft_dir: &Path, artifact_slug: &str) -> PathBuf {
+    inferred_skill_draft_wasm_path_with_profile(draft_dir, artifact_slug, "release")
+}
+
+fn inferred_skill_draft_wasm_path_with_profile(
+    draft_dir: &Path,
+    artifact_slug: &str,
+    profile: &str,
+) -> PathBuf {
+    let base = draft_dir
+        .join("wasm-adapter")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join(profile);
+    let candidates = [
+        base.join(format!("{artifact_slug}.wasm")),
+        base.join(format!("{}.wasm", artifact_slug.replace('-', "_"))),
+    ];
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
+}
+
+#[derive(Debug)]
+struct SkillPackPreflightChecklist {
+    path: String,
+    document: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPackPreflightSummary {
+    preflight_path: Option<String>,
+    adapter_metadata_required: bool,
+    checked_exports: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSkillPackageVerification {
+    package_path: String,
+    skill_id: String,
+    version: String,
+    signed: bool,
+    source_kind: String,
+    entry_function: String,
+    artifact_sha256: String,
+    issuer_did: Option<String>,
+    signature_hex: Option<String>,
+    document_hash: Option<String>,
+    preflight: SkillPackPreflightSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftCheckReport {
+    draft_dir: String,
+    skill_id: Option<String>,
+    version: Option<String>,
+    ready_for_packaging: bool,
+    missing_files: Vec<String>,
+    mismatches: Vec<String>,
+    warnings: Vec<String>,
+    build_commands: Vec<String>,
+    package_command: Option<String>,
+    verify_command: Option<String>,
+    install_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftPackageReport {
+    draft: SkillDraftCheckReport,
+    wasm_path: String,
+    package_path: String,
+    skill_id: String,
+    version: String,
+    signed: bool,
+    issuer_did: Option<String>,
+    artifact_sha256: String,
+    verification_report_path: Option<String>,
+    verification: LocalSkillPackageVerification,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftBuildReport {
+    draft: SkillDraftCheckReport,
+    cargo_manifest_path: String,
+    command: Vec<String>,
+    wasm_path: String,
+    built: bool,
+    status_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftSandboxReport {
+    draft: SkillDraftCheckReport,
+    wasm_path: Option<String>,
+    package_path: Option<String>,
+    passed: bool,
+    activation_ready: bool,
+    manual_required_count: usize,
+    failed_count: usize,
+    report_path: Option<String>,
+    cases: Vec<SkillDraftSandboxCaseReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftSandboxCaseReport {
+    case_id: String,
+    status: String,
+    summary: String,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftInstallEvidenceReport {
+    draft: SkillDraftCheckReport,
+    sandbox_report_path: String,
+    package_path: String,
+    skill_id: String,
+    version: String,
+    signed: bool,
+    issuer_did: Option<String>,
+    artifact_sha256: String,
+    activation_requested: bool,
+    activation_confirmed: bool,
+    verification_report_path: Option<String>,
+    verification: LocalSkillPackageVerification,
+    sandbox_cases: Vec<SkillDraftInstallCaseSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftInstallCaseSummary {
+    case_id: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDraftInstallReport {
+    evidence: SkillDraftInstallEvidenceReport,
+    response: SkillActivationResponse,
+}
+
+async fn fetch_skill_package_from_url(package_url: &str) -> anyhow::Result<LocalSkillPackage> {
+    let package_url = validate_skill_package_http_url(package_url)?;
+    let response = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?
+        .get(package_url.clone())
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch skill package {package_url}"))?
+        .error_for_status()
+        .with_context(|| format!("skill package endpoint returned an error {package_url}"))?;
+    let body = read_limited_http_body(response, SKILL_PACKAGE_MAX_BYTES, "skill package").await?;
+    serde_json::from_slice(&body)
+        .with_context(|| format!("failed to parse skill package {package_url}"))
+}
+
+fn validate_skill_package_http_url(raw: &str) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(raw).context("skill package URL must be absolute")?;
+    match url.scheme() {
+        "http" | "https" => Ok(url.to_string()),
+        scheme => bail!("skill package URL must use http or https, not `{scheme}`"),
+    }
+}
+
+async fn read_limited_http_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> anyhow::Result<Vec<u8>> {
+    if let Some(length) = response.content_length() {
+        if length > max_bytes as u64 {
+            bail!("{label} is too large: {length} bytes exceeds {max_bytes}");
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("failed while reading {label}"))?;
+        if body.len() + chunk.len() > max_bytes {
+            bail!("{label} exceeded {max_bytes} bytes while reading");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn read_local_skill_package_file(path: &PathBuf) -> anyhow::Result<LocalSkillPackage> {
+    let package_bytes = fs::read(path)
+        .with_context(|| format!("failed to read skill package {}", path.display()))?;
+    serde_json::from_slice(&package_bytes)
+        .with_context(|| format!("failed to parse skill package {}", path.display()))
+}
+
+fn verify_local_skill_package(
+    package: &LocalSkillPackage,
+    package_location: &str,
+    preflight: Option<&SkillPackPreflightChecklist>,
+    require_adapter_metadata: bool,
+    require_signed: bool,
+) -> anyhow::Result<LocalSkillPackageVerification> {
+    validate_cli_skill_segment(&package.skill.skill_id, "skill-id")?;
+    validate_cli_skill_segment(&package.skill.version, "version")?;
+    validate_cli_skill_segment(&package.skill.entry_function, "entry-function")?;
+    let wasm_bytes = base64::engine::general_purpose::STANDARD
+        .decode(package.wasm_base64.as_bytes())
+        .context("skill package wasmBase64 is not valid base64")?;
+    if wasm_bytes.is_empty() {
+        bail!("skill package wasmBase64 cannot decode to an empty artifact");
+    }
+    let computed_artifact_sha256 = hex::encode(sha2::Sha256::digest(&wasm_bytes));
+    let declared_artifact_sha256 = normalize_hex_string(&package.skill.artifact_sha256)
+        .context("skill package artifactSha256 is not valid hex")?;
+    if computed_artifact_sha256 != declared_artifact_sha256 {
+        bail!(
+            "skill package artifact SHA-256 mismatch: computed {} but package declares {}",
+            computed_artifact_sha256,
+            declared_artifact_sha256
+        );
+    }
+
+    let preflight_summary = validate_wasm_pack_preflight(
+        &wasm_bytes,
+        &package.skill.entry_function,
+        require_adapter_metadata,
+        preflight,
+        &package.skill.skill_id,
+    )?;
+
+    let (issuer_did, signature_hex, document_hash) = if let Some(envelope) =
+        package.envelope.as_ref()
+    {
+        let verified_document_hash = verify_local_signed_skill_envelope(package, envelope)?;
+        (
+            Some(envelope.document.issuer_did.clone()),
+            Some(envelope.signature_hex.clone()),
+            Some(verified_document_hash),
+        )
+    } else {
+        if require_signed {
+            bail!(
+                "skill package is unsigned; pass --allow-unsigned to install it or omit --require-signed when verifying"
+            );
+        }
+        (None, None, None)
+    };
+
+    Ok(LocalSkillPackageVerification {
+        package_path: package_location.to_string(),
+        skill_id: package.skill.skill_id.clone(),
+        version: package.skill.version.clone(),
+        signed: package.envelope.is_some(),
+        source_kind: package.skill.source_kind.clone(),
+        entry_function: package.skill.entry_function.clone(),
+        artifact_sha256: declared_artifact_sha256,
+        issuer_did,
+        signature_hex,
+        document_hash,
+        preflight: preflight_summary,
+    })
+}
+
+fn print_local_skill_package_verification(
+    verification: &LocalSkillPackageVerification,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(verification)?);
+        return Ok(());
+    }
+
+    println!(
+        "Verified skill package {}@{} signed={} path={}",
+        verification.skill_id, verification.version, verification.signed, verification.package_path
+    );
+    println!("Artifact SHA-256: {}", verification.artifact_sha256);
+    println!("Entry function: {}", verification.entry_function);
+    if let Some(issuer_did) = verification.issuer_did.as_deref() {
+        println!("Issuer DID: {issuer_did}");
+    }
+    if let Some(document_hash) = verification.document_hash.as_deref() {
+        println!("Signed document SHA-256: {document_hash}");
+    }
+    if verification.preflight.adapter_metadata_required {
+        println!(
+            "Preflight: verified adapter metadata exports {}",
+            verification.preflight.checked_exports.join(", ")
+        );
+    }
+    if let Some(preflight_path) = verification.preflight.preflight_path.as_deref() {
+        println!("Preflight checklist: {preflight_path}");
+    }
+    Ok(())
+}
+
+fn write_local_skill_package_verification_report(
+    verification: &LocalSkillPackageVerification,
+    report_path: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(report_path) = report_path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(report_path);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let report = serde_json::to_string_pretty(verification)
+        .context("failed to serialize skill package verification report")?;
+    fs::write(&path, report.as_bytes())
+        .with_context(|| format!("failed to write verification report {}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
+fn print_verification_report_path(
+    report_path: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    if !json_output {
+        if let Some(report_path) = report_path {
+            println!("Verification report: {report_path}");
+        }
+    }
+    Ok(())
+}
+
+fn verify_local_signed_skill_envelope(
+    package: &LocalSkillPackage,
+    envelope: &LocalSignedSkillEnvelope,
+) -> anyhow::Result<String> {
+    if envelope.document.skill_id != package.skill.skill_id {
+        bail!("signed skill document skillId does not match package skillId");
+    }
+    if envelope.document.version != package.skill.version {
+        bail!("signed skill document version does not match package version");
+    }
+    if envelope.document.display_name != package.skill.display_name {
+        bail!("signed skill document displayName does not match package displayName");
+    }
+    if envelope.document.description != package.skill.description {
+        bail!("signed skill document description does not match package description");
+    }
+    if envelope.document.entry_function != package.skill.entry_function {
+        bail!("signed skill document entryFunction does not match package entryFunction");
+    }
+    if envelope.document.capabilities != package.skill.capabilities {
+        bail!("signed skill document capabilities do not match package capabilities");
+    }
+    let declared_artifact_sha256 = normalize_hex_string(&package.skill.artifact_sha256)?;
+    if normalize_hex_string(&envelope.document.artifact_sha256)? != declared_artifact_sha256 {
+        bail!("signed skill document artifactSha256 does not match package artifactSha256");
+    }
+    if package.skill.issuer_did.as_deref() != Some(envelope.document.issuer_did.as_str()) {
+        bail!("package issuerDid does not match signed skill document issuerDid");
+    }
+    if package.skill.signature_hex.as_deref() != Some(envelope.signature_hex.as_str()) {
+        bail!("package signatureHex does not match signed envelope signatureHex");
+    }
+    if package.skill.issued_at_unix_ms != Some(envelope.document.issued_at_unix_ms) {
+        bail!("package issuedAtUnixMs does not match signed skill document issuedAtUnixMs");
+    }
+
+    let public_key_hex =
+        public_key_hex_from_skill_publisher_issuer_did(envelope.document.issuer_did.as_str())?;
+    let verifying_key = VerifyingKey::from_bytes(&decode_fixed_hex::<32>(
+        &public_key_hex,
+        "skill publisher public key",
+    )?)
+    .context("skill publisher public key must be a valid Ed25519 verifying key")?;
+    let signature_bytes = decode_fixed_hex::<64>(&envelope.signature_hex, "skill signature")?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let payload = serde_json::to_vec(&envelope.document)
+        .context("failed to serialize signed skill document")?;
+    verifying_key
+        .verify(&payload, &signature)
+        .context("skill package signature verification failed")?;
+    let document_hash = hex::encode(sha2::Sha256::digest(&payload));
+    if let Some(declared_document_hash) = package.skill.document_hash.as_deref() {
+        if normalize_hex_string(declared_document_hash)? != document_hash {
+            bail!("package documentHash does not match signed skill document");
+        }
+    }
+    Ok(document_hash)
+}
+
+fn read_skill_pack_preflight_checklist(
+    path: Option<&str>,
+) -> anyhow::Result<Option<SkillPackPreflightChecklist>> {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path_buf = PathBuf::from(path);
+    let raw = fs::read_to_string(&path_buf)
+        .with_context(|| format!("failed to read preflight checklist {}", path_buf.display()))?;
+    let document: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse preflight checklist {}", path_buf.display()))?;
+    let kind = document.get("kind").and_then(Value::as_str).unwrap_or("");
+    if kind != "dawn_skill_intake_preflight_checklist" {
+        bail!("preflight checklist kind must be dawn_skill_intake_preflight_checklist");
+    }
+    Ok(Some(SkillPackPreflightChecklist {
+        path: path_buf.display().to_string(),
+        document,
+    }))
+}
+
+fn validate_wasm_pack_preflight(
+    wasm_bytes: &[u8],
+    entry_function: &str,
+    require_adapter_metadata: bool,
+    preflight: Option<&SkillPackPreflightChecklist>,
+    skill_id: &str,
+) -> anyhow::Result<SkillPackPreflightSummary> {
+    if let Some(preflight) = preflight {
+        if let Some(preflight_skill_id) = preflight
+            .document
+            .get("suggestedSkillId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if preflight_skill_id != skill_id {
+                bail!(
+                    "preflight checklist suggestedSkillId `{}` does not match --skill-id `{}`",
+                    preflight_skill_id,
+                    skill_id
+                );
+            }
+        }
+    }
+
+    let adapter_metadata_required =
+        require_adapter_metadata || preflight_requires_adapter_metadata(preflight);
+    let export_names = extract_wasm_export_names(wasm_bytes)?;
+    if !export_names.contains(entry_function) {
+        bail!("wasm entry function export `{entry_function}` is required before packaging");
+    }
+    let mut checked_exports = Vec::new();
+    if adapter_metadata_required {
+        for required in DAWN_ADAPTER_METADATA_EXPORTS {
+            if !export_names.contains(required) {
+                bail!("wasm adapter metadata export `{required}` is required before packaging");
+            }
+            checked_exports.push(required.to_string());
+        }
+    }
+
+    Ok(SkillPackPreflightSummary {
+        preflight_path: preflight.map(|preflight| preflight.path.clone()),
+        adapter_metadata_required,
+        checked_exports,
+    })
+}
+
+fn preflight_requires_adapter_metadata(preflight: Option<&SkillPackPreflightChecklist>) -> bool {
+    preflight
+        .and_then(|preflight| preflight.document.get("gates"))
+        .and_then(Value::as_array)
+        .is_some_and(|gates| {
+            gates.iter().any(|gate| {
+                gate.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == "metadata_abi")
+            })
+        })
+}
+
+fn extract_wasm_export_names(wasm_bytes: &[u8]) -> anyhow::Result<BTreeSet<String>> {
+    if wasm_bytes.len() < 8 || &wasm_bytes[0..4] != b"\0asm" || &wasm_bytes[4..8] != b"\x01\0\0\0" {
+        bail!("wasm artifact is not a valid WebAssembly 1.0 module");
+    }
+
+    let mut export_names = BTreeSet::new();
+    let mut offset = 8;
+    while offset < wasm_bytes.len() {
+        let section_id = wasm_bytes[offset];
+        offset += 1;
+        let section_len = read_wasm_u32(wasm_bytes, &mut offset, "section length")? as usize;
+        let section_end = offset
+            .checked_add(section_len)
+            .filter(|end| *end <= wasm_bytes.len())
+            .ok_or_else(|| anyhow!("wasm section length exceeds artifact size"))?;
+        if section_id == 7 {
+            parse_wasm_export_section(&wasm_bytes[offset..section_end], &mut export_names)?;
+        }
+        offset = section_end;
+    }
+
+    Ok(export_names)
+}
+
+fn parse_wasm_export_section(
+    section: &[u8],
+    export_names: &mut BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let mut offset = 0;
+    let count = read_wasm_u32(section, &mut offset, "export count")?;
+    for _ in 0..count {
+        let name_len = read_wasm_u32(section, &mut offset, "export name length")? as usize;
+        let name_end = offset
+            .checked_add(name_len)
+            .filter(|end| *end <= section.len())
+            .ok_or_else(|| anyhow!("wasm export name length exceeds export section size"))?;
+        let name = std::str::from_utf8(&section[offset..name_end])
+            .context("wasm export name is not valid UTF-8")?
+            .to_string();
+        offset = name_end;
+        if offset >= section.len() {
+            bail!("wasm export entry is missing kind");
+        }
+        let _kind = section[offset];
+        offset += 1;
+        let _index = read_wasm_u32(section, &mut offset, "export index")?;
+        export_names.insert(name);
+    }
+    if offset != section.len() {
+        bail!("wasm export section contains trailing bytes");
+    }
+    Ok(())
+}
+
+fn read_wasm_u32(bytes: &[u8], offset: &mut usize, label: &str) -> anyhow::Result<u32> {
+    let mut result = 0_u32;
+    let mut shift = 0_u32;
+    for _ in 0..5 {
+        if *offset >= bytes.len() {
+            bail!("wasm {label} is truncated");
+        }
+        let byte = bytes[*offset];
+        *offset += 1;
+        result |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    bail!("wasm {label} uses an invalid u32 LEB128 encoding")
+}
+
+async fn trust_skill_publisher(args: SkillTrustPublisherArgs) -> anyhow::Result<()> {
+    let public_key_hex = normalize_hex_string(&args.public_key_hex)?;
+    let issuer_did = args
+        .issuer_did
+        .unwrap_or_else(|| skill_publisher_issuer_did_from_public_key_hex(&public_key_hex));
+    validate_skill_publisher_issuer_did(&issuer_did, &public_key_hex)?;
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let response: Value = client
+        .post_json(
+            "/api/gateway/skills/trust-roots",
+            &SkillPublisherTrustRootUpsertRequest {
+                actor: args.actor,
+                reason: args.reason,
+                issuer_did,
+                label: args.label,
+                public_key_hex,
+            },
+        )
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        let trust_root = response.get("trustRoot").unwrap_or(&response);
+        let issuer = trust_root
+            .get("issuerDid")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let label = trust_root
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        println!("Trusted skill publisher {issuer} label={label}");
+    }
+    Ok(())
+}
+
+async fn intake_skill(args: SkillIntakeArgs) -> anyhow::Result<()> {
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let response: SkillIntakeResponse = client
+        .post_json(
+            "/api/gateway/skills/intake",
+            &SkillIntakeRequest {
+                source_url: args.source_url,
+                source_kind_hint: args.source_kind_hint,
+            },
+        )
+        .await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    print_skill_intake_response(&response);
+    Ok(())
+}
+
+fn print_skill_intake_response(response: &SkillIntakeResponse) {
+    println!("Source: {}", response.source_url);
+    if let Some(source_sha256) = response.source_sha256.as_deref() {
+        println!("Source SHA-256: {source_sha256}");
+    }
+    println!(
+        "Detected: {} confidence={:.2}",
+        response.detected_kind, response.confidence
+    );
+    println!("Installability: {}", response.installability);
+    println!("Conversion required: {}", response.conversion_required);
+    println!(
+        "Trusted publisher required: {}",
+        response.requires_trusted_publisher
+    );
+    if let Some(url) = response.direct_install_url.as_deref() {
+        println!("Direct install URL: {url}");
+    }
+    println!("Recommended action: {}", response.recommended_action);
+    if !response.findings.is_empty() {
+        println!("Findings:");
+        for finding in &response.findings {
+            println!("  - {finding}");
+        }
+    }
+    if !response.warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &response.warnings {
+            println!("  - {warning}");
+        }
+    }
+    if !response.next_steps.is_empty() {
+        println!("Next steps:");
+        for step in &response.next_steps {
+            println!("  - {step}");
+        }
+    }
+    if let Some(preview) = response.source_preview.as_deref() {
+        println!("Preview: {preview}");
+    }
+}
+
+async fn propose_skill_from_intake(args: SkillProposeArgs) -> anyhow::Result<()> {
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let response: SkillIntakeProposalResponse = client
+        .post_json(
+            "/api/gateway/skills/intake/proposal",
+            &SkillIntakeProposalRequest {
+                source_url: args.source_url,
+                source_kind_hint: args.source_kind_hint,
+                actor: Some(args.actor),
+            },
+        )
+        .await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    print_skill_intake_response(&response.intake);
+    println!("Proposal created: {}", response.created);
+    println!("Message: {}", response.message);
+    if let Some(proposal) = response.proposal.as_ref() {
+        let proposal_id = proposal
+            .get("proposalId")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let suggested_skill_id = proposal
+            .get("suggestedSkillId")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let status = proposal
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        println!("Proposal: {proposal_id} suggestedSkillId={suggested_skill_id} status={status}");
+    }
+    Ok(())
+}
+
+async fn draft_skill_from_url(args: SkillDraftUrlArgs) -> anyhow::Result<()> {
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(args.gateway.as_deref(), &profile))?;
+    let proposal_response: SkillIntakeProposalResponse = client
+        .post_json(
+            "/api/gateway/skills/intake/proposal",
+            &SkillIntakeProposalRequest {
+                source_url: args.source_url.clone(),
+                source_kind_hint: args.source_kind_hint.clone(),
+                actor: Some(args.actor.clone()),
+            },
+        )
+        .await?;
+
+    if !proposal_response.intake.conversion_required || proposal_response.proposal.is_none() {
+        let summary = json!({
+            "sourceUrl": args.source_url,
+            "conversionRequired": proposal_response.intake.conversion_required,
+            "directInstallUrl": proposal_response.intake.direct_install_url,
+            "message": proposal_response.message,
+            "draftCreated": false,
+            "activation": "not_activated",
+        });
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            print_skill_intake_response(&proposal_response.intake);
+            println!(
+                "{}",
+                summary["message"]
+                    .as_str()
+                    .unwrap_or("No draft was created.")
+            );
+            println!("No draft files were applied and no skill was activated by this command.");
+        }
+        return Ok(());
+    }
+
+    let proposal = proposal_response
+        .proposal
+        .as_ref()
+        .expect("proposal was checked above");
+    let proposal_id = required_json_string(proposal, &["proposalId"], "proposal")?;
+    let review_note = format!(
+        "CLI draft-url reviewed online skill-intake source {}",
+        args.source_url
+    );
+
+    let proposal_review_path =
+        format!("/api/gateway/evolution/skill-proposals/{proposal_id}/review");
+    let reviewed_proposal: Value = client
+        .post_json(
+            &proposal_review_path,
+            &json!({
+                "status": "approved",
+                "reviewer": args.reviewer,
+                "note": review_note,
+            }),
+        )
+        .await?;
+
+    let plan_path =
+        format!("/api/gateway/evolution/skill-proposals/{proposal_id}/implementation-plan");
+    let plan: Value = client
+        .post_json(
+            &plan_path,
+            &json!({
+                "createdBy": args.actor,
+            }),
+        )
+        .await?;
+    let plan_id = required_json_string(&plan, &["planId"], "implementation plan")?;
+
+    let plan_review_path = format!("/api/gateway/evolution/implementation-plans/{plan_id}/review");
+    let reviewed_plan: Value = client
+        .post_json(
+            &plan_review_path,
+            &json!({
+                "status": "approved",
+                "reviewer": args.reviewer,
+                "note": "CLI draft-url approved review-only conversion plan.",
+            }),
+        )
+        .await?;
+
+    let run_path = format!("/api/gateway/evolution/implementation-plans/{plan_id}/runs");
+    let run: Value = client
+        .post_json(
+            &run_path,
+            &json!({
+                "createdBy": args.actor,
+            }),
+        )
+        .await?;
+    let run_id = required_json_string(&run, &["runId"], "implementation run")?;
+
+    let run_review_path = format!("/api/gateway/evolution/implementation-runs/{run_id}/review");
+    let reviewed_run: Value = client
+        .post_json(
+            &run_review_path,
+            &json!({
+                "status": "approved",
+                "reviewer": args.reviewer,
+                "note": "CLI draft-url approved draft-only conversion run.",
+            }),
+        )
+        .await?;
+
+    let execution_path = format!("/api/gateway/evolution/implementation-runs/{run_id}/executions");
+    let execution: Value = client
+        .post_json(
+            &execution_path,
+            &json!({
+                "createdBy": args.actor,
+                "executor": args.actor,
+            }),
+        )
+        .await?;
+    let execution_id =
+        required_json_string(&execution, &["executionId"], "implementation execution")?;
+
+    let execution_review_path =
+        format!("/api/gateway/evolution/implementation-executions/{execution_id}/review");
+    let reviewed_execution: Value = client
+        .post_json(
+            &execution_review_path,
+            &json!({
+                "status": "approved",
+                "reviewer": args.reviewer,
+                "note": "CLI draft-url approved manual verification of generated draft.",
+            }),
+        )
+        .await?;
+
+    let execution_verify_path =
+        format!("/api/gateway/evolution/implementation-executions/{execution_id}/verify");
+    let verified_execution: Value = client
+        .post_json(
+            &execution_verify_path,
+            &json!({
+                "requestedBy": args.requested_by,
+                "timeoutSecs": args.timeout_seconds,
+            }),
+        )
+        .await?;
+
+    let patch_path =
+        format!("/api/gateway/evolution/implementation-executions/{execution_id}/patch-candidates");
+    let patch: Value = client
+        .post_json(
+            &patch_path,
+            &json!({
+                "createdBy": args.actor,
+                "summary": "CLI draft-url generated review-only online skill conversion draft.",
+            }),
+        )
+        .await?;
+    let patch_id = required_json_string(&patch, &["patchId"], "draft patch")?;
+
+    let patch_review_path =
+        format!("/api/gateway/evolution/implementation-patch-candidates/{patch_id}/review");
+    let reviewed_patch: Value = client
+        .post_json(
+            &patch_review_path,
+            &json!({
+                "status": "approved",
+                "reviewer": args.reviewer,
+                "note": "CLI draft-url approved applying generated draft files.",
+            }),
+        )
+        .await?;
+
+    let patch_apply_path =
+        format!("/api/gateway/evolution/implementation-patch-candidates/{patch_id}/apply");
+    let dry_run_patch: Value = client
+        .post_json(
+            &patch_apply_path,
+            &json!({
+                "requestedBy": args.requested_by,
+                "confirmPatchId": null,
+                "dryRun": true,
+            }),
+        )
+        .await?;
+
+    let final_patch = if args.write {
+        client
+            .post_json(
+                &patch_apply_path,
+                &json!({
+                    "requestedBy": args.requested_by,
+                    "confirmPatchId": patch_id,
+                    "dryRun": false,
+                }),
+            )
+            .await?
+    } else {
+        dry_run_patch.clone()
+    };
+
+    let summary = json!({
+        "sourceUrl": args.source_url,
+        "conversionRequired": true,
+        "draftCreated": true,
+        "writeApplied": args.write,
+        "activation": "not_activated",
+        "proposalId": proposal_id,
+        "planId": plan_id,
+        "runId": run_id,
+        "executionId": execution_id,
+        "patchId": patch_id,
+        "finalPatchStatus": final_patch.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+        "records": {
+            "intakeProposal": proposal_response,
+            "reviewedProposal": reviewed_proposal,
+            "plan": plan,
+            "reviewedPlan": reviewed_plan,
+            "run": run,
+            "reviewedRun": reviewed_run,
+            "execution": execution,
+            "reviewedExecution": reviewed_execution,
+            "verifiedExecution": verified_execution,
+            "patch": patch,
+            "reviewedPatch": reviewed_patch,
+            "dryRunPatch": dry_run_patch,
+            "finalPatch": final_patch,
+        }
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        print_skill_intake_response(&proposal_response.intake);
+        println!(
+            "Draft pipeline: proposal={} plan={} run={} execution={} patch={}",
+            summary["proposalId"].as_str().unwrap_or("unknown"),
+            summary["planId"].as_str().unwrap_or("unknown"),
+            summary["runId"].as_str().unwrap_or("unknown"),
+            summary["executionId"].as_str().unwrap_or("unknown"),
+            summary["patchId"].as_str().unwrap_or("unknown")
+        );
+        println!(
+            "Patch status: {}",
+            summary["finalPatchStatus"].as_str().unwrap_or("unknown")
+        );
+        if args.write {
+            println!(
+                "Draft files were applied for review. The skill was not installed, activated, or published."
+            );
+        } else {
+            println!(
+                "Dry-run succeeded. No draft files were applied and no skill was activated by this command."
+            );
+            println!(
+                "To apply this exact draft later: dawn-node skills apply-draft-patch {} --write --confirm-patch-id {}",
+                summary["patchId"].as_str().unwrap_or("unknown"),
+                summary["patchId"].as_str().unwrap_or("unknown")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn required_json_string(value: &Value, keys: &[&str], label: &str) -> anyhow::Result<String> {
+    for key in keys {
+        if let Some(value) = value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return normalize_cli_record_id(value);
+        }
+    }
+    bail!("{label} response did not include {}", keys.join(" or "))
+}
+
+fn check_skill_draft(args: SkillCheckDraftArgs) -> anyhow::Result<()> {
+    let report = build_skill_draft_check_report(&PathBuf::from(&args.draft_dir))?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Skill draft check: readyForPackaging={} dir={}",
+        report.ready_for_packaging, report.draft_dir
+    );
+    if let Some(skill_id) = report.skill_id.as_deref() {
+        println!("Skill ID: {skill_id}");
+    }
+    if let Some(version) = report.version.as_deref() {
+        println!("Version: {version}");
+    }
+    if !report.missing_files.is_empty() {
+        println!("Missing files:");
+        for path in &report.missing_files {
+            println!("  - {path}");
+        }
+    }
+    if !report.mismatches.is_empty() {
+        println!("Mismatches:");
+        for mismatch in &report.mismatches {
+            println!("  - {mismatch}");
+        }
+    }
+    if !report.warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &report.warnings {
+            println!("  - {warning}");
+        }
+    }
+    if report.ready_for_packaging {
+        println!("Next commands:");
+        for command in &report.build_commands {
+            println!("  {command}");
+        }
+        if let Some(command) = report.package_command.as_deref() {
+            println!("  {command}");
+        }
+        if let Some(command) = report.verify_command.as_deref() {
+            println!("  {command}");
+        }
+        if let Some(command) = report.install_command.as_deref() {
+            println!("  {command}");
+        }
+    } else {
+        println!("Draft is not ready for packaging; fix missing files or mismatches first.");
+    }
+    println!("No files were modified, no skill was installed, and no skill was activated.");
+    Ok(())
+}
+
+fn build_skill_draft_check_report(draft_dir: &Path) -> anyhow::Result<SkillDraftCheckReport> {
+    let draft_dir = draft_dir.to_path_buf();
+    let required_files = [
+        "contract.json",
+        "preflight-checklist.json",
+        "package-manifest.json",
+        "sandbox-tests.md",
+        "wasm-adapter/README.md",
+        "wasm-adapter/Cargo.toml",
+        "wasm-adapter/src/lib.rs",
+    ];
+    let mut missing_files = Vec::new();
+    let mut mismatches = Vec::new();
+    let mut warnings = Vec::new();
+
+    for relative in required_files {
+        if !draft_dir.join(relative).is_file() {
+            missing_files.push(relative.to_string());
+        }
+    }
+
+    let contract = read_skill_draft_json(
+        &draft_dir,
+        "contract.json",
+        &mut missing_files,
+        &mut mismatches,
+    );
+    let preflight = read_skill_draft_json(
+        &draft_dir,
+        "preflight-checklist.json",
+        &mut missing_files,
+        &mut mismatches,
+    );
+    let package_manifest = read_skill_draft_json(
+        &draft_dir,
+        "package-manifest.json",
+        &mut missing_files,
+        &mut mismatches,
+    );
+
+    validate_skill_draft_json_kind(
+        contract.as_ref(),
+        "contract.json",
+        "dawn_skill_contract_draft",
+        &mut mismatches,
+    );
+    validate_skill_draft_json_kind(
+        preflight.as_ref(),
+        "preflight-checklist.json",
+        "dawn_skill_intake_preflight_checklist",
+        &mut mismatches,
+    );
+    validate_skill_draft_json_kind(
+        package_manifest.as_ref(),
+        "package-manifest.json",
+        "dawn_skill_package_manifest_draft",
+        &mut mismatches,
+    );
+
+    let skill_id = first_json_string(&[
+        contract
+            .as_ref()
+            .and_then(|value| json_pointer_string(value, "/suggestedSkillId")),
+        preflight
+            .as_ref()
+            .and_then(|value| json_pointer_string(value, "/suggestedSkillId")),
+        package_manifest
+            .as_ref()
+            .and_then(|value| json_pointer_string(value, "/suggestedSkillId")),
+    ]);
+    ensure_same_json_field(
+        "suggestedSkillId",
+        &[
+            ("contract.json", contract.as_ref(), "/suggestedSkillId"),
+            (
+                "preflight-checklist.json",
+                preflight.as_ref(),
+                "/suggestedSkillId",
+            ),
+            (
+                "package-manifest.json",
+                package_manifest.as_ref(),
+                "/suggestedSkillId",
+            ),
+        ],
+        &mut mismatches,
+    );
+
+    let version = first_json_string(&[
+        preflight
+            .as_ref()
+            .and_then(|value| json_pointer_string(value, "/version")),
+        package_manifest
+            .as_ref()
+            .and_then(|value| json_pointer_string(value, "/version")),
+    ]);
+    ensure_same_json_field(
+        "version",
+        &[
+            ("preflight-checklist.json", preflight.as_ref(), "/version"),
+            (
+                "package-manifest.json",
+                package_manifest.as_ref(),
+                "/version",
+            ),
+        ],
+        &mut mismatches,
+    );
+    ensure_same_json_field(
+        "source sha256",
+        &[
+            ("contract.json", contract.as_ref(), "/source/sha256"),
+            (
+                "preflight-checklist.json",
+                preflight.as_ref(),
+                "/source/sha256",
+            ),
+            (
+                "package-manifest.json",
+                package_manifest.as_ref(),
+                "/source/sha256",
+            ),
+        ],
+        &mut mismatches,
+    );
+
+    validate_skill_draft_preflight_gates(preflight.as_ref(), &mut mismatches);
+    validate_skill_draft_evidence_files(&draft_dir, preflight.as_ref(), &mut mismatches);
+    validate_skill_draft_wasm_adapter(&draft_dir, &mut missing_files, &mut mismatches);
+
+    if skill_id.is_none() {
+        mismatches.push("suggestedSkillId is missing from draft JSON files".to_string());
+    }
+    if version.is_none() {
+        warnings.push(
+            "version is missing; packaging will need an explicit reviewed version".to_string(),
+        );
+    }
+
+    let artifact_slug = draft_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToString::to_string)
+        .or_else(|| skill_id.clone().map(|value| value.replace('.', "-")))
+        .unwrap_or_else(|| "skill-draft".to_string());
+    let skill_id_for_command = skill_id
+        .clone()
+        .unwrap_or_else(|| "<reviewed-skill-id>".to_string());
+    let wasm_artifact = draft_dir
+        .join("wasm-adapter")
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("release")
+        .join(format!("{artifact_slug}.wasm"));
+    let package_path = draft_dir.join(format!("{artifact_slug}.skill-package.json"));
+    let sandbox_report_path = draft_dir.join("sandbox-report.json");
+    let verification_report_path = draft_dir.join("verification-report.json");
+    let build_commands = vec![
+        "rustup target add wasm32-unknown-unknown".to_string(),
+        format!(
+            "dawn-node skills build-draft {}",
+            shell_display_path(&draft_dir)
+        ),
+    ];
+    let package_command = Some(format!(
+        "dawn-node skills pack-draft {} --wasm-path {} --output {} --display-name {} --signing-key-hex <publisher-private-key-hex> --verification-report {}",
+        shell_display_path(&draft_dir),
+        shell_display_path(&wasm_artifact),
+        shell_display_path(&package_path),
+        shell_quote(&skill_id_for_command),
+        shell_display_path(&verification_report_path)
+    ));
+    let verify_command = Some(format!(
+        "dawn-node skills test-draft {} --wasm-path {} --package-path {} --report {}",
+        shell_display_path(&draft_dir),
+        shell_display_path(&wasm_artifact),
+        shell_display_path(&package_path),
+        shell_display_path(&sandbox_report_path)
+    ));
+    let install_command = Some(format!(
+        "dawn-node skills install-draft {} --package-path {} --sandbox-report {}",
+        shell_display_path(&draft_dir),
+        shell_display_path(&package_path),
+        shell_display_path(&sandbox_report_path)
+    ));
+
+    let ready_for_packaging = missing_files.is_empty() && mismatches.is_empty();
+    Ok(SkillDraftCheckReport {
+        draft_dir: draft_dir.display().to_string(),
+        skill_id,
+        version,
+        ready_for_packaging,
+        missing_files,
+        mismatches,
+        warnings,
+        build_commands,
+        package_command,
+        verify_command,
+        install_command,
+    })
+}
+
+fn read_skill_draft_json(
+    draft_dir: &Path,
+    relative: &str,
+    missing_files: &mut Vec<String>,
+    mismatches: &mut Vec<String>,
+) -> Option<Value> {
+    let path = draft_dir.join(relative);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if !missing_files.iter().any(|value| value == relative) {
+                missing_files.push(relative.to_string());
+            }
+            return None;
+        }
+        Err(error) => {
+            mismatches.push(format!("failed to read {relative}: {error}"));
+            return None;
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            mismatches.push(format!("{relative} is not valid JSON: {error}"));
+            None
+        }
+    }
+}
+
+fn read_skill_draft_json_file(draft_dir: &Path, relative: &str) -> anyhow::Result<Value> {
+    let path = draft_dir.join(relative);
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn validate_skill_draft_json_kind(
+    value: Option<&Value>,
+    relative: &str,
+    expected_kind: &str,
+    mismatches: &mut Vec<String>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    let actual = value.get("kind").and_then(Value::as_str).unwrap_or("");
+    if actual != expected_kind {
+        mismatches.push(format!(
+            "{relative} kind must be {expected_kind}, found {actual}"
+        ));
+    }
+}
+
+fn validate_skill_draft_preflight_gates(value: Option<&Value>, mismatches: &mut Vec<String>) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(gates) = value.get("gates").and_then(Value::as_array) else {
+        mismatches.push("preflight-checklist.json gates must be an array".to_string());
+        return;
+    };
+    let present = gates
+        .iter()
+        .filter_map(|gate| gate.get("id").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "source_hash",
+        "contract_schema",
+        "sandbox_cases",
+        "metadata_abi",
+        "package_integrity",
+        "activation_approval",
+    ] {
+        if !present.contains(required) {
+            mismatches.push(format!(
+                "preflight-checklist.json is missing gate {required}"
+            ));
+        }
+    }
+}
+
+fn validate_skill_draft_evidence_files(
+    draft_dir: &Path,
+    preflight: Option<&Value>,
+    mismatches: &mut Vec<String>,
+) {
+    let Some(preflight) = preflight else {
+        return;
+    };
+    let Some(evidence_files) = preflight.get("evidenceFiles").and_then(Value::as_object) else {
+        mismatches.push("preflight-checklist.json evidenceFiles must be an object".to_string());
+        return;
+    };
+    for (key, relative) in [
+        ("contract", "contract.json"),
+        ("sandboxTests", "sandbox-tests.md"),
+        ("packageManifest", "package-manifest.json"),
+        ("wasmAdapterReadme", "wasm-adapter/README.md"),
+        ("wasmAdapterCargoToml", "wasm-adapter/Cargo.toml"),
+        ("wasmAdapterLibRs", "wasm-adapter/src/lib.rs"),
+    ] {
+        let Some(actual) = evidence_files.get(key).and_then(Value::as_str) else {
+            mismatches.push(format!(
+                "preflight-checklist.json evidenceFiles.{key} is missing"
+            ));
+            continue;
+        };
+        if !draft_evidence_path_matches(draft_dir, relative, actual) {
+            mismatches.push(format!(
+                "preflight-checklist.json evidenceFiles.{key} points to {actual}, expected {relative} inside draft dir"
+            ));
+        }
+    }
+}
+
+fn validate_skill_draft_wasm_adapter(
+    draft_dir: &Path,
+    missing_files: &mut Vec<String>,
+    mismatches: &mut Vec<String>,
+) {
+    let cargo_path = draft_dir.join("wasm-adapter").join("Cargo.toml");
+    match fs::read_to_string(&cargo_path) {
+        Ok(cargo) => {
+            if !cargo.contains("crate-type") || !cargo.contains("cdylib") {
+                mismatches
+                    .push("wasm-adapter/Cargo.toml must declare a cdylib crate-type".to_string());
+            }
+            if !cargo.contains("publish = false") {
+                mismatches.push("wasm-adapter/Cargo.toml must set publish = false".to_string());
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            push_missing_file_once(missing_files, "wasm-adapter/Cargo.toml");
+        }
+        Err(error) => mismatches.push(format!("failed to read wasm-adapter/Cargo.toml: {error}")),
+    }
+
+    let lib_path = draft_dir.join("wasm-adapter").join("src").join("lib.rs");
+    match fs::read_to_string(&lib_path) {
+        Ok(lib) => {
+            for export in ["run_skill"]
+                .into_iter()
+                .chain(DAWN_ADAPTER_METADATA_EXPORTS)
+            {
+                if !lib.contains(export) {
+                    mismatches.push(format!(
+                        "wasm-adapter/src/lib.rs must include export {export}"
+                    ));
+                }
+            }
+            if !lib.contains("dawn.skill.intake.adapter.metadata.v1") {
+                mismatches.push(
+                    "wasm-adapter/src/lib.rs must include dawn.skill.intake.adapter.metadata.v1"
+                        .to_string(),
+                );
+            }
+            if !lib.contains("fetched source code") && !lib.contains("fetchedCodeExecution") {
+                mismatches.push(
+                    "wasm-adapter/src/lib.rs must document that fetched source code is not executed"
+                        .to_string(),
+                );
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            push_missing_file_once(missing_files, "wasm-adapter/src/lib.rs");
+        }
+        Err(error) => mismatches.push(format!("failed to read wasm-adapter/src/lib.rs: {error}")),
+    }
+}
+
+fn push_missing_file_once(missing_files: &mut Vec<String>, relative: &str) {
+    if !missing_files.iter().any(|value| value == relative) {
+        missing_files.push(relative.to_string());
+    }
+}
+
+fn ensure_same_json_field(
+    label: &str,
+    entries: &[(&str, Option<&Value>, &str)],
+    mismatches: &mut Vec<String>,
+) {
+    let values = entries
+        .iter()
+        .filter_map(|(file, value, pointer)| {
+            value
+                .and_then(|value| json_pointer_string(value, pointer))
+                .map(|field| (*file, field))
+        })
+        .collect::<Vec<_>>();
+    if values.len() <= 1 {
+        return;
+    }
+    let expected = &values[0].1;
+    for (file, value) in values.iter().skip(1) {
+        if value != expected {
+            mismatches.push(format!(
+                "{label} mismatch: {} has {}, expected {}",
+                file, value, expected
+            ));
+        }
+    }
+}
+
+fn first_json_string(values: &[Option<String>]) -> Option<String> {
+    values
+        .iter()
+        .flatten()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn json_pointer_string(value: &Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn draft_evidence_path_matches(draft_dir: &Path, relative: &str, actual: &str) -> bool {
+    let actual = normalize_cli_path(actual);
+    let exact = normalize_cli_path(&draft_dir.join(relative).display().to_string());
+    let suffix = normalized_draft_suffix(draft_dir, relative);
+    actual == exact || actual == suffix || actual.ends_with(&format!("/{suffix}"))
+}
+
+fn normalized_draft_suffix(draft_dir: &Path, relative: &str) -> String {
+    let components = draft_dir
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(normalize_cli_path)
+        .collect::<Vec<_>>();
+    if let Some(index) = components.iter().position(|component| component == "docs") {
+        return format!(
+            "{}/{}",
+            components[index..].join("/"),
+            normalize_cli_path(relative)
+        );
+    }
+    let leaf = components
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "skill-draft".to_string());
+    format!("{leaf}/{}", normalize_cli_path(relative))
+}
+
+fn normalize_cli_path(value: &str) -> String {
+    value.replace('\\', "/").trim_matches('/').to_string()
+}
+
+fn shell_display_path(path: &Path) -> String {
+    shell_quote(&path.display().to_string())
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '\\' | ':'))
+    {
+        return value.to_string();
+    }
+    format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+async fn create_skill_evolution_record(
+    args: SkillEvolutionCreateArgs,
+    label: &str,
+    collection_path: &str,
+    action: &str,
+) -> anyhow::Result<()> {
+    let record_id = normalize_cli_record_id(&args.record_id)?;
+    let path = format!("{collection_path}/{record_id}/{action}");
+    let response = post_skill_evolution_json(
+        args.gateway,
+        &path,
+        json!({
+            "createdBy": args.created_by
+        }),
+    )
+    .await?;
+    print_skill_evolution_record(label, &response, args.json)
+}
+
+async fn review_skill_evolution_record(
+    args: SkillEvolutionReviewArgs,
+    label: &str,
+    collection_path: &str,
+) -> anyhow::Result<()> {
+    let record_id = normalize_cli_record_id(&args.record_id)?;
+    let path = format!("{collection_path}/{record_id}/review");
+    let response = post_skill_evolution_json(
+        args.gateway,
+        &path,
+        json!({
+            "status": "approved",
+            "reviewer": args.reviewer,
+            "note": args.note
+        }),
+    )
+    .await?;
+    print_skill_evolution_record(label, &response, args.json)
+}
+
+async fn verify_skill_execution(args: SkillEvolutionVerifyArgs) -> anyhow::Result<()> {
+    let execution_id = normalize_cli_record_id(&args.execution_id)?;
+    let path = format!("/api/gateway/evolution/implementation-executions/{execution_id}/verify");
+    let response = post_skill_evolution_json(
+        args.gateway,
+        &path,
+        json!({
+            "requestedBy": args.requested_by,
+            "timeoutSecs": args.timeout_seconds
+        }),
+    )
+    .await?;
+    print_skill_evolution_record("implementation execution", &response, args.json)
+}
+
+async fn apply_skill_draft_patch(args: SkillEvolutionPatchRuntimeArgs) -> anyhow::Result<()> {
+    run_skill_patch_runtime_action(args, "apply", "apply").await
+}
+
+async fn rollback_skill_draft_patch(args: SkillEvolutionPatchRuntimeArgs) -> anyhow::Result<()> {
+    run_skill_patch_runtime_action(args, "rollback", "rollback").await
+}
+
+async fn run_skill_patch_runtime_action(
+    args: SkillEvolutionPatchRuntimeArgs,
+    action: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    let patch_id = normalize_cli_record_id(&args.patch_id)?;
+    let confirm_patch_id = args
+        .confirm_patch_id
+        .as_deref()
+        .map(normalize_cli_record_id)
+        .transpose()?;
+    if args.write && confirm_patch_id.as_deref() != Some(patch_id.as_str()) {
+        bail!("real {label} requires --confirm-patch-id to equal {patch_id}");
+    }
+    let path =
+        format!("/api/gateway/evolution/implementation-patch-candidates/{patch_id}/{action}");
+    let response = post_skill_evolution_json(
+        args.gateway,
+        &path,
+        json!({
+            "requestedBy": args.requested_by,
+            "confirmPatchId": confirm_patch_id,
+            "dryRun": !args.write
+        }),
+    )
+    .await?;
+    print_skill_evolution_record("draft patch", &response, args.json)
+}
+
+async fn post_skill_evolution_json(
+    gateway: Option<String>,
+    path: &str,
+    body: Value,
+) -> anyhow::Result<Value> {
+    let profile = load_profile_or_default();
+    let client = GatewayClient::new(resolve_gateway_base_url(gateway.as_deref(), &profile))?;
+    client.post_json(path, &body).await
+}
+
+fn normalize_cli_record_id(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('/') || value.contains('\\') || value.contains("..") {
+        bail!("record id must be a non-empty id without path separators");
+    }
+    Ok(value.to_string())
+}
+
+fn print_skill_evolution_record(
+    label: &str,
+    response: &Value,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(response)?);
+        return Ok(());
+    }
+    let id = response
+        .get("proposalId")
+        .or_else(|| response.get("planId"))
+        .or_else(|| response.get("runId"))
+        .or_else(|| response.get("executionId"))
+        .or_else(|| response.get("patchId"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let suggested_skill_id = response
+        .get("suggestedSkillId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    println!("{label}: {id} status={status} suggestedSkillId={suggested_skill_id}");
+    if let Some(kind) = response.get("patchKind").and_then(Value::as_str) {
+        println!("Patch kind: {kind}");
+    }
+    if let Some(mode) = response.get("executionMode").and_then(Value::as_str) {
+        println!("Execution mode: {mode}");
+    }
+    if let Some(summary) = response.get("summary").and_then(Value::as_str) {
+        println!("Summary: {summary}");
+    }
+    println!("No files were applied and no skill was activated by this command.");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_local_wasm_skill_package(
+    skill_id: &str,
+    version: &str,
+    display_name: Option<&str>,
+    description: Option<&str>,
+    entry_function: &str,
+    capabilities: Vec<String>,
+    wasm_path: &PathBuf,
+    wasm_bytes: &[u8],
+    signing_key_hex: Option<&str>,
+    issuer_did: Option<&str>,
+    issued_at_unix_ms: Option<u128>,
+) -> anyhow::Result<LocalSkillPackage> {
+    validate_cli_skill_segment(skill_id, "skill-id")?;
+    validate_cli_skill_segment(version, "version")?;
+    validate_cli_skill_segment(entry_function, "entry-function")?;
+    let now = current_unix_timestamp_ms();
+    let issued_at = issued_at_unix_ms.unwrap_or(now);
+    let display_name = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(skill_id)
+        .to_string();
+    let description = description
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let artifact_sha256 = hex::encode(sha2::Sha256::digest(wasm_bytes));
+    let wasm_base64 = base64::engine::general_purpose::STANDARD.encode(wasm_bytes);
+    let artifact_path = wasm_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("package://{name}"))
+        .unwrap_or_else(|| "package://module.wasm".to_string());
+
+    let (envelope, issuer_did, signature_hex, document_hash, source_kind) =
+        if let Some(signing_key_hex) = signing_key_hex {
+            let signing_key = SigningKey::from_bytes(&decode_fixed_hex::<32>(
+                signing_key_hex,
+                "skill publisher signing key",
+            )?);
+            let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+            let issuer = issuer_did
+                .map(str::to_string)
+                .unwrap_or_else(|| skill_publisher_issuer_did_from_public_key_hex(&public_key_hex));
+            validate_skill_publisher_issuer_did(&issuer, &public_key_hex)?;
+            let document = LocalSignedSkillDocument {
+                skill_id: skill_id.to_string(),
+                version: version.to_string(),
+                display_name: display_name.clone(),
+                description: description.clone(),
+                entry_function: entry_function.to_string(),
+                capabilities: capabilities.clone(),
+                artifact_sha256: artifact_sha256.clone(),
+                issuer_did: issuer.clone(),
+                issued_at_unix_ms: issued_at,
+            };
+            let document_bytes = serde_json::to_vec(&document)
+                .context("failed to serialize signed skill document")?;
+            let signature = signing_key.sign(&document_bytes);
+            let signature_hex = hex::encode(signature.to_bytes());
+            let document_hash = hex::encode(sha2::Sha256::digest(document_bytes));
+            (
+                Some(LocalSignedSkillEnvelope {
+                    document,
+                    signature_hex: signature_hex.clone(),
+                }),
+                Some(issuer),
+                Some(signature_hex),
+                Some(document_hash),
+                "signed_publisher".to_string(),
+            )
+        } else {
+            (None, None, None, None, "unsigned_package".to_string())
+        };
+
+    Ok(LocalSkillPackage {
+        skill: LocalSkillPackageRecord {
+            skill_id: skill_id.to_string(),
+            version: version.to_string(),
+            display_name,
+            description,
+            entry_function: entry_function.to_string(),
+            capabilities,
+            artifact_path,
+            artifact_sha256,
+            source_kind,
+            issuer_did,
+            signature_hex,
+            document_hash,
+            issued_at_unix_ms: envelope
+                .as_ref()
+                .map(|envelope| envelope.document.issued_at_unix_ms),
+            active: false,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        },
+        envelope,
+        wasm_base64,
+    })
+}
+
+fn validate_cli_skill_segment(value: &str, label: &str) -> anyhow::Result<()> {
+    if value.is_empty() || matches!(value, "." | "..") {
+        bail!("{label} must be a non-empty safe segment");
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        Ok(())
+    } else {
+        bail!("{label} may only contain ASCII letters, digits, dash, underscore, and period")
+    }
+}
+
+fn skill_publisher_issuer_did_from_public_key_hex(public_key_hex: &str) -> String {
+    format!(
+        "did:dawn:skill-publisher:{}",
+        normalize_hex_string(public_key_hex)
+            .unwrap_or_else(|_| public_key_hex.to_ascii_lowercase())
+    )
+}
+
+fn public_key_hex_from_skill_publisher_issuer_did(issuer_did: &str) -> anyhow::Result<String> {
+    let public_key_hex = issuer_did
+        .strip_prefix("did:dawn:skill-publisher:")
+        .ok_or_else(|| {
+            anyhow!("skill publisher issuer DID must start with did:dawn:skill-publisher:")
+        })?;
+    normalize_hex_string(public_key_hex)
+}
+
+fn validate_skill_publisher_issuer_did(
+    issuer_did: &str,
+    public_key_hex: &str,
+) -> anyhow::Result<()> {
+    let expected = skill_publisher_issuer_did_from_public_key_hex(public_key_hex);
+    if issuer_did.to_ascii_lowercase() == expected {
+        Ok(())
+    } else {
+        bail!("skill publisher issuer DID must be {expected}")
+    }
+}
+
+fn current_unix_timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 async fn search_agents(args: AgentSearchArgs) -> anyhow::Result<()> {
@@ -7741,6 +11494,7 @@ fn default_requested_capabilities_for_profile(
     capabilities
 }
 
+#[cfg(test)]
 fn default_requested_capabilities(allow_shell: bool) -> Vec<String> {
     default_requested_capabilities_for_profile("desktop", allow_shell)
 }
@@ -7828,22 +11582,37 @@ impl GatewayClient {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs};
+    use std::{env, fs, path::PathBuf};
 
     use super::{
-        ApprovalRequestSummary, ChannelSendArgs, PaymentRecordSummary, build_ap2_signature_payload,
-        build_catalog_query, build_channel_send_request, build_chat_reply, connector_secret_pairs,
-        connector_setup_option_label, default_requested_capabilities,
+        ApprovalRequestSummary, ChannelSendArgs, Commands, DAWN_ADAPTER_METADATA_EXPORTS, DawnCli,
+        PaymentRecordSummary, SkillCommand, SkillInstallDraftArgs, SkillPackDraftArgs,
+        SkillPackPreflightChecklist, SkillTestDraftArgs, build_ap2_signature_payload,
+        build_catalog_query, build_channel_send_request, build_chat_reply,
+        build_local_wasm_skill_package, build_skill_draft_check_report,
+        build_skill_draft_install_evidence_report, build_skill_draft_package_report,
+        build_skill_draft_sandbox_report, connector_secret_pairs, connector_setup_option_label,
+        current_unix_timestamp_ms, default_requested_capabilities,
         default_requested_capabilities_for_profile, derive_local_node_trust_root,
-        effective_requested_capabilities, extract_text_from_value, find_pending_approval_record,
-        format_node_command_dispatch_summary, format_payment_approval_summary,
-        ingress_secret_pairs, normalize_connector_target, normalize_ingress_target_name,
-        normalize_node_profile_name, parse_named_selection, parse_node_command_payload,
+        effective_requested_capabilities, extract_text_from_value, extract_wasm_export_names,
+        find_pending_approval_record, format_node_command_dispatch_summary,
+        format_payment_approval_summary, inferred_skill_draft_wasm_path, ingress_secret_pairs,
+        normalize_connector_target, normalize_ingress_target_name, normalize_node_profile_name,
+        parse_named_selection, parse_node_command_payload, required_json_string,
         resolve_ap2_mcu_seed_hex, runtime_capability_preview, runtime_mode_label,
-        runtime_policy_payload, runtime_policy_summary, sign_ap2_payload, update_values,
+        runtime_policy_payload, runtime_policy_summary, sign_ap2_payload,
+        skill_publisher_issuer_did_from_public_key_hex, update_values,
+        validate_skill_draft_safe_cargo_project, validate_skill_package_http_url,
+        validate_skill_publisher_issuer_did, validate_wasm_pack_preflight,
+        verify_local_skill_package, write_local_skill_package_verification_report,
+        write_skill_draft_sandbox_report,
     };
     use crate::profile::DawnCliProfile;
-    use serde_json::json;
+    use base64::Engine as _;
+    use clap::Parser as _;
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use serde_json::{Value, json};
+    use sha2::Digest as _;
 
     #[test]
     fn updates_metadata_lists_without_duplicates() {
@@ -7861,6 +11630,1257 @@ mod tests {
             build_catalog_query(Some("travel agent"), "skill", false),
             "kind=skill&q=travel%20agent&signedOnly=true&publishedOnly=true"
         );
+    }
+
+    #[test]
+    fn parses_skill_install_preflight_flags() {
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "install",
+            "demo-skill",
+            "--verify-before-install",
+            "--preflight-checklist",
+            "preflight-checklist.json",
+            "--require-adapter-metadata",
+        ])
+        .expect("skill install preflight flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::Install(args) = skills.command else {
+            panic!("expected skills install command");
+        };
+        assert_eq!(args.skill_id, "demo-skill");
+        assert!(args.verify_before_install);
+        assert_eq!(
+            args.preflight_checklist.as_deref(),
+            Some("preflight-checklist.json")
+        );
+        assert!(args.require_adapter_metadata);
+    }
+
+    #[test]
+    fn parses_skill_install_draft_flags() {
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "install-draft",
+            "docs/skill-intake/import-demo",
+            "--package-path",
+            "import-demo.skill-package.json",
+            "--sandbox-report",
+            "sandbox-report.json",
+            "--activate",
+            "--confirm-activation",
+            "import.demo@0.0.0-review",
+            "--allow-unsigned-development",
+            "--verification-report",
+            "verification-report.json",
+            "--json",
+        ])
+        .expect("skill install-draft flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::InstallDraft(args) = skills.command else {
+            panic!("expected skills install-draft command");
+        };
+        assert_eq!(args.draft_dir, "docs/skill-intake/import-demo");
+        assert_eq!(
+            args.package_path.as_deref(),
+            Some("import-demo.skill-package.json")
+        );
+        assert_eq!(args.sandbox_report.as_deref(), Some("sandbox-report.json"));
+        assert!(args.activate);
+        assert_eq!(
+            args.confirm_activation.as_deref(),
+            Some("import.demo@0.0.0-review")
+        );
+        assert!(args.allow_unsigned_development);
+        assert_eq!(
+            args.verification_report.as_deref(),
+            Some("verification-report.json")
+        );
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_skill_draft_url_flags() {
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "draft-url",
+            "https://raw.githubusercontent.com/example/skills/main/SKILL.md",
+            "--source-kind-hint",
+            "codex_skill_markdown",
+            "--actor",
+            "skill-ci",
+            "--reviewer",
+            "operator",
+            "--requested-by",
+            "skill-ci",
+            "--timeout-seconds",
+            "30",
+            "--write",
+        ])
+        .expect("skill draft-url flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::DraftUrl(args) = skills.command else {
+            panic!("expected skills draft-url command");
+        };
+        assert_eq!(
+            args.source_url,
+            "https://raw.githubusercontent.com/example/skills/main/SKILL.md"
+        );
+        assert_eq!(
+            args.source_kind_hint.as_deref(),
+            Some("codex_skill_markdown")
+        );
+        assert_eq!(args.actor, "skill-ci");
+        assert_eq!(args.reviewer, "operator");
+        assert_eq!(args.requested_by, "skill-ci");
+        assert_eq!(args.timeout_seconds, Some(30));
+        assert!(args.write);
+    }
+
+    #[test]
+    fn parses_skill_check_draft_flags() {
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "check-draft",
+            "docs/skill-intake/import-demo",
+            "--json",
+        ])
+        .expect("skill check-draft flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::CheckDraft(args) = skills.command else {
+            panic!("expected skills check-draft command");
+        };
+        assert_eq!(args.draft_dir, "docs/skill-intake/import-demo");
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_skill_build_draft_flags() {
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "build-draft",
+            "docs/skill-intake/import-demo",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--cargo",
+            "cargo",
+            "--debug",
+            "--json",
+        ])
+        .expect("skill build-draft flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::BuildDraft(args) = skills.command else {
+            panic!("expected skills build-draft command");
+        };
+        assert_eq!(args.draft_dir, "docs/skill-intake/import-demo");
+        assert_eq!(args.target, "wasm32-unknown-unknown");
+        assert_eq!(args.cargo, "cargo");
+        assert!(args.debug);
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_skill_test_draft_flags() {
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "test-draft",
+            "docs/skill-intake/import-demo",
+            "--wasm-path",
+            "adapter.wasm",
+            "--package-path",
+            "import-demo.skill-package.json",
+            "--allow-unsigned-development",
+            "--report",
+            "sandbox-report.json",
+            "--json",
+        ])
+        .expect("skill test-draft flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::TestDraft(args) = skills.command else {
+            panic!("expected skills test-draft command");
+        };
+        assert_eq!(args.draft_dir, "docs/skill-intake/import-demo");
+        assert_eq!(args.wasm_path.as_deref(), Some("adapter.wasm"));
+        assert_eq!(
+            args.package_path.as_deref(),
+            Some("import-demo.skill-package.json")
+        );
+        assert!(args.allow_unsigned_development);
+        assert_eq!(args.report.as_deref(), Some("sandbox-report.json"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_skill_pack_draft_flags() {
+        let signing_key_hex = "11".repeat(32);
+        let cli = DawnCli::try_parse_from([
+            "dawn-node",
+            "skills",
+            "pack-draft",
+            "docs/skill-intake/import-demo",
+            "--wasm-path",
+            "adapter.wasm",
+            "--output",
+            "import-demo.skill-package.json",
+            "--signing-key-hex",
+            signing_key_hex.as_str(),
+            "--verification-report",
+            "verify.json",
+            "--json",
+        ])
+        .expect("skill pack-draft flags should parse");
+
+        let Some(Commands::Skills(skills)) = cli.command else {
+            panic!("expected skills command");
+        };
+        let SkillCommand::PackDraft(args) = skills.command else {
+            panic!("expected skills pack-draft command");
+        };
+        assert_eq!(args.draft_dir, "docs/skill-intake/import-demo");
+        assert_eq!(args.wasm_path.as_deref(), Some("adapter.wasm"));
+        assert_eq!(
+            args.output.as_deref(),
+            Some("import-demo.skill-package.json")
+        );
+        assert_eq!(
+            args.signing_key_hex.as_deref(),
+            Some(signing_key_hex.as_str())
+        );
+        assert_eq!(args.verification_report.as_deref(), Some("verify.json"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn checks_complete_skill_draft_dir() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-draft-check-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+
+        let report =
+            build_skill_draft_check_report(&draft_dir).expect("complete draft should check");
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(report.ready_for_packaging);
+        assert_eq!(report.skill_id.as_deref(), Some("import.demo"));
+        assert_eq!(report.version.as_deref(), Some("0.0.0-review"));
+        assert!(report.missing_files.is_empty());
+        assert!(report.mismatches.is_empty());
+        assert!(
+            report
+                .package_command
+                .as_deref()
+                .is_some_and(|command| command.contains("skills pack-draft"))
+        );
+        assert!(
+            report
+                .verify_command
+                .as_deref()
+                .is_some_and(|command| command.contains("skills test-draft"))
+        );
+    }
+
+    #[test]
+    fn reports_incomplete_skill_draft_dir() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-draft-missing-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        fs::create_dir_all(&root).expect("temp draft root should be created");
+
+        let report = build_skill_draft_check_report(&root).expect("incomplete draft should report");
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(!report.ready_for_packaging);
+        assert!(
+            report
+                .missing_files
+                .iter()
+                .any(|path| path == "contract.json")
+        );
+        assert!(
+            report
+                .missing_files
+                .iter()
+                .any(|path| path == "wasm-adapter/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn build_draft_rejects_dependency_sections() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-build-rejects-deps-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        fs::write(
+            draft_dir.join("wasm-adapter").join("Cargo.toml"),
+            r#"[package]
+name = "import-demo"
+version = "0.0.0-review"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = "1"
+"#,
+        )
+        .expect("cargo fixture should be overwritten");
+
+        let error = validate_skill_draft_safe_cargo_project(&draft_dir)
+            .expect_err("dependencies should be rejected")
+            .to_string();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(error.contains("[dependencies]"));
+    }
+
+    #[test]
+    fn inferred_draft_wasm_path_accepts_cargo_underscore_output() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-build-underscore-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        let artifact_dir = draft_dir
+            .join("wasm-adapter")
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join("release");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir should be created");
+        let underscore = artifact_dir.join("import_demo.wasm");
+        fs::write(&underscore, b"wasm").expect("underscore artifact should write");
+
+        let inferred = inferred_skill_draft_wasm_path(&draft_dir, "import-demo");
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(inferred, underscore);
+    }
+
+    #[test]
+    fn pack_draft_requires_signature_unless_development_allowed() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-pack-requires-signing-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        let wasm_path = write_skill_draft_wasm_fixture(&draft_dir);
+
+        let args = SkillPackDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            output: Some(root.join("package.json").display().to_string()),
+            display_name: None,
+            description: None,
+            entry_function: "run_skill".to_string(),
+            capabilities: Vec::new(),
+            signing_key_hex: None,
+            issuer_did: None,
+            issued_at_unix_ms: None,
+            allow_unsigned_development: false,
+            verification_report: None,
+            json: false,
+        };
+
+        let error = build_skill_draft_package_report(&args)
+            .expect_err("normal pack-draft should require signing key")
+            .to_string();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(error.contains("requires --signing-key-hex"));
+    }
+
+    #[test]
+    fn packs_checked_skill_draft_unsigned_development_package() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-pack-draft-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        let wasm_path = write_skill_draft_wasm_fixture(&draft_dir);
+        let output_path = root.join("out").join("import-demo.skill-package.json");
+        let report_path = root.join("out").join("verify.json");
+
+        let args = SkillPackDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            output: Some(output_path.display().to_string()),
+            display_name: Some("Import Demo".to_string()),
+            description: None,
+            entry_function: "run_skill".to_string(),
+            capabilities: vec!["echo".to_string()],
+            signing_key_hex: None,
+            issuer_did: None,
+            issued_at_unix_ms: Some(123),
+            allow_unsigned_development: true,
+            verification_report: Some(report_path.display().to_string()),
+            json: false,
+        };
+
+        let report =
+            build_skill_draft_package_report(&args).expect("development draft should pack");
+        let package_text = fs::read_to_string(&output_path).expect("package should be written");
+        let package: Value = serde_json::from_str(&package_text).expect("package should be JSON");
+        let verification_text =
+            fs::read_to_string(&report_path).expect("verification report should be written");
+        let verification: Value =
+            serde_json::from_str(&verification_text).expect("verification report should be JSON");
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(report.skill_id, "import.demo");
+        assert_eq!(report.version, "0.0.0-review");
+        assert!(!report.signed);
+        assert_eq!(package["skill"]["skillId"], json!("import.demo"));
+        assert_eq!(package["skill"]["sourceKind"], json!("unsigned_package"));
+        assert_eq!(verification["skillId"], json!("import.demo"));
+        assert_eq!(
+            verification["preflight"]["adapterMetadataRequired"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn test_draft_reports_sandbox_matrix_for_development_package() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-test-draft-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        let wasm_path = write_skill_draft_wasm_fixture(&draft_dir);
+        let package_path = root.join("out").join("import-demo.skill-package.json");
+        let package_args = SkillPackDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            output: Some(package_path.display().to_string()),
+            display_name: Some("Import Demo".to_string()),
+            description: None,
+            entry_function: "run_skill".to_string(),
+            capabilities: vec!["echo".to_string()],
+            signing_key_hex: None,
+            issuer_did: None,
+            issued_at_unix_ms: Some(123),
+            allow_unsigned_development: true,
+            verification_report: None,
+            json: false,
+        };
+        build_skill_draft_package_report(&package_args).expect("development draft should pack");
+        let sandbox_args = SkillTestDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            package_path: Some(package_path.display().to_string()),
+            allow_unsigned_development: true,
+            report: None,
+            json: false,
+        };
+
+        let report =
+            build_skill_draft_sandbox_report(&sandbox_args).expect("sandbox report should build");
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(report.passed);
+        assert!(!report.activation_ready);
+        assert_eq!(report.failed_count, 0);
+        assert_eq!(report.manual_required_count, 1);
+        assert!(
+            report
+                .cases
+                .iter()
+                .any(|case| case.case_id == "metadata_exports" && case.status == "passed")
+        );
+        assert!(
+            report
+                .cases
+                .iter()
+                .any(|case| case.case_id == "package_integrity" && case.status == "passed")
+        );
+        assert!(
+            report
+                .cases
+                .iter()
+                .any(|case| case.case_id == "activation_approval"
+                    && case.status == "manual_required")
+        );
+    }
+
+    #[test]
+    fn install_draft_accepts_checked_development_evidence() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-install-draft-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        let wasm_path = write_skill_draft_wasm_fixture(&draft_dir);
+        let package_path = root.join("out").join("import-demo.skill-package.json");
+        let sandbox_report_path = draft_dir.join("sandbox-report.json");
+        let verification_report_path = draft_dir.join("verification-report.json");
+        let package_args = SkillPackDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            output: Some(package_path.display().to_string()),
+            display_name: Some("Import Demo".to_string()),
+            description: None,
+            entry_function: "run_skill".to_string(),
+            capabilities: vec!["echo".to_string()],
+            signing_key_hex: None,
+            issuer_did: None,
+            issued_at_unix_ms: Some(123),
+            allow_unsigned_development: true,
+            verification_report: None,
+            json: false,
+        };
+        build_skill_draft_package_report(&package_args).expect("development draft should pack");
+        let sandbox_args = SkillTestDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            package_path: Some(package_path.display().to_string()),
+            allow_unsigned_development: true,
+            report: None,
+            json: false,
+        };
+        let mut sandbox_report =
+            build_skill_draft_sandbox_report(&sandbox_args).expect("sandbox report should build");
+        write_skill_draft_sandbox_report(
+            &mut sandbox_report,
+            &sandbox_report_path.display().to_string(),
+        )
+        .expect("sandbox report should write");
+
+        let args = SkillInstallDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            package_path: Some(package_path.display().to_string()),
+            sandbox_report: Some(sandbox_report_path.display().to_string()),
+            gateway: None,
+            activate: false,
+            confirm_activation: None,
+            allow_unsigned_development: true,
+            verification_report: Some(verification_report_path.display().to_string()),
+            json: false,
+        };
+        let evidence = build_skill_draft_install_evidence_report(&args)
+            .expect("checked development evidence should pass");
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(evidence.skill_id, "import.demo");
+        assert_eq!(evidence.version, "0.0.0-review");
+        assert!(!evidence.signed);
+        assert!(!evidence.activation_requested);
+        assert!(!evidence.activation_confirmed);
+        assert_eq!(
+            evidence.verification.artifact_sha256,
+            evidence.artifact_sha256
+        );
+        assert!(
+            evidence
+                .sandbox_cases
+                .iter()
+                .any(|case| case.case_id == "activation_approval"
+                    && case.status == "manual_required")
+        );
+    }
+
+    #[test]
+    fn install_draft_requires_activation_confirmation() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-install-confirm-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        let wasm_path = write_skill_draft_wasm_fixture(&draft_dir);
+        let package_path = root.join("out").join("import-demo.skill-package.json");
+        let package_args = SkillPackDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            output: Some(package_path.display().to_string()),
+            display_name: Some("Import Demo".to_string()),
+            description: None,
+            entry_function: "run_skill".to_string(),
+            capabilities: vec!["echo".to_string()],
+            signing_key_hex: None,
+            issuer_did: None,
+            issued_at_unix_ms: Some(123),
+            allow_unsigned_development: true,
+            verification_report: None,
+            json: false,
+        };
+        build_skill_draft_package_report(&package_args).expect("development draft should pack");
+        let args = SkillInstallDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            package_path: Some(package_path.display().to_string()),
+            sandbox_report: Some(draft_dir.join("sandbox-report.json").display().to_string()),
+            gateway: None,
+            activate: true,
+            confirm_activation: None,
+            allow_unsigned_development: true,
+            verification_report: None,
+            json: false,
+        };
+        let error = build_skill_draft_install_evidence_report(&args)
+            .expect_err("activation should require explicit confirmation")
+            .to_string();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(error.contains("activation requires explicit confirmation"));
+        assert!(error.contains("import.demo@0.0.0-review"));
+    }
+
+    #[test]
+    fn install_draft_rejects_failed_sandbox_report() {
+        let root = env::temp_dir().join(format!(
+            "dawn-skill-install-failed-sandbox-{}-{}",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+        let draft_dir = root.join("docs").join("skill-intake").join("import-demo");
+        write_skill_draft_fixture(&draft_dir);
+        let wasm_path = write_skill_draft_wasm_fixture(&draft_dir);
+        let package_path = root.join("out").join("import-demo.skill-package.json");
+        let sandbox_report_path = draft_dir.join("sandbox-report.json");
+        let package_args = SkillPackDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            output: Some(package_path.display().to_string()),
+            display_name: Some("Import Demo".to_string()),
+            description: None,
+            entry_function: "run_skill".to_string(),
+            capabilities: vec!["echo".to_string()],
+            signing_key_hex: None,
+            issuer_did: None,
+            issued_at_unix_ms: Some(123),
+            allow_unsigned_development: true,
+            verification_report: None,
+            json: false,
+        };
+        build_skill_draft_package_report(&package_args).expect("development draft should pack");
+        let sandbox_args = SkillTestDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            wasm_path: Some(wasm_path.display().to_string()),
+            package_path: Some(package_path.display().to_string()),
+            allow_unsigned_development: true,
+            report: None,
+            json: false,
+        };
+        let sandbox_report =
+            build_skill_draft_sandbox_report(&sandbox_args).expect("sandbox report should build");
+        let mut value = serde_json::to_value(&sandbox_report).expect("report should serialize");
+        value["passed"] = json!(false);
+        value["failedCount"] = json!(1);
+        fs::write(
+            &sandbox_report_path,
+            serde_json::to_string_pretty(&value).expect("failed report should serialize"),
+        )
+        .expect("failed report should write");
+
+        let args = SkillInstallDraftArgs {
+            draft_dir: draft_dir.display().to_string(),
+            package_path: Some(package_path.display().to_string()),
+            sandbox_report: Some(sandbox_report_path.display().to_string()),
+            gateway: None,
+            activate: false,
+            confirm_activation: None,
+            allow_unsigned_development: true,
+            verification_report: None,
+            json: false,
+        };
+        let error = build_skill_draft_install_evidence_report(&args)
+            .expect_err("failed sandbox report should reject install")
+            .to_string();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(error.contains("sandbox report did not pass"));
+    }
+
+    #[test]
+    fn required_json_string_reports_missing_record_id() {
+        let value = json!({ "proposalId": "proposal-123" });
+        assert_eq!(
+            required_json_string(&value, &["proposalId"], "proposal")
+                .expect("proposal id should exist"),
+            "proposal-123"
+        );
+
+        let error = required_json_string(&json!({}), &["patchId"], "draft patch")
+            .expect_err("missing id should fail")
+            .to_string();
+        assert!(error.contains("draft patch response did not include patchId"));
+    }
+
+    fn write_skill_draft_fixture(draft_dir: &PathBuf) {
+        fs::create_dir_all(draft_dir.join("wasm-adapter").join("src"))
+            .expect("fixture dirs should be created");
+        let source_sha256 = "ab".repeat(32);
+        let evidence_base = "docs/skill-intake/import-demo";
+        fs::write(
+            draft_dir.join("contract.json"),
+            serde_json::to_string_pretty(&json!({
+                "kind": "dawn_skill_contract_draft",
+                "suggestedSkillId": "import.demo",
+                "source": {
+                    "kind": "codex_skill_markdown",
+                    "url": "https://example.com/SKILL.md",
+                    "sha256": source_sha256
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["instruction"],
+                    "properties": {
+                        "instruction": {
+                            "type": "string",
+                            "minLength": 1
+                        }
+                    }
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "required": ["status", "summary"],
+                    "properties": {
+                        "status": { "type": "string" },
+                        "summary": { "type": "string" }
+                    }
+                },
+                "capabilities": {
+                    "requested": [],
+                    "mustBeReviewedBeforeActivation": true,
+                    "forbiddenDuringDraft": [
+                        "execute fetched source code",
+                        "access credentials"
+                    ]
+                }
+            }))
+            .expect("contract fixture should serialize"),
+        )
+        .expect("contract fixture should write");
+        fs::write(
+            draft_dir.join("preflight-checklist.json"),
+            serde_json::to_string_pretty(&json!({
+                "kind": "dawn_skill_intake_preflight_checklist",
+                "suggestedSkillId": "import.demo",
+                "version": "0.0.0-review",
+                "source": {
+                    "kind": "codex_skill_markdown",
+                    "url": "https://example.com/SKILL.md",
+                    "sha256": source_sha256
+                },
+                "evidenceFiles": {
+                    "contract": format!("{evidence_base}/contract.json"),
+                    "sandboxTests": format!("{evidence_base}/sandbox-tests.md"),
+                    "packageManifest": format!("{evidence_base}/package-manifest.json"),
+                    "wasmAdapterReadme": format!("{evidence_base}/wasm-adapter/README.md"),
+                    "wasmAdapterCargoToml": format!("{evidence_base}/wasm-adapter/Cargo.toml"),
+                    "wasmAdapterLibRs": format!("{evidence_base}/wasm-adapter/src/lib.rs")
+                },
+                "gates": [
+                    { "id": "source_hash" },
+                    { "id": "contract_schema" },
+                    { "id": "sandbox_cases" },
+                    { "id": "metadata_abi" },
+                    { "id": "package_integrity" },
+                    { "id": "activation_approval" }
+                ],
+                "runtimePolicy": {
+                    "fetchedCodeExecution": "forbidden",
+                    "globalDependencyInstall": "forbidden"
+                }
+            }))
+            .expect("preflight fixture should serialize"),
+        )
+        .expect("preflight fixture should write");
+        fs::write(
+            draft_dir.join("package-manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "kind": "dawn_skill_package_manifest_draft",
+                "suggestedSkillId": "import.demo",
+                "version": "0.0.0-review",
+                "source": {
+                    "kind": "codex_skill_markdown",
+                    "url": "https://example.com/SKILL.md",
+                    "sha256": source_sha256
+                }
+            }))
+            .expect("package manifest fixture should serialize"),
+        )
+        .expect("package manifest fixture should write");
+        fs::write(draft_dir.join("sandbox-tests.md"), "# Sandbox\n")
+            .expect("sandbox fixture should write");
+        fs::write(draft_dir.join("wasm-adapter").join("README.md"), "# Wasm\n")
+            .expect("readme fixture should write");
+        fs::write(
+            draft_dir.join("wasm-adapter").join("Cargo.toml"),
+            r#"[package]
+name = "import-demo"
+version = "0.0.0-review"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+"#,
+        )
+        .expect("cargo fixture should write");
+        fs::write(
+            draft_dir.join("wasm-adapter").join("src").join("lib.rs"),
+            r#"const ABI: &str = "dawn.skill.intake.adapter.metadata.v1";
+const NOTE: &str = "fetched source code is not executed";
+pub extern "C" fn run_skill() {}
+pub extern "C" fn dawn_adapter_metadata_ptr() -> *const u8 { ABI.as_ptr() }
+pub extern "C" fn dawn_adapter_metadata_len() -> usize { ABI.len() }
+pub extern "C" fn dawn_adapter_metadata_version() -> u32 { 1 }
+"#,
+        )
+        .expect("lib fixture should write");
+    }
+
+    fn write_skill_draft_wasm_fixture(draft_dir: &PathBuf) -> PathBuf {
+        let wasm_path = draft_dir
+            .join("wasm-adapter")
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join("import-demo.wasm");
+        let parent = wasm_path
+            .parent()
+            .expect("wasm fixture should have a parent directory");
+        fs::create_dir_all(parent).expect("wasm fixture dir should be created");
+        fs::write(
+            &wasm_path,
+            minimal_wasm_with_exports(&[
+                "run_skill",
+                "dawn_adapter_metadata_ptr",
+                "dawn_adapter_metadata_len",
+                "dawn_adapter_metadata_version",
+            ]),
+        )
+        .expect("wasm fixture should write");
+        wasm_path
+    }
+
+    #[test]
+    fn builds_unsigned_local_wasm_skill_package() {
+        let wasm_bytes = b"\0asm\x01\0\0\0";
+        let package = build_local_wasm_skill_package(
+            "demo-skill",
+            "0.1.0",
+            Some("Demo Skill"),
+            Some("local package"),
+            "run_skill",
+            vec!["echo".to_string()],
+            &PathBuf::from("demo.wasm"),
+            wasm_bytes,
+            None,
+            None,
+            Some(123),
+        )
+        .expect("unsigned package should build");
+
+        assert_eq!(package.skill.skill_id, "demo-skill");
+        assert_eq!(package.skill.version, "0.1.0");
+        assert_eq!(package.skill.source_kind, "unsigned_package");
+        assert_eq!(package.skill.issuer_did, None);
+        assert!(package.envelope.is_none());
+        assert_eq!(
+            package.skill.artifact_sha256,
+            hex::encode(sha2::Sha256::digest(wasm_bytes))
+        );
+        assert_eq!(
+            package.wasm_base64,
+            base64::engine::general_purpose::STANDARD.encode(wasm_bytes)
+        );
+    }
+
+    #[test]
+    fn builds_signed_local_wasm_skill_package_with_verifiable_envelope() {
+        let wasm_bytes = b"\0asm\x01\0\0\0";
+        let signing_key_hex = "11".repeat(32);
+        let package = build_local_wasm_skill_package(
+            "signed-demo",
+            "1.0.0",
+            Some("Signed Demo"),
+            None,
+            "run_skill",
+            vec!["echo".to_string(), "notify".to_string()],
+            &PathBuf::from("signed-demo.wasm"),
+            wasm_bytes,
+            Some(&signing_key_hex),
+            None,
+            Some(456),
+        )
+        .expect("signed package should build");
+
+        let envelope = package
+            .envelope
+            .as_ref()
+            .expect("signed package should include envelope");
+        let public_key_hex = package
+            .skill
+            .issuer_did
+            .as_deref()
+            .expect("issuer DID should be recorded")
+            .strip_prefix("did:dawn:skill-publisher:")
+            .expect("issuer DID should use skill publisher prefix");
+        validate_skill_publisher_issuer_did(envelope.document.issuer_did.as_str(), public_key_hex)
+            .expect("issuer DID should match public key");
+        assert_eq!(
+            envelope.document.issuer_did,
+            skill_publisher_issuer_did_from_public_key_hex(public_key_hex)
+        );
+        assert_eq!(package.skill.source_kind, "signed_publisher");
+        assert_eq!(
+            package.skill.signature_hex,
+            Some(envelope.signature_hex.clone())
+        );
+        assert_eq!(envelope.document.issued_at_unix_ms, 456);
+
+        let public_key_bytes: [u8; 32] = hex::decode(public_key_hex)
+            .expect("public key hex should decode")
+            .try_into()
+            .expect("public key should be 32 bytes");
+        let verifying_key =
+            VerifyingKey::from_bytes(&public_key_bytes).expect("public key should verify");
+        let signature_bytes: [u8; 64] = hex::decode(&envelope.signature_hex)
+            .expect("signature hex should decode")
+            .try_into()
+            .expect("signature should be 64 bytes");
+        let signature = Signature::from_bytes(&signature_bytes);
+        let payload =
+            serde_json::to_vec(&envelope.document).expect("document should serialize for signing");
+        verifying_key
+            .verify(&payload, &signature)
+            .expect("signature should verify");
+        assert_eq!(
+            package.skill.document_hash,
+            Some(hex::encode(sha2::Sha256::digest(payload)))
+        );
+    }
+
+    #[test]
+    fn verifies_signed_local_skill_package_with_preflight_metadata_exports() {
+        let wasm_bytes = minimal_wasm_with_exports(&[
+            "run_skill",
+            "dawn_adapter_metadata_ptr",
+            "dawn_adapter_metadata_len",
+            "dawn_adapter_metadata_version",
+        ]);
+        let package = build_local_wasm_skill_package(
+            "verified-demo",
+            "1.0.0",
+            Some("Verified Demo"),
+            Some("signed package"),
+            "run_skill",
+            vec!["echo".to_string()],
+            &PathBuf::from("verified-demo.wasm"),
+            &wasm_bytes,
+            Some(&"11".repeat(32)),
+            None,
+            Some(789),
+        )
+        .expect("signed package should build");
+        let preflight = SkillPackPreflightChecklist {
+            path: "preflight-checklist.json".to_string(),
+            document: json!({
+                "kind": "dawn_skill_intake_preflight_checklist",
+                "suggestedSkillId": "verified-demo",
+                "gates": [
+                    { "id": "metadata_abi", "status": "pending" }
+                ]
+            }),
+        };
+
+        let verification = verify_local_skill_package(
+            &package,
+            "verified-demo.skill-package.json",
+            Some(&preflight),
+            false,
+            true,
+        )
+        .expect("signed package should verify");
+
+        assert!(verification.signed);
+        assert_eq!(verification.skill_id, "verified-demo");
+        assert_eq!(verification.document_hash, package.skill.document_hash);
+        assert!(verification.preflight.adapter_metadata_required);
+        assert_eq!(
+            verification.preflight.checked_exports,
+            DAWN_ADAPTER_METADATA_EXPORTS
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rejects_local_skill_package_with_artifact_hash_mismatch() {
+        let wasm_bytes = minimal_wasm_with_exports(&["run_skill"]);
+        let mut package = build_local_wasm_skill_package(
+            "hash-demo",
+            "1.0.0",
+            None,
+            None,
+            "run_skill",
+            vec![],
+            &PathBuf::from("hash-demo.wasm"),
+            &wasm_bytes,
+            None,
+            None,
+            Some(123),
+        )
+        .expect("package should build");
+        package.skill.artifact_sha256 = "00".repeat(32);
+
+        let error = verify_local_skill_package(
+            &package,
+            "hash-demo.skill-package.json",
+            None,
+            false,
+            false,
+        )
+        .expect_err("mismatched artifact hash should fail")
+        .to_string();
+
+        assert!(error.contains("artifact SHA-256 mismatch"));
+    }
+
+    #[test]
+    fn writes_local_skill_package_verification_report() {
+        let wasm_bytes = minimal_wasm_with_exports(&["run_skill"]);
+        let package = build_local_wasm_skill_package(
+            "report-demo",
+            "1.0.0",
+            Some("Report Demo"),
+            None,
+            "run_skill",
+            vec![],
+            &PathBuf::from("report-demo.wasm"),
+            &wasm_bytes,
+            None,
+            None,
+            Some(123),
+        )
+        .expect("package should build");
+        let verification = verify_local_skill_package(
+            &package,
+            "report-demo.skill-package.json",
+            None,
+            false,
+            false,
+        )
+        .expect("package should verify");
+        let report_path = env::temp_dir().join(format!(
+            "dawn-skill-verification-report-{}-{}.json",
+            std::process::id(),
+            current_unix_timestamp_ms()
+        ));
+
+        let written_path = write_local_skill_package_verification_report(
+            &verification,
+            Some(&report_path.to_string_lossy()),
+        )
+        .expect("verification report should write")
+        .expect("report path should be returned");
+        let report_text = fs::read_to_string(&report_path).expect("report should be readable");
+        let report: Value = serde_json::from_str(&report_text).expect("report should be JSON");
+        let _ = fs::remove_file(&report_path);
+
+        assert_eq!(written_path, report_path.display().to_string());
+        assert_eq!(report["skillId"], json!("report-demo"));
+        assert_eq!(
+            report["artifactSha256"],
+            json!(package.skill.artifact_sha256)
+        );
+        assert_eq!(report["preflight"]["adapterMetadataRequired"], json!(false));
+    }
+
+    #[test]
+    fn validates_remote_skill_package_urls_are_http_only() {
+        assert_eq!(
+            validate_skill_package_http_url("https://example.com/skill.json")
+                .expect("https package URL should be accepted"),
+            "https://example.com/skill.json"
+        );
+        assert_eq!(
+            validate_skill_package_http_url("http://127.0.0.1:8080/skill.json")
+                .expect("http package URL should be accepted"),
+            "http://127.0.0.1:8080/skill.json"
+        );
+        let error = validate_skill_package_http_url("file:///tmp/skill.json")
+            .expect_err("file package URL should be rejected")
+            .to_string();
+        assert!(error.contains("must use http or https"));
+    }
+
+    #[test]
+    fn extracts_wasm_export_names_for_adapter_metadata() {
+        let wasm = minimal_wasm_with_exports(&[
+            "run_skill",
+            "dawn_adapter_metadata_ptr",
+            "dawn_adapter_metadata_len",
+            "dawn_adapter_metadata_version",
+        ]);
+
+        let exports = extract_wasm_export_names(&wasm).expect("exports should parse");
+
+        assert!(exports.contains("run_skill"));
+        for required in DAWN_ADAPTER_METADATA_EXPORTS {
+            assert!(exports.contains(required));
+        }
+    }
+
+    #[test]
+    fn pack_preflight_requires_adapter_metadata_exports() {
+        let preflight = SkillPackPreflightChecklist {
+            path: "preflight-checklist.json".to_string(),
+            document: json!({
+                "kind": "dawn_skill_intake_preflight_checklist",
+                "suggestedSkillId": "demo-skill",
+                "gates": [
+                    { "id": "metadata_abi", "status": "pending" }
+                ]
+            }),
+        };
+        let legacy_wasm = minimal_wasm_with_exports(&["run_skill"]);
+        let missing = validate_wasm_pack_preflight(
+            &legacy_wasm,
+            "run_skill",
+            false,
+            Some(&preflight),
+            "demo-skill",
+        );
+        assert!(missing.is_err());
+
+        let metadata_wasm = minimal_wasm_with_exports(&[
+            "run_skill",
+            "dawn_adapter_metadata_ptr",
+            "dawn_adapter_metadata_len",
+            "dawn_adapter_metadata_version",
+        ]);
+        let summary = validate_wasm_pack_preflight(
+            &metadata_wasm,
+            "run_skill",
+            false,
+            Some(&preflight),
+            "demo-skill",
+        )
+        .expect("metadata exports should satisfy preflight");
+
+        assert!(summary.adapter_metadata_required);
+        assert_eq!(
+            summary.checked_exports,
+            DAWN_ADAPTER_METADATA_EXPORTS
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            summary.preflight_path.as_deref(),
+            Some("preflight-checklist.json")
+        );
+    }
+
+    #[test]
+    fn pack_preflight_requires_entry_function_export() {
+        let wasm = minimal_wasm_with_exports(&["run_skill"]);
+        let error = validate_wasm_pack_preflight(&wasm, "missing_entry", false, None, "demo-skill")
+            .expect_err("missing entry function export should fail")
+            .to_string();
+
+        assert!(error.contains("entry function export `missing_entry`"));
+    }
+
+    fn minimal_wasm_with_exports(exports: &[&str]) -> Vec<u8> {
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+
+        push_wasm_section(&mut module, 1, vec![1, 0x60, 0, 0]);
+
+        let mut function_section = Vec::new();
+        push_wasm_u32(&mut function_section, exports.len() as u32);
+        for _ in exports {
+            push_wasm_u32(&mut function_section, 0);
+        }
+        push_wasm_section(&mut module, 3, function_section);
+
+        let mut export_section = Vec::new();
+        push_wasm_u32(&mut export_section, exports.len() as u32);
+        for (index, export) in exports.iter().enumerate() {
+            push_wasm_u32(&mut export_section, export.len() as u32);
+            export_section.extend_from_slice(export.as_bytes());
+            export_section.push(0);
+            push_wasm_u32(&mut export_section, index as u32);
+        }
+        push_wasm_section(&mut module, 7, export_section);
+
+        let mut code_section = Vec::new();
+        push_wasm_u32(&mut code_section, exports.len() as u32);
+        for _ in exports {
+            push_wasm_u32(&mut code_section, 2);
+            code_section.push(0);
+            code_section.push(0x0b);
+        }
+        push_wasm_section(&mut module, 10, code_section);
+
+        module
+    }
+
+    fn push_wasm_section(module: &mut Vec<u8>, section_id: u8, payload: Vec<u8>) {
+        module.push(section_id);
+        push_wasm_u32(module, payload.len() as u32);
+        module.extend(payload);
+    }
+
+    fn push_wasm_u32(bytes: &mut Vec<u8>, mut value: u32) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
     }
 
     #[test]
